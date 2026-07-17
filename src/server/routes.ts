@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
 import { expandTilde } from '../config.js';
 import { checkoutExistingBranch, scanRepos } from '../git/scan.js';
+import { diffFile, diffSummary, type DiffMode } from '../git/diff.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
@@ -195,6 +196,49 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return repos;
     } catch {
       return ctx.store.listRepos();
+    }
+  });
+
+  // Only paths already known to the repo store may be diffed — never run git
+  // against an arbitrary request-supplied directory.
+  const knownRepoPath = (repo: string | undefined): string | undefined => {
+    if (!repo || repo.length > MAX_PATH_LENGTH || !ctx.store) return undefined;
+    const repos = ctx.store.listRepos();
+    if (repos.some((item) => item.id === repo)) return repo;
+    return repos.some((item) => item.worktrees?.some((worktree) => worktree.path === repo))
+      ? repo
+      : undefined;
+  };
+
+  const parseDiffMode = (mode: string | undefined): DiffMode | undefined =>
+    mode === undefined || mode === 'uncommitted' ? 'uncommitted' : mode === 'branch' ? 'branch' : undefined;
+
+  app.get('/api/repos/diff', async (req, reply) => {
+    const { repo, mode } = req.query as { repo?: string; mode?: string };
+    const repoPath = knownRepoPath(repo);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    const diffMode = parseDiffMode(mode);
+    if (!diffMode) return reply.code(400).send({ error: 'mode must be "uncommitted" or "branch"' });
+    try {
+      return await diffSummary(repoPath, diffMode);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/repos/diff/file', async (req, reply) => {
+    const { repo, mode, path: filePath } = req.query as { repo?: string; mode?: string; path?: string };
+    const repoPath = knownRepoPath(repo);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    const diffMode = parseDiffMode(mode);
+    if (!diffMode) return reply.code(400).send({ error: 'mode must be "uncommitted" or "branch"' });
+    if (typeof filePath !== 'string' || filePath === '' || filePath.length > MAX_PATH_LENGTH) {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    try {
+      return await diffFile(repoPath, filePath, diffMode);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 

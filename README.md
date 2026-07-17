@@ -2,7 +2,7 @@
 
 **A local-first macOS control panel for Claude Code and Codex CLI sessions.**
 
-AgentDeck gives you one dashboard for starting agents, discovering agents that are already running, opening managed terminal sessions, tracking status, focusing external terminal tabs, sending follow-up messages, and spotting risky concurrent work across repositories.
+AgentDeck gives you one dashboard for starting agents, discovering agents that are already running, opening managed terminal sessions, tracking status, reviewing code changes as they land, focusing external terminal tabs, sending follow-up messages, and spotting risky concurrent work across repositories.
 
 - Runs locally and binds only to `127.0.0.1`
 - Supports Claude Code and Codex CLI
@@ -15,9 +15,21 @@ AgentDeck gives you one dashboard for starting agents, discovering agents that a
 
 ### Live agent dashboard
 
-The dashboard groups sessions by repository and shows agent type, branch, task, status, origin, activity, coordination events, and conflicts.
+The dashboard groups sessions by repository and shows agent type, branch, task, status, origin, activity, coordination events, conflicts, and expandable live code changes.
 
 ![AgentDeck dashboard with fictional example sessions](docs/screenshots/dashboard.jpg)
+
+### Review code changes
+
+Expand a repository or session to inspect staged, unstaged, untracked, and branch changes without leaving AgentDeck.
+
+![AgentDeck code changes viewer with a fictional repository diff](docs/screenshots/code-changes.jpg)
+
+### Inspect and message an external session
+
+Open an external session to see its repository, branch, process, TTY, terminal owner, conversation history, focus action, and prompt controls.
+
+![AgentDeck external session details with fictional conversation data](docs/screenshots/agent-details.jpg)
 
 ### Launch an agent
 
@@ -35,6 +47,7 @@ All screenshot data is fictional.
 - Focus a mapped Terminal.app, iTerm2, or VS Code integrated terminal from the dashboard.
 - Send prompts or follow-up messages to supported managed and external sessions.
 - Track whether an agent is starting, working, waiting for input, idle, completed, or gone.
+- Watch staged, unstaged, and untracked changes land live, or compare the current branch with its base branch.
 - Filter and group sessions by repository, agent, status, or origin.
 - Label sessions so long-running work is easier to identify.
 - Track tasks, file claims, blockers, progress, and completion through a repository-local coordination bus.
@@ -50,6 +63,7 @@ All screenshot data is fictional.
 | Repository scanner | Scans one directory level for Git repositories and linked worktrees, including branch and dirty-tree information. |
 | Safe branch selection | Can check out an existing local branch before launch, but refuses to switch branches while the working tree is dirty. |
 | Live dashboard | WebSocket updates, repository grouping, search, filters, editable labels, origin badges, activity times, and status-source tooltips. |
+| Code changes | Shows per-file status and line counts for uncommitted work or committed branch changes, with expandable colored diffs that refresh every five seconds. |
 | Terminal focus | Maps TTYs to Terminal.app, iTerm2, and connected VS Code terminals and can bring the exact terminal to the foreground. |
 | Agent status | Combines hook events, managed terminal output, process liveness, and sustained CPU activity using `hook > output > CPU` precedence. |
 | Hooks | Claude Code hooks report prompts, tool usage, edits, notifications, starts, and stops. Codex notify reports completed turns. |
@@ -145,7 +159,7 @@ AgentDeck continues running when Automation permission is unavailable.
 
 ### 8. Connect VS Code integrated terminals
 
-Click **Install VS Code helper**, then reload each open VS Code window once. The bundled local extension reports terminal shell process IDs to AgentDeck so prompts and focus actions reach the exact split terminal. It connects only to AgentDeck on loopback.
+Click **Install VS Code helper**, then reload each open VS Code window once. The bundled local extension reports terminal shell process IDs to AgentDeck so prompts and focus actions reach the exact split terminal. It connects only to AgentDeck on loopback. When connected, the header shows **VS Code connected (N)**, where `N` is the number of mapped integrated terminals.
 
 ### 9. Install hooks for richer status and messaging
 
@@ -153,7 +167,8 @@ From the dashboard:
 
 1. Open a session in the target repository (or select it with the repository filter).
 2. Click **Install hooks**.
-3. Run a turn in the agent so AgentDeck can associate the hook identity with the discovered session.
+3. Restart any Claude Code or Codex sessions that were already running when the hooks were installed.
+4. Run a turn in the agent so AgentDeck can associate the hook identity with the discovered session.
 
 The dashboard installer adds repository-level Claude hooks and a user-level Codex notify command. Existing hook commands are retained, timestamped backups are created, and an existing Codex notify command is chained.
 
@@ -226,6 +241,20 @@ Terminal.app and iTerm2 sessions use macOS Automation. VS Code integrated termin
 - Press `/` to focus the search box.
 - Press `1` through `9` to open the corresponding visible session.
 
+## Review Code Changes
+
+AgentDeck can show repository changes without leaving the dashboard:
+
+- Open a session and select its **Changes (N)** tab. `N` is the number of files with uncommitted changes. Managed sessions use **Terminal** as their other tab, while external sessions use **Overview**. The managed terminal stays connected when you switch tabs.
+- When the dashboard is grouped by **Repo**, click **Changes** in a repository header to expand the viewer below that repository's session rows. You can keep multiple repository viewers open at once.
+
+The viewer has two modes:
+
+- **Uncommitted** combines staged, unstaged, and untracked working-tree changes.
+- **vs base branch** shows committed changes on the current branch since it diverged from its base. AgentDeck resolves the base from `origin/HEAD`, then falls back to `main` or `master`.
+
+Each file shows its Git status (`M`, `A`, `D`, `R`, or `?`) and added/deleted line counts. Click a file to expand its colored unified diff. Binary files are identified without rendering text, and very large file diffs are limited to the first 512 KB. The summary and any open file diffs refresh every five seconds so you can follow an agent's edits as they land.
+
 ## How to Start, Stop, and Restart Agents
 
 ### Start a managed agent
@@ -293,6 +322,8 @@ Managed sessions expose their terminal directly in AgentDeck; type into that ter
 
 Messages sent from the dashboard and supported agent replies appear in the session conversation history.
 
+Direct prompt delivery can work before hooks are installed when AgentDeck can script the owning terminal. Capturing agent replies and richer status events requires hooks; restart any CLI sessions that were already open when the hooks were installed.
+
 ## Coordination Bus
 
 Each observed repository can contain:
@@ -355,6 +386,7 @@ For concurrent work, prefer separate branches or Git worktrees. Automatic worktr
 
 - The HTTP and WebSocket server binds to `127.0.0.1` only.
 - Browser requests must come from the exact loopback origin serving AgentDeck; other localhost sites are rejected.
+- Code-change requests are limited to repositories already known to AgentDeck, and file paths are constrained to their repository.
 - The main database is stored at `~/.agentdeck/agentdeck.db` by default.
 - Database files are restricted to the current OS user, and managed-session prompts, arguments, and environment overrides are kept in memory rather than persisted.
 - Repository coordination files are stored under each repository's `.agents/` directory.
