@@ -7,7 +7,7 @@ import type { Repo } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
-async function git(cwd: string, args: string[]): Promise<string> {
+export async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     timeout: 10_000,

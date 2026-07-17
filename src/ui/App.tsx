@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, Repo, Session, SessionOrigin, SessionStatus } from '../types.js';
 import type { ServerFrame } from '../protocol.js';
+import { DiffPanel } from './components/DiffPanel.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { Terminal } from './components/Terminal.js';
 import {
@@ -77,6 +78,9 @@ export function App() {
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
   const [wsReady, setWsReady] = useState(false);
   const [filters, setFilters] = useState<SessionFilters>({});
+  const [detailTab, setDetailTab] = useState<'main' | 'changes'>('main');
+  const [changeCount, setChangeCount] = useState<number | null>(null);
+  const [expandedRepoChanges, setExpandedRepoChanges] = useState<Set<string>>(new Set());
   const [groupBy, setGroupBy] = useState<GroupBy>('repo');
   const [now, setNow] = useState(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
@@ -190,6 +194,11 @@ export function App() {
   const repoNames = useMemo(() => new Map(repos.map((repo) => [repo.id, repo.name])), [repos]);
 
   useEffect(() => {
+    setDetailTab('main');
+    setChangeCount(null);
+  }, [selectedId]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT';
@@ -258,6 +267,15 @@ export function App() {
     setFilters((current) => ({ ...current, [key]: value || undefined }));
   };
 
+  const toggleRepoChanges = (repoId: string) => {
+    setExpandedRepoChanges((current) => {
+      const next = new Set(current);
+      if (next.has(repoId)) next.delete(repoId);
+      else next.add(repoId);
+      return next;
+    });
+  };
+
   return (
     <div style={styles.shell}>
       <header style={styles.topbar}>
@@ -314,7 +332,16 @@ export function App() {
           <div style={styles.tableArea}>
             {groups.map((group) => (
               <section key={group.key} style={styles.group}>
-                <header style={styles.groupHeader}><span>{group.label}</span><span style={styles.groupCount}>{group.sessions.length}</span>{groupBy === 'repo' && conflicts.some((item) => item.repoId === group.key) && <span style={styles.conflictBadge}>⚠ {conflicts.filter((item) => item.repoId === group.key).length}</span>}</header>
+                <header style={styles.groupHeader}>
+                  <span>{group.label}</span>
+                  <span style={styles.groupCount}>{group.sessions.length}</span>
+                  {groupBy === 'repo' && conflicts.some((item) => item.repoId === group.key) && <span style={styles.conflictBadge}>⚠ {conflicts.filter((item) => item.repoId === group.key).length}</span>}
+                  {groupBy === 'repo' && group.key !== 'unassigned' && (
+                    <button onClick={() => toggleRepoChanges(group.key)} style={styles.groupChangesButton}>
+                      {expandedRepoChanges.has(group.key) ? '▾' : '▸'} Changes
+                    </button>
+                  )}
+                </header>
                 <div style={styles.tableHeader}>
                   <span>Name</span><span>Agent</span><span>Repository / branch</span><span>Task</span><span>Status</span><span>Origin</span><span>Activity</span><span>Started</span>
                 </div>
@@ -345,6 +372,11 @@ export function App() {
                     <span style={styles.muted}>{new Date(session.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                   </div>
                 ))}
+                {groupBy === 'repo' && expandedRepoChanges.has(group.key) && (
+                  <div style={styles.inlineChanges}>
+                    <DiffPanel key={group.key} repoPath={group.key} />
+                  </div>
+                )}
               </section>
             ))}
             {visibleSessions.length === 0 && <div style={styles.empty}>No sessions match these filters.</div>}
@@ -369,20 +401,33 @@ export function App() {
               <div><strong>{selected.name ?? `${selected.agent} session`}</strong><div style={styles.detailSub}>{selected.cwd}</div></div>
               <button aria-label="Close details" onClick={() => setSelectedId(null)} style={styles.dismiss}>×</button>
             </header>
+            {(selected.worktreePath ?? selected.repoId) && (
+              <div style={styles.detailTabs}>
+                <button
+                  onClick={() => setDetailTab('main')}
+                  style={{ ...styles.detailTab, ...(detailTab === 'main' ? styles.detailTabActive : {}) }}
+                >{selected.origin === 'managed' ? 'Terminal' : 'Overview'}</button>
+                <button
+                  onClick={() => setDetailTab('changes')}
+                  style={{ ...styles.detailTab, ...(detailTab === 'changes' ? styles.detailTabActive : {}) }}
+                >Changes{changeCount !== null ? ` (${changeCount})` : ''}</button>
+              </div>
+            )}
             {selected.origin === 'managed' ? (
               <>
                 <div style={styles.detailActions}>
                   <button onClick={() => void action(selected, 'stop')} style={styles.secondaryButton}>■ Stop</button>
                   <button onClick={() => void action(selected, 'restart')} style={styles.secondaryButton}>↻ Restart</button>
                 </div>
-                <div style={styles.terminalWrap}>
+                {/* keep the terminal mounted while the Changes tab is open so xterm state survives tab switches */}
+                <div style={{ ...styles.terminalWrap, ...(detailTab === 'changes' ? styles.hidden : {}) }}>
                   {wsReady && wsRef.current
                     ? <Terminal key={`${selected.id}-${selected.startedAt}`} ws={wsRef.current} sessionId={selected.id} />
                     : <div style={styles.empty}>Terminal reconnecting…</div>}
                 </div>
               </>
             ) : (
-              <div style={styles.metadataCard}>
+              <div style={{ ...styles.metadataCard, ...(detailTab === 'changes' ? styles.hidden : {}) }}>
                 <Metadata label="Agent" value={selected.agent} />
                 <Metadata label="Status" value={`${selected.status} (${selected.statusSource})`} />
                 <Metadata label="Repository" value={selected.repoId ? (repoNames.get(selected.repoId) ?? selected.repoId) : 'Not a git repository'} />
@@ -393,6 +438,13 @@ export function App() {
                 <button disabled={!selected.terminalRef} onClick={() => void action(selected, 'focus')} style={styles.launchButton}>Focus terminal</button>
                 <ConversationPanel key={selected.id} session={selected} />
               </div>
+            )}
+            {detailTab === 'changes' && (selected.worktreePath ?? selected.repoId) && (
+              <DiffPanel
+                key={selected.worktreePath ?? selected.repoId}
+                onCount={setChangeCount}
+                repoPath={selected.worktreePath ?? selected.repoId!}
+              />
             )}
           </aside>
         )}
@@ -575,6 +627,8 @@ const styles: Record<string, React.CSSProperties> = {
   groupHeader: { display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', background: '#131a22', borderBottom: '1px solid #242b35', color: '#e6edf3', fontWeight: 600 },
   groupCount: { borderRadius: 10, background: '#29313c', color: '#9da8b5', padding: '1px 7px', fontSize: 10 },
   conflictBadge: { borderRadius: 10, background: '#5a4319', color: '#e3b341', padding: '1px 7px', fontSize: 10 },
+  groupChangesButton: { marginLeft: 'auto', border: '1px solid #303844', background: '#171d25', color: '#c9d1d9', borderRadius: 5, padding: '3px 9px', cursor: 'pointer', font: 'inherit', fontSize: 11, fontWeight: 400 },
+  inlineChanges: { borderTop: '1px solid #242b35', maxHeight: '50vh', display: 'flex', flexDirection: 'column' },
   tableHeader: { display: 'grid', gridTemplateColumns: GRID, gap: 12, padding: '7px 12px', color: '#697586', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.06em', borderBottom: '1px solid #202731' },
   tableRow: { display: 'grid', gridTemplateColumns: GRID, gap: 12, alignItems: 'center', padding: '9px 12px', borderBottom: '1px solid #171d25', cursor: 'pointer' },
   selectedRow: { background: '#12243a', boxShadow: 'inset 3px 0 #58a6ff' },
@@ -594,6 +648,10 @@ const styles: Record<string, React.CSSProperties> = {
   detailHeader: { padding: 14, borderBottom: '1px solid #242b35', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
   detailSub: { color: '#697586', fontSize: 10, marginTop: 4, wordBreak: 'break-all' },
   detailActions: { padding: 8, borderBottom: '1px solid #242b35', display: 'flex', justifyContent: 'flex-end', gap: 6 },
+  detailTabs: { display: 'flex', gap: 2, padding: '6px 14px 0', borderBottom: '1px solid #242b35' },
+  detailTab: { border: '1px solid transparent', borderBottom: 0, background: 'transparent', color: '#8b949e', padding: '6px 12px', cursor: 'pointer', font: 'inherit', fontSize: 12, borderRadius: '6px 6px 0 0' },
+  detailTabActive: { background: '#111820', border: '1px solid #242b35', borderBottom: '1px solid #111820', color: '#e6edf3', marginBottom: -1 },
+  hidden: { display: 'none' },
   secondaryButton: { background: '#171d25', border: '1px solid #303844', color: '#c9d1d9', borderRadius: 5, padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 11 },
   terminalWrap: { flex: 1, minHeight: 0, padding: 8, background: '#090d12' },
   metadataCard: { margin: 16, padding: 16, border: '1px solid #242b35', borderRadius: 8, background: '#111820', display: 'flex', flexDirection: 'column', gap: 14 },
