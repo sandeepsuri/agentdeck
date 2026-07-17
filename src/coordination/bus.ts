@@ -25,6 +25,23 @@ export async function appendAgentMessage(repoPath: string, message: AgentMessage
   }
 }
 
+/**
+ * Dashboard → agent messages. Repo-scoped: delivered as context by the
+ * UserPromptSubmit hook to whichever hooked Claude session in this repo
+ * takes the next turn.
+ */
+export interface InboxMessage {
+  ts: string;
+  to: string;
+  text: string;
+}
+
+export async function appendInboxMessage(repoPath: string, message: InboxMessage): Promise<void> {
+  const dir = agentsDir(repoPath);
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.appendFile(path.join(dir, 'inbox.jsonl'), `${JSON.stringify(message)}\n`);
+}
+
 function isAgentMessage(value: unknown): value is AgentMessage {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;

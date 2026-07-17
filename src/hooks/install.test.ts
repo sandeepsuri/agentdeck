@@ -14,6 +14,7 @@ describe('hook config merging', () => {
     expect(JSON.stringify(parsed)).toContain('existing-hook');
     expect(parsed.hooks.Notification).toHaveLength(1);
     expect(parsed.hooks.PostToolUse).toHaveLength(1);
+    expect(parsed.hooks.UserPromptSubmit).toHaveLength(1);
     expect(parsed.untouched).toEqual({ yes: true });
     expect(removeClaudeSettings(installed)).not.toContain('agentdeck-hook');
     expect(removeClaudeSettings(installed)).toContain('existing-hook');

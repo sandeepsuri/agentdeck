@@ -18,7 +18,7 @@ export function mergeClaudeSettings(raw: string, command: string): string {
     if (!JSON.stringify(list).includes('agentdeck-hook')) list.push(hook(command, matcher));
     hooks[event] = list;
   };
-  add('Notification'); add('Stop'); add('PostToolUse', 'Edit|Write'); add('PreToolUse'); add('SessionStart');
+  add('Notification'); add('Stop'); add('PostToolUse', 'Edit|Write'); add('PreToolUse'); add('SessionStart'); add('UserPromptSubmit');
   settings.hooks = hooks;
   return `${JSON.stringify(settings, null, 2)}\n`;
 }

@@ -12,6 +12,29 @@ const input = payloadArg ?? fs.readFileSync(0, 'utf8');
 try {
   const payload = JSON.parse(input);
   const cwd = payload.cwd;
+  if (typeof cwd === 'string' && payload.hook_event_name === 'UserPromptSubmit') {
+    // Deliver queued dashboard messages as context for this turn.
+    const repo = execFileSync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    const inbox = path.join(repo, '.agents', 'inbox.jsonl');
+    if (fs.existsSync(inbox)) {
+      const texts = fs.readFileSync(inbox, 'utf8').split('\n').flatMap((line) => {
+        if (!line.trim()) return [];
+        try {
+          const entry = JSON.parse(line);
+          return typeof entry.text === 'string' ? [entry.text] : [];
+        } catch { return []; }
+      });
+      if (texts.length > 0) {
+        fs.writeFileSync(inbox, '');
+        console.log(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: `Messages sent by the user from the AgentDeck dashboard:\n${texts.map((t) => `- ${t}`).join('\n')}`,
+          },
+        }));
+      }
+    }
+  }
   if (typeof cwd === 'string') {
     let message;
     if (payload.type === 'agent-turn-complete') {

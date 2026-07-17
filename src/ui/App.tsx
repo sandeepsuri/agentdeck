@@ -362,6 +362,7 @@ export function App() {
                 <Metadata label="TTY" value={selected.tty ?? 'Unknown'} />
                 <Metadata label="Terminal" value={selected.terminalApp === 'iTerm2' ? `iTerm2 · tab ${selected.terminalRef?.tabId ?? '?'}` : selected.terminalApp === 'Terminal' ? `Terminal.app · tab ${selected.terminalRef?.tabId ?? '?'}` : 'Unknown (possibly an integrated terminal)'} />
                 <button disabled={!selected.terminalRef} onClick={() => void action(selected, 'focus')} style={styles.launchButton}>Focus terminal</button>
+                <SendBox key={selected.id} session={selected} />
               </div>
             )}
           </aside>
@@ -386,6 +387,63 @@ export function App() {
 
 function Metadata({ label, value }: { label: string; value: string }) {
   return <div style={styles.metadata}><span style={styles.metadataLabel}>{label}</span><span>{value}</span></div>;
+}
+
+function SendBox({ session }: { session: Session }) {
+  const [text, setText] = useState('');
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const scriptable = session.terminalApp === 'Terminal' || session.terminalApp === 'iTerm2';
+
+  const send = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const response = await fetch(`/api/sessions/${session.id}/send`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: trimmed }),
+      });
+      const body = await response.json() as { delivered?: string; error?: string };
+      if (!response.ok) {
+        setFeedback(body.error ?? 'Send failed.');
+      } else {
+        setText('');
+        setFeedback(body.delivered === 'typed'
+          ? `Typed into ${session.terminalApp}.`
+          : 'Queued — the agent sees it as context on its next turn (requires AgentDeck hooks in this repo).');
+      }
+    } catch {
+      setFeedback('Send failed.');
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={styles.sendBox}>
+      <textarea
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            void send();
+          }
+        }}
+        placeholder={scriptable
+          ? `Send a prompt — typed straight into ${session.terminalApp}`
+          : 'Send a message — delivered on the session’s next turn'}
+        rows={2}
+        style={styles.sendInput}
+        value={text}
+      />
+      <button disabled={busy || text.trim() === ''} onClick={() => void send()} style={styles.secondaryButton}>
+        {busy ? 'Sending…' : 'Send to session'}
+      </button>
+      {feedback && <div style={styles.sendFeedback}>{feedback}</div>}
+    </div>
+  );
 }
 
 const GRID = 'minmax(180px,1.35fr) 100px minmax(170px,1.15fr) 90px 125px 84px 92px 72px';
@@ -439,4 +497,7 @@ const styles: Record<string, React.CSSProperties> = {
   metadataCard: { margin: 16, padding: 16, border: '1px solid #242b35', borderRadius: 8, background: '#111820', display: 'flex', flexDirection: 'column', gap: 14 },
   metadata: { display: 'grid', gridTemplateColumns: '90px 1fr', gap: 10, alignItems: 'start' },
   metadataLabel: { color: '#697586', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.06em' },
+  sendBox: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid #242b35', paddingTop: 14 },
+  sendInput: { boxSizing: 'border-box', width: '100%', resize: 'vertical', background: '#0d1218', border: '1px solid #303844', color: '#c9d1d9', borderRadius: 5, padding: '7px 9px', font: 'inherit', fontSize: 12 },
+  sendFeedback: { color: '#8b949e', fontSize: 11, lineHeight: 1.4 },
 };

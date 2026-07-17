@@ -1,6 +1,6 @@
 import type { Session } from '../../types.js';
 import type { TerminalAdapter, TerminalTab } from './index.js';
-import { appRunning, numericId, osaRunner, type OsaRunner } from './osascript.js';
+import { appRunning, numericId, osaRunner, quoted, type OsaRunner } from './osascript.js';
 
 const TERMINAL_LIST = `
 set out to ""
@@ -24,11 +24,19 @@ tell application "Terminal"
   activate
 end tell`;
 
+const terminalSend = (wid: string, tabIdx: string, quotedText: string) => `
+tell application "Terminal"
+  do script "${quotedText}" in tab ${tabIdx} of (first window whose id is ${wid})
+end tell`;
+
 export class TerminalAppAdapter implements TerminalAdapter {
   readonly app = 'Terminal' as const;
   readonly verified = true;
 
-  constructor(private run: OsaRunner = osaRunner('Terminal')) {}
+  constructor(
+    private run: OsaRunner = osaRunner('Terminal'),
+    private submitDelayMs = 300,
+  ) {}
 
   async listTtys(): Promise<TerminalTab[]> {
     if (!await appRunning(this.run, 'Terminal')) return [];
@@ -47,5 +55,15 @@ export class TerminalAppAdapter implements TerminalAdapter {
       numericId(ref.windowId, 'Terminal window id'),
       numericId(ref.tabId, 'Terminal tab id'),
     ));
+  }
+
+  async sendText(ref: NonNullable<Session['terminalRef']>, text: string): Promise<void> {
+    const wid = numericId(ref.windowId, 'Terminal window id');
+    const tab = numericId(ref.tabId, 'Terminal tab id');
+    await this.run(terminalSend(wid, tab, quoted(text)));
+    // both agent TUIs debounce paste-then-submit; a follow-up bare newline
+    // guarantees the prompt is actually sent
+    await new Promise((resolve) => setTimeout(resolve, this.submitDelayMs));
+    await this.run(terminalSend(wid, tab, ''));
   }
 }

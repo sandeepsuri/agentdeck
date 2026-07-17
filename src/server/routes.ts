@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
 import { deriveConflicts } from '../conflicts/derive.js';
+import { appendInboxMessage } from '../coordination/bus.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 
@@ -137,6 +138,43 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return reply.code(400).send({ error: 'session is not restartable' });
     }
     return manager.restart(id);
+  });
+
+  app.post('/api/sessions/:id/send', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const body = req.body as { text?: unknown } | null;
+    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+
+    if (session.origin === 'managed') {
+      if (!manager.isLive(id)) return reply.code(400).send({ error: 'session is not running' });
+      manager.write(id, text);
+      // both agent TUIs debounce paste-then-submit
+      setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
+      return { delivered: 'typed' };
+    }
+
+    if (session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
+      try {
+        await ctx.terminals.sendText(session, text);
+        return { delivered: 'typed' };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return reply.code(error instanceof AutomationDeniedError ? 403 : 400).send({ error: message });
+      }
+    }
+
+    if (session.agent === 'claude') {
+      const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+      await appendInboxMessage(repoPath, { ts: new Date().toISOString(), to: 'claude', text });
+      return { delivered: 'queued' };
+    }
+
+    return reply.code(400).send({
+      error: 'This session runs in a terminal that cannot be scripted; only Claude sessions with AgentDeck hooks can receive queued messages.',
+    });
   });
 
   app.post('/api/sessions/:id/focus', async (req, reply) => {

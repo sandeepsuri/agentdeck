@@ -29,11 +29,21 @@ tell application "iTerm2"
   activate
 end tell`;
 
+const itermSend = (wid: string, tabIdx: string, sessId: string, quotedText: string, newline: boolean) => `
+tell application "iTerm2"
+  tell tab ${tabIdx} of (first window whose id is ${wid})
+    tell (first session whose id is "${sessId}") to write text "${quotedText}" newline ${newline ? 'YES' : 'NO'}
+  end tell
+end tell`;
+
 export class ITerm2Adapter implements TerminalAdapter {
   readonly app = 'iTerm2' as const;
   readonly verified = false;
 
-  constructor(private run: OsaRunner = osaRunner('iTerm2')) {}
+  constructor(
+    private run: OsaRunner = osaRunner('iTerm2'),
+    private submitDelayMs = 300,
+  ) {}
 
   async listTtys(): Promise<TerminalTab[]> {
     if (!await appRunning(this.run, 'iTerm2')) return [];
@@ -59,5 +69,17 @@ export class ITerm2Adapter implements TerminalAdapter {
       numericId(ref.tabId, 'iTerm2 tab id'),
       quoted(ref.sessionId),
     ));
+  }
+
+  async sendText(ref: NonNullable<Session['terminalRef']>, text: string): Promise<void> {
+    if (!ref.sessionId) throw new Error('Missing iTerm2 session id.');
+    const wid = numericId(ref.windowId, 'iTerm2 window id');
+    const tab = numericId(ref.tabId, 'iTerm2 tab id');
+    const sess = quoted(ref.sessionId);
+    await this.run(itermSend(wid, tab, sess, quoted(text), false));
+    // both agent TUIs debounce paste-then-submit; a follow-up bare newline
+    // guarantees the prompt is actually sent
+    await new Promise((resolve) => setTimeout(resolve, this.submitDelayMs));
+    await this.run(itermSend(wid, tab, sess, '', true));
   }
 }

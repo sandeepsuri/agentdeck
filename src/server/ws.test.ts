@@ -1,6 +1,9 @@
 // T4 protocol tests: WS bridge + REST routes against a fake backend.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import WebSocket from 'ws';
 import type { WebSocketServer } from 'ws';
 import type { LaunchSpec } from '../types.js';
@@ -159,6 +162,38 @@ describe('REST routes', () => {
 
     const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
     expect(missing.status).toBe(404);
+  });
+
+  it('POST /api/sessions/:id/send types into managed sessions and queues for unscriptable claude', async () => {
+    const { id } = await launchViaRest();
+    const send = (target: string, text: string) => fetch(`http://127.0.0.1:${port}/api/sessions/${target}/send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+
+    const typed = await send(id, 'run the tests');
+    expect(((await typed.json()) as { delivered: string }).delivered).toBe('typed');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(backend.written.get('1000')).toEqual(['run the tests', '\r']);
+
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-send-'));
+    const base = {
+      cwd: repoDir,
+      startedAt: '2026-07-17T00:00:00.000Z',
+      lastActivityAt: '2026-07-17T00:00:00.000Z',
+      status: 'idle',
+      statusSource: 'cpu_heuristic',
+      terminalApp: 'unknown',
+    } as const;
+    store.upsertSession({ ...base, id: 'ext-1-1', origin: 'external', agent: 'claude' });
+    const queued = await send('ext-1-1', 'hello from the deck');
+    expect(((await queued.json()) as { delivered: string }).delivered).toBe('queued');
+    expect(fs.readFileSync(path.join(repoDir, '.agents', 'inbox.jsonl'), 'utf8')).toContain('hello from the deck');
+
+    store.upsertSession({ ...base, id: 'ext-2-2', origin: 'external', agent: 'codex' });
+    expect((await send('ext-2-2', 'hi')).status).toBe(400);
+    expect((await send(id, '   ')).status).toBe(400);
   });
 
   it('restart respawns a live session with a fresh pid, same id', async () => {

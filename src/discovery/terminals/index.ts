@@ -13,6 +13,7 @@ export interface TerminalAdapter {
   readonly verified: boolean;
   listTtys(): Promise<TerminalTab[]>;
   focus(ref: NonNullable<Session['terminalRef']>): Promise<void>;
+  sendText(ref: NonNullable<Session['terminalRef']>, text: string): Promise<void>;
 }
 
 export class AutomationDeniedError extends Error {
@@ -71,12 +72,20 @@ export class TerminalRegistry {
   }
 
   async focus(session: Session): Promise<void> {
+    await this.adapterFor(session).focus(session.terminalRef!);
+  }
+
+  async sendText(session: Session, text: string): Promise<void> {
+    await this.adapterFor(session).sendText(session.terminalRef!, text);
+  }
+
+  private adapterFor(session: Session): TerminalAdapter {
     if (!session.terminalRef || !session.terminalApp || session.terminalApp === 'unknown') {
       throw new Error('No Terminal.app or iTerm2 tab is mapped to this tty.');
     }
     const adapter = this.adapters.find((candidate) => candidate.app === session.terminalApp);
     if (!adapter) throw new Error(`No adapter for ${session.terminalApp}.`);
-    await adapter.focus(session.terminalRef);
+    return adapter;
   }
 }
 
