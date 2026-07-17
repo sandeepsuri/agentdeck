@@ -12,6 +12,7 @@ export type ServerFrame =
   | { t: 'replay'; data: string }
   | { t: 'output'; data: string }
   | { t: 'session_update'; session: Session }
+  | { t: 'session_removed'; sessionId: string }
   | { t: 'agent_event'; event: AgentMessage };
 
 export function parseClientFrame(raw: string): ClientFrame | null {

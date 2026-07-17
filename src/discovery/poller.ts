@@ -20,6 +20,7 @@ export interface DiscoveryPollerOptions {
   store: Store;
   getManagedPids: () => ReadonlySet<number>;
   publish: (session: Session) => void;
+  remove: (sessionId: string) => void;
   intervalMs?: number;
   run?: CommandRunner;
   resolveGit?: (cwd: string) => Promise<GitResolution>;
@@ -139,14 +140,13 @@ export class DiscoveryPoller {
         this.saveAndPublish(session);
       }
 
+      // A closed terminal means the session is gone — remove its row so it
+      // disappears from the dashboard.
       for (const session of this.options.store.listSessions()) {
-        if (session.origin !== 'external' || session.status === 'exited' || seen.has(session.id)) continue;
-        const result = reduceStatus({ alive: false, now: Date.now() });
-        session.status = result.status;
-        session.statusSource = result.statusSource;
-        session.lastActivityAt = now;
+        if (session.origin !== 'external' || seen.has(session.id)) continue;
         this.hotSamples.delete(session.id);
-        this.saveAndPublish(session);
+        this.options.store.deleteSession(session.id);
+        this.options.remove(session.id);
       }
     } finally {
       this.polling = false;

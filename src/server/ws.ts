@@ -34,6 +34,13 @@ export function attachWs(server: HttpServer, manager: SessionManager, path = '/w
     for (const ws of wss.clients) send(ws, { t: 'session_update', session });
   });
 
+  manager.on('session_removed', (sessionId) => {
+    for (const [ws, sid] of viewing) {
+      if (sid === sessionId) viewing.delete(ws);
+    }
+    for (const ws of wss.clients) send(ws, { t: 'session_removed', sessionId });
+  });
+
   manager.on('agent_event', (event) => {
     for (const ws of wss.clients) send(ws, { t: 'agent_event', event });
   });

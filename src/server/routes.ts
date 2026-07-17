@@ -126,7 +126,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { id } = req.params as { id: string };
     if (!manager.getSession(id)) return reply.code(404).send({ error: 'no such session' });
     await manager.stop(id);
-    return manager.getSession(id);
+    return { ok: true }; // the session row is removed on exit
   });
 
   app.post('/api/sessions/:id/restart', async (req, reply) => {

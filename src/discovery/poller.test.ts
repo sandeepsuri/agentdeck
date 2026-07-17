@@ -6,9 +6,10 @@ import { DiscoveryPoller } from './poller.js';
 const PS_HOT = '100 1 ttys001 S+ 4.2 Thu Jul 16 17:39:00 2026 claude';
 
 describe('DiscoveryPoller', () => {
-  it('requires sustained CPU before working, preserves labels, and marks disappearance exited', async () => {
+  it('requires sustained CPU before working, preserves labels, and removes disappeared sessions', async () => {
     const store = new Store(':memory:');
     const updates: Session[] = [];
+    const removed: string[] = [];
     let psOutput = PS_HOT;
     const run = vi.fn(async (file: string) => {
       if (file === 'ps') return psOutput;
@@ -19,6 +20,7 @@ describe('DiscoveryPoller', () => {
       store,
       getManagedPids: () => new Set(),
       publish: (session) => updates.push(session),
+      remove: (sessionId) => removed.push(sessionId),
       run,
       resolveGit: async () => ({ repoId: '/tmp/repo', repoPath: '/tmp/repo', branch: 'main' }),
     });
@@ -36,12 +38,8 @@ describe('DiscoveryPoller', () => {
 
     psOutput = '';
     await poller.poll();
-    expect(store.getSession(id)).toMatchObject({
-      name: 'My external Claude',
-      status: 'exited',
-      statusSource: 'process_gone',
-    });
-    expect(updates.at(-1)?.status).toBe('exited');
+    expect(store.getSession(id)).toBeUndefined();
+    expect(removed).toEqual([id]);
     store.close();
   });
 });

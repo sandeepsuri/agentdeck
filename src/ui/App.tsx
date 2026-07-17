@@ -80,6 +80,11 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
 
+  const removeSession = useCallback((sessionId: string) => {
+    setSessions((current) => current.filter((item) => item.id !== sessionId));
+    setSelectedId((current) => (current === sessionId ? null : current));
+  }, []);
+
   const upsertSession = useCallback((session: Session) => {
     setSessions((current) => {
       const index = current.findIndex((item) => item.id === session.id);
@@ -146,6 +151,7 @@ export function App() {
       socket.addEventListener('message', (event) => {
         const frame = JSON.parse(String(event.data)) as ServerFrame;
         if (frame.t === 'session_update') { upsertSession(frame.session); void refreshConflicts(); }
+        if (frame.t === 'session_removed') { removeSession(frame.sessionId); void refreshConflicts(); }
         if (frame.t === 'agent_event') { setEvents((current) => [...current.slice(-49), frame.event]); void refreshConflicts(); }
       });
       socket.addEventListener('close', () => {
@@ -159,7 +165,7 @@ export function App() {
       clearTimeout(retry);
       socket?.close();
     };
-  }, [refresh, refreshConflicts, upsertSession]);
+  }, [refresh, refreshConflicts, removeSession, upsertSession]);
 
   const visibleSessions = useMemo(() => filterSessions(sessions, filters), [filters, sessions]);
   const groups = useMemo(
@@ -197,7 +203,8 @@ export function App() {
       setError(body.error ?? `${actionName} failed`);
       return;
     }
-    if (actionName !== 'focus') upsertSession(body);
+    // stop removes the session; the ws session_removed frame updates the list
+    if (actionName === 'restart') upsertSession(body);
   };
 
   const rename = async (session: Session, name: string) => {

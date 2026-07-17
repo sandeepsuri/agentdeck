@@ -16,13 +16,21 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
+  // Rows from a previous run are dead: managed sessions died with that
+  // server process, and anything already marked exited has no process either.
+  for (const session of store.listSessions()) {
+    if (session.origin === 'managed' || session.status === 'exited') {
+      store.deleteSession(session.id);
+    }
+  }
   const manager = new SessionManager(new PtyBackend(), store);
   const terminals = new TerminalRegistry([new TerminalAppAdapter(), new ITerm2Adapter()]);
   const coordination = new CoordinationService(store, manager);
   const discovery = new DiscoveryPoller({
     store, intervalMs: config.pollIntervalMs,
     getManagedPids: () => manager.managedPids(),
-    publish: (session) => manager.publishSessionUpdate(session), terminals,
+    publish: (session) => manager.publishSessionUpdate(session),
+    remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
   const app = buildApp({ config, manager, store, terminals, coordination });
   let wss: WebSocketServer | undefined;

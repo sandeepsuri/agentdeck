@@ -105,14 +105,15 @@ describe('SessionManager + PtyBackend', () => {
     await waitFor(() => manager.getBuffer(s.id).includes('FALLBACK_RAN'));
   });
 
-  it('stop() SIGTERMs, marks exited, persists', async () => {
+  it('stop() SIGTERMs, removes the row, and emits session_removed', async () => {
     const { manager, store } = makeManager();
+    const removed: string[] = [];
+    manager.on('session_removed', (id) => removed.push(id));
     const s = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
     await manager.stop(s.id);
     expect(manager.isLive(s.id)).toBe(false);
-    const row = store.getSession(s.id);
-    expect(row?.status).toBe('exited');
-    expect(row?.statusSource).toBe('process_gone');
+    expect(store.getSession(s.id)).toBeUndefined();
+    expect(removed).toContain(s.id);
   });
 
   it('stop() escalates to SIGKILL when SIGTERM is ignored', async () => {
@@ -120,7 +121,7 @@ describe('SessionManager + PtyBackend', () => {
     const s = await manager.launch(spec({ extraArgs: ['-c', 'trap "" TERM; echo T; sleep 60'] }));
     await waitFor(() => manager.getBuffer(s.id).includes('T')); // trap installed
     await manager.stop(s.id);
-    expect(store.getSession(s.id)?.status).toBe('exited');
+    expect(store.getSession(s.id)).toBeUndefined();
   }, 10000);
 
   it('restart() respawns from the stored launchSpec with a fresh pid, same row', async () => {
@@ -135,14 +136,16 @@ describe('SessionManager + PtyBackend', () => {
     await waitFor(() => manager.getBuffer(s.id).includes('run'));
   });
 
-  it('emits session_update on lifecycle changes', async () => {
+  it('emits session_update while alive and session_removed on exit', async () => {
     const { manager } = makeManager();
     const statuses: string[] = [];
+    const removed: string[] = [];
     manager.on('session_update', (sess) => statuses.push(sess.status));
+    manager.on('session_removed', (id) => removed.push(id));
     const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
-    await waitFor(() => statuses.includes('exited'));
+    await waitFor(() => removed.includes(s.id));
     expect(statuses[0]).toBe('starting');
-    expect(manager.getSession(s.id)?.status).toBe('exited');
+    expect(manager.getSession(s.id)).toBeUndefined();
   });
 });
 

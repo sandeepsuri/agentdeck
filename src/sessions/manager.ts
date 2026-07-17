@@ -30,6 +30,7 @@ export interface SessionManagerOptions {
 
 export interface SessionManagerEvents {
   session_update: [session: Session];
+  session_removed: [sessionId: string];
   output: [sessionId: string, data: string];
   agent_event: [event: AgentMessage];
 }
@@ -159,20 +160,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   private handleExit(sessionId: string, _exitCode: number): void {
     const live = this.live.get(sessionId);
-    const session = this.store.getSession(sessionId);
     if (live) {
       live.exited = true;
       if (live.promptTimer) clearTimeout(live.promptTimer);
       if (live.killTimer) clearTimeout(live.killTimer);
       this.live.delete(sessionId);
     }
-    if (session) {
-      const result = reduceStatus({ alive: false, now: Date.now() });
-      session.status = result.status;
-      session.statusSource = result.statusSource;
-      session.lastActivityAt = new Date().toISOString();
-      this.persist(session);
-    }
+    // An exited session has nothing left to show or act on — drop the row
+    // entirely so it disappears from the dashboard.
+    if (this.store.getSession(sessionId)) this.store.deleteSession(sessionId);
+    this.hookSignals.delete(sessionId);
+    this.emit('session_removed', sessionId);
   }
 
   /** Write raw input (keystrokes) to a live session. */
@@ -248,6 +246,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   publishSessionUpdate(session: Session): void {
     this.emit('session_update', session);
+  }
+
+  publishSessionRemoved(sessionId: string): void {
+    this.emit('session_removed', sessionId);
   }
 
   publishAgentEvent(event: AgentMessage): void {

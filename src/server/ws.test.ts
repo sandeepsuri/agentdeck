@@ -145,19 +145,28 @@ describe('REST routes', () => {
     expect(res.status).toBe(400);
   });
 
-  it('stop and restart endpoints drive the backend', async () => {
+  it('stop removes the session and broadcasts session_removed', async () => {
+    const c = await connect();
     const { id } = await launchViaRest();
     const stopRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
-    expect(((await stopRes.json()) as { status: string }).status).toBe('exited');
+    expect(await stopRes.json()).toEqual({ ok: true });
     expect(backend.killed.get('1000')).toEqual(['SIGTERM']);
 
+    const removedFrame = await c.waitFor('session_removed');
+    expect(removedFrame.sessionId).toBe(id);
+    const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
+    expect(list).toEqual([]);
+
+    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    expect(missing.status).toBe(404);
+  });
+
+  it('restart respawns a live session with a fresh pid, same id', async () => {
+    const { id } = await launchViaRest();
     const restartRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/restart`, { method: 'POST' });
     const restarted = (await restartRes.json()) as { id: string; pid: number };
     expect(restarted.id).toBe(id);
     expect(restarted.pid).toBe(1001); // fresh fake pid
-
-    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/nope/stop`, { method: 'POST' });
-    expect(missing.status).toBe(404);
   });
 
   it('PATCH /api/sessions/:id persists an inline label', async () => {
