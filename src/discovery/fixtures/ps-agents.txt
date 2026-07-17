@@ -1,0 +1,12 @@
+15591 15575 ??       S      0.1 Thu Jul 16 21:53:55 2026     /Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --user-data-dir=/Users/dev/Library/Application Support/Claude
+79600 75467 ??       S      0.0 Thu Jul 16 17:10:46 2026     /Users/dev/.vscode/extensions/anthropic.claude-code-2.1.140-darwin-arm64/resources/native-binary/claude --output-format stream-json --permission-prompt-tool stdio
+35570 33611 ttys008  S      0.0 Thu Jul 16 18:14:55 2026     /Applications/Codex.app/Contents/Resources/codex sandbox -c default_permissions="node_repl" -- /Applications/Codex.app/Contents/Resources/cua_node/bin/node --working-dir /Users/dev/projects/example-app
+35572 33611 ttys008  S      0.0 Thu Jul 16 18:14:55 2026     /Applications/Codex.app/Contents/Resources/codex app-server --listen stdio://
+ 5359 91789 ttys008  S      0.0 Thu Jul 16 18:00:32 2026     /Users/dev/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host
+91788 89257 ttys008  S+     0.0 Thu Jul 16 17:39:00 2026     node /Users/dev/.nvm/versions/node/v24.14.0/bin/codex
+91789 91788 ttys008  S+     0.2 Thu Jul 16 17:39:00 2026     /Users/dev/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
+48702 70153 ttys012  S+     0.0 Tue Jul  7 14:27:49 2026     claude
+91696 90140 ttys032  S+     0.0 Thu Jul 16 17:38:59 2026     node /Users/dev/.nvm/versions/node/v24.14.0/bin/codex
+91697 91696 ttys032  S+     0.1 Thu Jul 16 17:38:59 2026     /Users/dev/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
+91603 26555 ttys035  S+     0.0 Thu Jul 16 17:38:57 2026     node /Users/dev/.nvm/versions/node/v24.14.0/bin/codex
+91604 91603 ttys035  S+     0.1 Thu Jul 16 17:38:57 2026     /Users/dev/.nvm/versions/node/v24.14.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex
