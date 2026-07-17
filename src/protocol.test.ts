@@ -23,5 +23,11 @@ describe('VS Code protocol frames', () => {
     expect(parseClientFrame(JSON.stringify({
       t: 'vscode_register', windowId: 'x'.repeat(201), terminals: [],
     }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({ t: 'attach', sessionId: 'x'.repeat(201) }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({ t: 'input', data: 'x'.repeat(64 * 1024 + 1) }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({ t: 'resize', cols: 1001, rows: 40 }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'vscode_result', requestId: 'request-1', ok: false, error: 'x'.repeat(4097),
+    }))).toBeNull();
   });
 });

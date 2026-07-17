@@ -46,6 +46,10 @@ interface Live {
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private live = new Map<string, Live>();
+  // Restart data can include prompts, arguments, and environment secrets.
+  // Managed processes die with this server, so keeping it in memory is both
+  // sufficient for restart and safer than writing it to SQLite.
+  private launchSpecs = new Map<string, LaunchSpec>();
   private hookSignals = new Map<string, StatusSignal>();
   private opts: Required<Omit<SessionManagerOptions, 'readiness'>> & {
     readiness: Record<AgentType, RegExp>;
@@ -78,7 +82,6 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       status: 'starting',
       statusSource: 'output_heuristic',
       backend: 'pty',
-      launchSpec: spec,
     };
     if (spec.name !== undefined) session.name = spec.name;
     if (spec.branch !== undefined) session.branch = spec.branch;
@@ -87,7 +90,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       session.repoId = repo.id;
       session.branch = spec.branch ?? repo.currentBranch;
     }
-    await this.attachProcess(session, spec);
+    this.launchSpecs.set(session.id, spec);
+    try {
+      await this.attachProcess(session, spec);
+    } catch (error) {
+      this.launchSpecs.delete(session.id);
+      throw error;
+    }
     return this.getSession(session.id) ?? session;
   }
 
@@ -172,6 +181,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     // An exited session has nothing left to show or act on — drop the row
     // entirely so it disappears from the dashboard.
     if (this.store.getSession(sessionId)) this.store.deleteSession(sessionId);
+    this.launchSpecs.delete(sessionId);
     this.hookSignals.delete(sessionId);
     this.emit('session_removed', sessionId);
   }
@@ -211,10 +221,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     await exited;
   }
 
-  /** Stop (if live) and respawn from the stored launchSpec. Same session id. */
+  /** Stop (if live) and respawn from the in-memory launch spec. Same session id. */
   async restart(sessionId: string): Promise<Session> {
     const session = this.store.getSession(sessionId);
-    if (!session || session.origin !== 'managed' || !session.launchSpec) {
+    const launchSpec = this.launchSpecs.get(sessionId);
+    if (!session || session.origin !== 'managed' || !launchSpec) {
       throw new Error(`session ${sessionId} is not restartable`);
     }
     await this.stop(sessionId);
@@ -222,7 +233,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.statusSource = 'output_heuristic';
     session.startedAt = new Date().toISOString();
     session.lastActivityAt = session.startedAt;
-    await this.attachProcess(session, session.launchSpec);
+    this.launchSpecs.set(sessionId, launchSpec);
+    try {
+      await this.attachProcess(session, launchSpec);
+    } catch (error) {
+      this.launchSpecs.delete(sessionId);
+      throw error;
+    }
     return this.store.getSession(sessionId) ?? session;
   }
 

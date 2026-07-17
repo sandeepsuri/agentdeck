@@ -6,6 +6,9 @@ import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
 import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
+import { publicSession } from './security.js';
+
+const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
 export function attachWs(
   server: HttpServer,
@@ -18,8 +21,10 @@ export function attachWs(
   const wss = new WebSocketServer({
     server,
     path,
+    maxPayload: MAX_WS_PAYLOAD_BYTES,
+    perMessageDeflate: false,
     verifyClient: ({ origin, req }: { origin?: string; req: { headers: { host?: string } } }) =>
-      isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin),
+      isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin, req.headers.host),
   });
 
   // socket → sessionId it's viewing
@@ -37,7 +42,7 @@ export function attachWs(
 
   // session_update goes to every socket — the session list is global state.
   manager.on('session_update', (session) => {
-    for (const ws of wss.clients) send(ws, { t: 'session_update', session });
+    for (const ws of wss.clients) send(ws, { t: 'session_update', session: publicSession(session) });
   });
 
   manager.on('session_removed', (sessionId) => {

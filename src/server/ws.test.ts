@@ -177,6 +177,27 @@ describe('REST routes', () => {
     expect(list.map((s: { id: string }) => s.id)).toContain(created.id);
   });
 
+  it('never returns or broadcasts private launch data', async () => {
+    const client = await connect();
+    const response = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...SPEC,
+        initialPrompt: 'private prompt',
+        extraArgs: ['--private-argument'],
+        env: { API_TOKEN: 'private-token' },
+      }),
+    });
+    const created = await response.json() as Record<string, unknown>;
+    expect(created.launchSpec).toBeUndefined();
+    expect(store.getSession(String(created.id))?.launchSpec).toBeUndefined();
+    const update = await client.waitFor('session_update');
+    expect(update.session.launchSpec).toBeUndefined();
+    const listed = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json() as Record<string, unknown>[];
+    expect(listed.find((session) => session.id === created.id)?.launchSpec).toBeUndefined();
+  });
+
   it('POST /api/sessions rejects bad specs', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
       method: 'POST',
@@ -331,7 +352,11 @@ describe('loopback-only enforcement', () => {
 
     expect(isAllowedOrigin(undefined)).toBe(true); // curl / CLI clients
     expect(isAllowedOrigin(`http://127.0.0.1:4040`)).toBe(true);
+    expect(isAllowedOrigin('http://127.0.0.1:4040', '127.0.0.1:4040')).toBe(true);
+    expect(isAllowedOrigin('http://127.0.0.1:4041', '127.0.0.1:4040')).toBe(false);
+    expect(isAllowedOrigin('http://localhost:4040', '127.0.0.1:4040')).toBe(false);
     expect(isAllowedOrigin('https://evil.example')).toBe(false);
+    expect(isAllowedOrigin('file:///tmp/index.html')).toBe(false);
     expect(isAllowedOrigin('not a url')).toBe(false);
   });
 
@@ -340,6 +365,11 @@ describe('loopback-only enforcement', () => {
       headers: { origin: 'https://evil.example' },
     });
     expect(res.status).toBe(403);
+
+    const otherLocalSite = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      headers: { origin: `http://127.0.0.1:${port + 1}` },
+    });
+    expect(otherLocalSite.status).toBe(403);
 
     const evil = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin: 'https://evil.example' });
     const rejected = await new Promise<boolean>((resolve) => {

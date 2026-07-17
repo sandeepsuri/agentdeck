@@ -101,10 +101,21 @@ export class Store {
 
   /** @param dbPath file path, or ':memory:' (tests) */
   constructor(dbPath: string) {
-    if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    if (dbPath !== ':memory:') {
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+      // launch metadata and archived messages can be sensitive. Pre-create
+      // and normalize the database mode instead of relying on the user's umask.
+      fs.closeSync(fs.openSync(dbPath, 'a', 0o600));
+      fs.chmodSync(dbPath, 0o600);
+    }
     this.db = new DatabaseCtor(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    if (dbPath !== ':memory:') {
+      for (const file of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+        if (fs.existsSync(file)) fs.chmodSync(file, 0o600);
+      }
+    }
     migrate(this.db, MIGRATIONS_DIR);
   }
 

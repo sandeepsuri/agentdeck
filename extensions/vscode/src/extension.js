@@ -5,7 +5,15 @@ const WebSocket = require('ws');
 function serverUrl() {
   const configured = vscode.workspace.getConfiguration('agentdeck')
     .get('serverUrl', 'ws://127.0.0.1:4040/ws');
-  return configured.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+  const parsed = new URL(configured.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:'));
+  const loopback = parsed.hostname === '127.0.0.1'
+    || parsed.hostname === 'localhost'
+    || parsed.hostname === '[::1]';
+  if (!loopback || (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:')
+    || parsed.username || parsed.password) {
+    throw new Error('AgentDeck serverUrl must be a loopback ws:// or wss:// URL.');
+  }
+  return parsed.href;
 }
 
 function activate(context) {
@@ -76,7 +84,7 @@ function activate(context) {
     if (stopped) return;
     clearTimeout(reconnectTimer);
     try {
-      socket = new WebSocket(serverUrl());
+      socket = new WebSocket(serverUrl(), { maxPayload: 1024 * 1024, perMessageDeflate: false });
     } catch {
       reconnectTimer = setTimeout(connect, reconnectMs);
       reconnectMs = Math.min(reconnectMs * 2, 10_000);

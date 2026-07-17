@@ -51,6 +51,11 @@ const externalSession: Session = {
 };
 
 describe('sessions', () => {
+  it('creates database files readable only by the current OS user', () => {
+    const mode = fs.statSync(path.join(dir, 'agentdeck.db')).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
   it('round-trips a managed session including nested launchSpec', () => {
     store.upsertSession(managedSession);
     expect(store.getSession(managedSession.id)).toEqual(managedSession);

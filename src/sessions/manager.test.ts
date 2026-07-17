@@ -124,9 +124,13 @@ describe('SessionManager + PtyBackend', () => {
     expect(store.getSession(s.id)).toBeUndefined();
   }, 10000);
 
-  it('restart() respawns from the stored launchSpec with a fresh pid, same row', async () => {
+  it('restart() uses an in-memory launch spec without persisting its secrets', async () => {
     const { manager, store } = makeManager();
-    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo run; sleep 30'] }));
+    const s = await manager.launch(spec({
+      extraArgs: ['-c', 'echo run; sleep 30'],
+      env: { AGENTDECK_TEST_SECRET: 'not-for-sqlite' },
+    }));
+    expect(store.getSession(s.id)?.launchSpec).toBeUndefined();
     const firstPid = s.pid;
     const s2 = await manager.restart(s.id);
     expect(s2.id).toBe(s.id);

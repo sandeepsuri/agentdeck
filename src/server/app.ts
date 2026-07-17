@@ -9,6 +9,18 @@ import type { CoordinationService } from '../coordination/service.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "font-src 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+].join('; ');
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -34,10 +46,15 @@ export function isLoopbackHostHeader(host: string | undefined): boolean {
   return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
 }
 
-export function isAllowedOrigin(origin: string | undefined): boolean {
+export function isAllowedOrigin(origin: string | undefined, requestHost?: string): boolean {
   if (origin === undefined) return true; // non-browser client
   try {
-    return isLoopbackHostHeader(new URL(origin).host);
+    const parsed = new URL(origin);
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+      || parsed.origin !== origin || !isLoopbackHostHeader(parsed.host)) return false;
+    if (requestHost === undefined) return true;
+    const requested = new URL(`${parsed.protocol}//${requestHost}`);
+    return parsed.hostname === requested.hostname && parsed.port === requested.port;
   } catch {
     return false;
   }
@@ -54,13 +71,25 @@ export interface AppContext {
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
   app.addHook('onRequest', async (req, reply) => {
-    if (!isLoopbackHostHeader(req.headers.host)) {
+    const allowedHost = isLoopbackHostHeader(req.headers.host);
+    const connectPolicy = allowedHost ? `connect-src 'self' ws://${req.headers.host}` : "connect-src 'self'";
+    reply.headers({
+      'cache-control': 'no-store',
+      'content-security-policy': `${CONTENT_SECURITY_POLICY}; ${connectPolicy}`,
+      'cross-origin-opener-policy': 'same-origin',
+      'permissions-policy': 'camera=(), microphone=(), geolocation=()',
+      'referrer-policy': 'no-referrer',
+      'x-dns-prefetch-control': 'off',
+      'x-content-type-options': 'nosniff',
+      'x-frame-options': 'DENY',
+    });
+    if (!allowedHost) {
       return reply.code(403).send({ error: 'forbidden host' });
     }
-    if (!isAllowedOrigin(req.headers.origin)) {
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
       return reply.code(403).send({ error: 'forbidden origin' });
     }
   });
