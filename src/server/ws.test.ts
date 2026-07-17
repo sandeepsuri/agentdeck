@@ -8,7 +8,7 @@ import type { Handle, SessionBackend } from '../sessions/backend.js';
 import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
 import { defaultConfig } from '../config.js';
-import { buildApp } from './app.js';
+import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs } from './ws.js';
 import type { ServerFrame } from '../protocol.js';
 
@@ -170,6 +170,37 @@ describe('REST routes', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ id, name: 'Payments migration' });
     expect(store.getSession(id)?.name).toBe('Payments migration');
+  });
+});
+
+describe('loopback-only enforcement', () => {
+  it('accepts only loopback Host headers and Origins', () => {
+    expect(isLoopbackHostHeader('127.0.0.1:4040')).toBe(true);
+    expect(isLoopbackHostHeader('localhost:4040')).toBe(true);
+    expect(isLoopbackHostHeader('[::1]:4040')).toBe(true);
+    expect(isLoopbackHostHeader('evil.example')).toBe(false);
+    expect(isLoopbackHostHeader('evil.example:4040')).toBe(false);
+    expect(isLoopbackHostHeader(undefined)).toBe(false);
+
+    expect(isAllowedOrigin(undefined)).toBe(true); // curl / CLI clients
+    expect(isAllowedOrigin(`http://127.0.0.1:4040`)).toBe(true);
+    expect(isAllowedOrigin('https://evil.example')).toBe(false);
+    expect(isAllowedOrigin('not a url')).toBe(false);
+  });
+
+  it('rejects cross-origin REST requests and WebSocket upgrades', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(res.status).toBe(403);
+
+    const evil = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin: 'https://evil.example' });
+    const rejected = await new Promise<boolean>((resolve) => {
+      evil.once('error', () => resolve(true));
+      evil.once('open', () => resolve(false));
+    });
+    evil.terminate();
+    expect(rejected).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
-// WS frame protocol (T4) — exact shapes from TICKETS.md. Shared between
-// server (src/server/ws.ts) and UI (src/ui/components/Terminal.tsx).
+// WS frame protocol. Shared between the server (src/server/ws.ts) and the
+// UI (src/ui/components/Terminal.tsx).
 import type { AgentMessage, Session } from './types.js';
 
 export type ClientFrame =

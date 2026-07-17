@@ -1,4 +1,4 @@
-// Shared data model — copied from DESIGN.md §6 (normative).
+// Shared data model used by the server, UI, and CLI.
 
 export type AgentType = 'claude' | 'codex';
 export type SessionOrigin = 'managed' | 'external';

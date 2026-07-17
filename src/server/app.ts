@@ -18,6 +18,30 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+/**
+ * The server binds to 127.0.0.1, but browsers will happily send requests
+ * here from any web page (DNS rebinding defeats same-origin for the REST
+ * API; WebSocket upgrades skip CORS entirely). Only loopback Host/Origin
+ * values are allowed; requests without an Origin (curl, CLI) are fine
+ * because they already run as the local user.
+ */
+export function isLoopbackHostHeader(host: string | undefined): boolean {
+  if (!host) return false;
+  const hostname = host.startsWith('[')
+    ? host.slice(1, host.indexOf(']'))
+    : host.split(':')[0] ?? '';
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
+}
+
+export function isAllowedOrigin(origin: string | undefined): boolean {
+  if (origin === undefined) return true; // non-browser client
+  try {
+    return isLoopbackHostHeader(new URL(origin).host);
+  } catch {
+    return false;
+  }
+}
+
 export interface AppContext {
   config: AgentDeckConfig;
   manager?: SessionManager;
@@ -29,6 +53,15 @@ export interface AppContext {
 export function buildApp(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false });
 
+  app.addHook('onRequest', async (req, reply) => {
+    if (!isLoopbackHostHeader(req.headers.host)) {
+      return reply.code(403).send({ error: 'forbidden host' });
+    }
+    if (!isAllowedOrigin(req.headers.origin)) {
+      return reply.code(403).send({ error: 'forbidden origin' });
+    }
+  });
+
   app.get('/api/health', async () => ({ ok: true }));
 
   if (ctx.manager) registerRoutes(app, {
@@ -39,8 +72,8 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     coordination: ctx.coordination,
   });
 
-  // Production: serve the built SPA from dist/ui (hand-rolled to stay within
-  // the DESIGN §5 dependency list — no @fastify/static). Dev uses vite.
+  // Production: serve the built SPA from dist/ui (hand-rolled to keep the
+  // dependency list minimal — no @fastify/static). Dev uses vite.
   const distDir = path.resolve(import.meta.dirname, '../../dist/ui');
   if (process.env.NODE_ENV === 'production' && fs.existsSync(distDir)) {
     app.get('/*', async (req, reply) => {

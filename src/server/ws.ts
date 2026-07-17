@@ -4,9 +4,17 @@ import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
+import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 
 export function attachWs(server: HttpServer, manager: SessionManager, path = '/ws'): WebSocketServer {
-  const wss = new WebSocketServer({ server, path });
+  // WebSocket upgrades bypass CORS: without this check any web page could
+  // attach to a session, read its output, and inject keystrokes.
+  const wss = new WebSocketServer({
+    server,
+    path,
+    verifyClient: ({ origin, req }: { origin?: string; req: { headers: { host?: string } } }) =>
+      isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin),
+  });
 
   // socket → sessionId it's viewing
   const viewing = new Map<WebSocket, string>();

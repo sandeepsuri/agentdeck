@@ -1,7 +1,6 @@
-// SessionBackend interface — DESIGN.md §3.2, with two pragmatic extensions
-// flagged for the design doc: `onExit` (the manager must observe lifecycle to
-// mark sessions exited) and an optional `signal` on kill (SIGTERM→SIGKILL
-// escalation lives in the manager).
+// SessionBackend interface: `onExit` lets the manager observe lifecycle to
+// mark sessions exited; the optional `signal` on kill supports the manager's
+// SIGTERM→SIGKILL escalation.
 import type { LaunchSpec } from '../types.js';
 
 export interface Handle {
