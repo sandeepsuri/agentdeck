@@ -2,18 +2,43 @@
 // UI (src/ui/components/Terminal.tsx).
 import type { AgentMessage, Session } from './types.js';
 
+export interface VsCodeTerminalFrame {
+  id: string;
+  name: string;
+  processId: number;
+}
+
 export type ClientFrame =
   | { t: 'attach'; sessionId: string }
   | { t: 'input'; data: string }
   | { t: 'resize'; cols: number; rows: number }
-  | { t: 'detach' };
+  | { t: 'detach' }
+  | { t: 'vscode_register'; windowId: string; terminals: VsCodeTerminalFrame[] }
+  | { t: 'vscode_terminals'; windowId: string; terminals: VsCodeTerminalFrame[] }
+  | { t: 'vscode_result'; requestId: string; ok: boolean; error?: string };
 
 export type ServerFrame =
   | { t: 'replay'; data: string }
   | { t: 'output'; data: string }
   | { t: 'session_update'; session: Session }
   | { t: 'session_removed'; sessionId: string }
-  | { t: 'agent_event'; event: AgentMessage };
+  | { t: 'agent_event'; event: AgentMessage }
+  | { t: 'vscode_action'; requestId: string; terminalId: string; action: 'send' | 'focus'; text?: string };
+
+function parseVsCodeTerminals(value: unknown): VsCodeTerminalFrame[] | null {
+  if (!Array.isArray(value) || value.length > 500) return null;
+  const terminals: VsCodeTerminalFrame[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') return null;
+    const terminal = item as Record<string, unknown>;
+    if (typeof terminal.id !== 'string' || terminal.id.length > 200
+      || typeof terminal.name !== 'string' || terminal.name.length > 500
+      || typeof terminal.processId !== 'number' || !Number.isInteger(terminal.processId)
+      || terminal.processId <= 0) return null;
+    terminals.push({ id: terminal.id, name: terminal.name, processId: terminal.processId });
+  }
+  return terminals;
+}
 
 export function parseClientFrame(raw: string): ClientFrame | null {
   let msg: unknown;
@@ -36,6 +61,18 @@ export function parseClientFrame(raw: string): ClientFrame | null {
         : null;
     case 'detach':
       return { t: 'detach' };
+    case 'vscode_register':
+    case 'vscode_terminals': {
+      const terminals = parseVsCodeTerminals(f.terminals);
+      return typeof f.windowId === 'string' && f.windowId.length <= 200 && terminals
+        ? { t: f.t, windowId: f.windowId, terminals }
+        : null;
+    }
+    case 'vscode_result':
+      return typeof f.requestId === 'string' && typeof f.ok === 'boolean'
+        && (f.error === undefined || typeof f.error === 'string')
+        ? { t: 'vscode_result', requestId: f.requestId, ok: f.ok, ...(typeof f.error === 'string' ? { error: f.error } : {}) }
+        : null;
     default:
       return null;
   }

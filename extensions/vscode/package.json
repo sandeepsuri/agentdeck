@@ -1,0 +1,26 @@
+{
+  "name": "agentdeck-vscode",
+  "displayName": "AgentDeck VS Code Helper",
+  "description": "Connects VS Code integrated terminals to the local AgentDeck control plane.",
+  "publisher": "agentdeck",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "extensionKind": ["ui"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "AgentDeck",
+      "properties": {
+        "agentdeck.serverUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:4040/ws",
+          "description": "WebSocket URL of the local AgentDeck server."
+        }
+      }
+    }
+  }
+}

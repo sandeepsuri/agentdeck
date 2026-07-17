@@ -3,10 +3,16 @@
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
+import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
 import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 
-export function attachWs(server: HttpServer, manager: SessionManager, path = '/ws'): WebSocketServer {
+export function attachWs(
+  server: HttpServer,
+  manager: SessionManager,
+  path = '/ws',
+  vscode?: VsCodeBridge,
+): WebSocketServer {
   // WebSocket upgrades bypass CORS: without this check any web page could
   // attach to a session, read its output, and inject keystrokes.
   const wss = new WebSocketServer({
@@ -71,9 +77,21 @@ export function attachWs(server: HttpServer, manager: SessionManager, path = '/w
           }
           break;
         }
+        case 'vscode_register':
+          vscode?.register(ws, frame.windowId, frame.terminals);
+          break;
+        case 'vscode_terminals':
+          vscode?.update(ws, frame.windowId, frame.terminals);
+          break;
+        case 'vscode_result':
+          vscode?.result(ws, frame.requestId, frame.ok, frame.error);
+          break;
       }
     });
-    ws.on('close', () => viewing.delete(ws));
+    ws.on('close', () => {
+      viewing.delete(ws);
+      vscode?.disconnect(ws);
+    });
   });
 
   return wss;

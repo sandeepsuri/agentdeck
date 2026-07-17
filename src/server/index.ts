@@ -3,7 +3,7 @@ import type { WebSocketServer } from 'ws';
 import { loadConfig } from '../config.js';
 import { CoordinationService } from '../coordination/service.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
-import { ITerm2Adapter, TerminalAppAdapter, TerminalRegistry } from '../discovery/terminals/index.js';
+import { ITerm2Adapter, TerminalAppAdapter, TerminalRegistry, VsCodeAdapter, VsCodeBridge } from '../discovery/terminals/index.js';
 import { PtyBackend } from '../sessions/pty.js';
 import { SessionManager } from '../sessions/manager.js';
 import { openStore } from '../store/index.js';
@@ -24,15 +24,21 @@ export async function startServer(): Promise<RunningServer> {
     }
   }
   const manager = new SessionManager(new PtyBackend(), store);
-  const terminals = new TerminalRegistry([new TerminalAppAdapter(), new ITerm2Adapter()]);
+  const vscode = new VsCodeBridge();
+  const terminals = new TerminalRegistry([
+    new TerminalAppAdapter(), new ITerm2Adapter(), new VsCodeAdapter(vscode),
+  ]);
   const coordination = new CoordinationService(store, manager);
   const discovery = new DiscoveryPoller({
     store, intervalMs: config.pollIntervalMs,
     getManagedPids: () => manager.managedPids(),
-    publish: (session) => manager.publishSessionUpdate(session),
+    publish: (session) => {
+      manager.publishSessionUpdate(session);
+      coordination.reconcileSession(session);
+    },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
-  const app = buildApp({ config, manager, store, terminals, coordination });
+  const app = buildApp({ config, manager, store, terminals, coordination, vscode });
   let wss: WebSocketServer | undefined;
   let closing = false;
   const close = async () => {
@@ -51,7 +57,7 @@ export async function startServer(): Promise<RunningServer> {
   process.once('SIGTERM', onSignal);
   try {
     const address = await app.listen({ port, host: '127.0.0.1' });
-    wss = attachWs(app.server, manager);
+    wss = attachWs(app.server, manager, '/ws', vscode);
     discovery.start();
     void coordination.syncRepos(store.listRepos());
     if (!store.getSetting<boolean>('firstRunShown')) {

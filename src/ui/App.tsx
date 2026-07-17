@@ -4,6 +4,7 @@ import type { ServerFrame } from '../protocol.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { Terminal } from './components/Terminal.js';
 import {
+  conversationFor,
   filterSessions,
   groupSessions,
   type GroupBy,
@@ -71,6 +72,7 @@ export function App() {
   const [showLaunch, setShowLaunch] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [terminalHint, setTerminalHint] = useState<string | null>(null);
+  const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
   const [events, setEvents] = useState<AgentMessage[]>([]);
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
   const [wsReady, setWsReady] = useState(false);
@@ -128,11 +130,20 @@ export function App() {
         .then((body: { automationHint?: string }) => setTerminalHint(body.automationHint ?? null))
         .catch(() => undefined);
     };
+    const refreshVsCodeStatus = () => {
+      fetch('/api/integrations/vscode/status')
+        .then((response) => response.json())
+        .then(setVsCodeStatus)
+        .catch(() => undefined);
+    };
     refreshTerminalHint();
+    refreshVsCodeStatus();
     const terminalStatus = setInterval(refreshTerminalHint, 5000);
+    const vscodeIntegrationStatus = setInterval(refreshVsCodeStatus, 5000);
     return () => {
       clearInterval(clock);
       clearInterval(terminalStatus);
+      clearInterval(vscodeIntegrationStatus);
     };
   }, [refresh, refreshConflicts, refreshEvents, refreshRepos]);
 
@@ -221,14 +232,26 @@ export function App() {
   };
 
   const configureHooks = async (mode: 'install' | 'uninstall') => {
-    const repo = repos.find((item) => item.id === filters.repo) ?? repos[0];
+    const repo = repos.find((item) => item.id === selected?.repoId)
+      ?? repos.find((item) => item.id === filters.repo)
+      ?? repos[0];
     if (!repo) return setError('No repository is available for hook installation.');
     const response = await fetch(`/api/hooks/${mode}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ repoPath: repo.path, user: true }),
     });
-    const body = await response.json() as { error?: string };
-    setError(response.ok ? `Hooks ${mode === 'install' ? 'installed' : 'removed'} for ${repo.name}.` : (body.error ?? `${mode} failed`));
+    const body = await response.json() as { error?: string; restartRequired?: boolean };
+    setError(response.ok
+      ? `Hooks ${mode === 'install' ? 'installed' : 'removed'} for ${repo.name}. Restart active Claude/Codex sessions to apply the change.`
+      : (body.error ?? `${mode} failed`));
+  };
+
+  const installVsCodeHelper = async () => {
+    const response = await fetch('/api/integrations/vscode/install', { method: 'POST' });
+    const body = await response.json() as { error?: string; reloadRequired?: boolean };
+    setError(response.ok
+      ? 'VS Code helper installed. Reload each VS Code window once to connect it to AgentDeck.'
+      : (body.error ?? 'VS Code helper installation failed.'));
   };
 
   const setFilter = <K extends keyof SessionFilters>(key: K, value: SessionFilters[K]) => {
@@ -244,6 +267,12 @@ export function App() {
           <button onClick={() => setShowLaunch(true)} style={styles.launchButton}>＋ Launch agent</button>
           <button onClick={() => void configureHooks('install')} style={styles.secondaryButton}>Install hooks</button>
           <button onClick={() => void configureHooks('uninstall')} style={styles.secondaryButton}>Remove hooks</button>
+          <button
+            disabled={vscodeStatus.connected}
+            onClick={() => void installVsCodeHelper()}
+            style={styles.secondaryButton}
+            title={vscodeStatus.connected ? `${vscodeStatus.terminals} VS Code terminal(s) connected` : 'Install the bundled VS Code terminal helper'}
+          >{vscodeStatus.connected ? `VS Code connected (${vscodeStatus.terminals})` : 'Install VS Code helper'}</button>
         </div>
       </header>
 
@@ -360,9 +389,9 @@ export function App() {
                 <Metadata label="Branch" value={selected.branch ?? 'Unknown'} />
                 <Metadata label="Process" value={selected.pid ? `pid ${selected.pid}` : 'Unknown'} />
                 <Metadata label="TTY" value={selected.tty ?? 'Unknown'} />
-                <Metadata label="Terminal" value={selected.terminalApp === 'iTerm2' ? `iTerm2 · tab ${selected.terminalRef?.tabId ?? '?'}` : selected.terminalApp === 'Terminal' ? `Terminal.app · tab ${selected.terminalRef?.tabId ?? '?'}` : 'Unknown (possibly an integrated terminal)'} />
+                <Metadata label="Terminal" value={selected.terminalApp === 'iTerm2' ? `iTerm2 · tab ${selected.terminalRef?.tabId ?? '?'}` : selected.terminalApp === 'Terminal' ? `Terminal.app · tab ${selected.terminalRef?.tabId ?? '?'}` : selected.terminalApp === 'VSCode' ? 'VS Code integrated terminal' : 'Unknown terminal'} />
                 <button disabled={!selected.terminalRef} onClick={() => void action(selected, 'focus')} style={styles.launchButton}>Focus terminal</button>
-                <SendBox key={selected.id} session={selected} />
+                <ConversationPanel key={selected.id} session={selected} />
               </div>
             )}
           </aside>
@@ -389,11 +418,79 @@ function Metadata({ label, value }: { label: string; value: string }) {
   return <div style={styles.metadata}><span style={styles.metadataLabel}>{label}</span><span>{value}</span></div>;
 }
 
-function SendBox({ session }: { session: Session }) {
+function repoPathOf(session: Session): string {
+  return session.worktreePath ?? session.repoId ?? session.cwd;
+}
+
+function ConversationPanel({ session }: { session: Session }) {
+  const repoPath = repoPathOf(session);
+  const [fetched, setFetched] = useState<AgentMessage[]>([]);
+  const [localSends, setLocalSends] = useState<AgentMessage[]>([]);
+  const [capabilities, setCapabilities] = useState<{ send: string; replyCapture: boolean } | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const refreshMessages = () => {
+      fetch(`/api/sessions/${encodeURIComponent(session.id)}/messages`)
+        .then((response) => response.ok ? response.json() : [])
+        .then(setFetched)
+        .catch(() => undefined);
+    };
+    const refreshCapabilities = () => {
+      fetch(`/api/sessions/${encodeURIComponent(session.id)}/capabilities`)
+        .then((response) => response.ok ? response.json() : null)
+        .then(setCapabilities)
+        .catch(() => undefined);
+    };
+    refreshMessages();
+    refreshCapabilities();
+    const poll = setInterval(refreshMessages, 4000);
+    const capabilityPoll = setInterval(refreshCapabilities, 4000);
+    return () => { clearInterval(poll); clearInterval(capabilityPoll); };
+  }, [session.id]);
+
+  const conversation = useMemo(() => {
+    // drop optimistic entries once the bus round-trip delivers the real event
+    const pending = localSends.filter((send) =>
+      !fetched.some((event) => event.agent === send.agent && event.message === send.message));
+    return conversationFor([...fetched, ...pending], session.id, session.agentSessionId);
+  }, [fetched, localSends, session.id, session.agentSessionId]);
+
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [conversation.length]);
+
+  return (
+    <>
+      {conversation.length > 0 && (
+        <div ref={listRef} style={styles.messageList}>
+          {conversation.map((entry) => (
+            <div key={`${entry.ts}-${entry.agent}-${entry.text}`} style={{ ...styles.messageBubble, ...(entry.from === 'you' ? styles.messageSent : styles.messageReceived) }}>
+              <div style={styles.messageMeta}>{entry.from === 'you' ? 'You' : entry.agent} · {new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+              <div style={styles.messageText}>{entry.text}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {capabilities && !capabilities.replyCapture && (
+        <div style={styles.captureWarning}>Prompt sending is available, but agent replies will not be recorded until AgentDeck hooks are installed and the CLI is restarted.</div>
+      )}
+      <SendBox
+        session={session}
+        onSent={(text) => setLocalSends((current) => [...current, {
+          ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath,
+          event: 'message', message: text, sessionId: session.id,
+        }])}
+      />
+    </>
+  );
+}
+
+function SendBox({ session, onSent }: { session: Session; onSent?: (text: string) => void }) {
   const [text, setText] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const scriptable = session.terminalApp === 'Terminal' || session.terminalApp === 'iTerm2';
+  const scriptable = session.terminalApp === 'Terminal' || session.terminalApp === 'iTerm2' || session.terminalApp === 'VSCode';
 
   const send = async () => {
     const trimmed = text.trim();
@@ -406,14 +503,19 @@ function SendBox({ session }: { session: Session }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ text: trimmed }),
       });
-      const body = await response.json() as { delivered?: string; error?: string };
+      const body = await response.json() as { delivered?: string; hooked?: boolean; error?: string };
       if (!response.ok) {
         setFeedback(body.error ?? 'Send failed.');
       } else {
         setText('');
-        setFeedback(body.delivered === 'typed'
-          ? `Typed into ${session.terminalApp}.`
-          : 'Queued — the agent sees it as context on its next turn (requires AgentDeck hooks in this repo).');
+        onSent?.(trimmed);
+        if (body.delivered === 'typed') {
+          setFeedback(`Typed into ${session.terminalApp}.`);
+        } else if (body.hooked === false) {
+          setFeedback('Queued, but this repo has no AgentDeck hooks installed — the message will never be delivered. Use "Install hooks" first.');
+        } else {
+          setFeedback('Queued — delivered on this session’s next turn and shown in its terminal as an AgentDeck banner.');
+        }
       }
     } catch {
       setFeedback('Send failed.');
@@ -497,7 +599,14 @@ const styles: Record<string, React.CSSProperties> = {
   metadataCard: { margin: 16, padding: 16, border: '1px solid #242b35', borderRadius: 8, background: '#111820', display: 'flex', flexDirection: 'column', gap: 14 },
   metadata: { display: 'grid', gridTemplateColumns: '90px 1fr', gap: 10, alignItems: 'start' },
   metadataLabel: { color: '#697586', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.06em' },
+  messageList: { display: 'flex', flexDirection: 'column', gap: 8, maxHeight: '38vh', overflowY: 'auto', borderTop: '1px solid #242b35', paddingTop: 12 },
+  messageBubble: { maxWidth: '85%', borderRadius: 8, padding: '7px 10px', fontSize: 12, lineHeight: 1.45 },
+  messageSent: { alignSelf: 'flex-end', background: '#12324f', border: '1px solid #1f4a73', color: '#cde3f8' },
+  messageReceived: { alignSelf: 'flex-start', background: '#171d25', border: '1px solid #303844', color: '#c9d1d9' },
+  messageMeta: { color: '#697586', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 3 },
+  messageText: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
   sendBox: { display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid #242b35', paddingTop: 14 },
   sendInput: { boxSizing: 'border-box', width: '100%', resize: 'vertical', background: '#0d1218', border: '1px solid #303844', color: '#c9d1d9', borderRadius: 5, padding: '7px 9px', font: 'inherit', fontSize: 12 },
   sendFeedback: { color: '#8b949e', fontSize: 11, lineHeight: 1.4 },
+  captureWarning: { color: '#d29922', background: '#241d0b', border: '1px solid #5f4b14', borderRadius: 5, padding: '7px 9px', fontSize: 11, lineHeight: 1.4 },
 };

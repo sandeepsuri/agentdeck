@@ -6,7 +6,8 @@ import type { SessionManager } from '../sessions/manager.js';
 import type { Store } from '../store/index.js';
 import type { TerminalRegistry } from '../discovery/terminals/index.js';
 import type { CoordinationService } from '../coordination/service.js';
-import { registerRoutes } from './routes.js';
+import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
+import { registerRoutes, type RouteContext } from './routes.js';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -48,6 +49,8 @@ export interface AppContext {
   store?: Store;
   terminals?: TerminalRegistry;
   coordination?: CoordinationService;
+  vscode?: VsCodeBridge;
+  installVsCode?: RouteContext['installVsCode'];
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -70,6 +73,8 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     store: ctx.store,
     terminals: ctx.terminals,
     coordination: ctx.coordination,
+    vscode: ctx.vscode,
+    installVsCode: ctx.installVsCode,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the

@@ -1,5 +1,5 @@
 // T4 protocol tests: WS bridge + REST routes against a fake backend.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,6 +14,7 @@ import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs } from './ws.js';
 import type { ServerFrame } from '../protocol.js';
+import { TerminalRegistry, VsCodeBridge, type TerminalAdapter } from '../discovery/terminals/index.js';
 
 /** Scriptable in-memory backend: no real processes. */
 class FakeBackend implements SessionBackend {
@@ -22,8 +23,10 @@ class FakeBackend implements SessionBackend {
   written = new Map<string, string[]>();
   resized = new Map<string, { cols: number; rows: number }[]>();
   killed = new Map<string, string[]>();
+  spawnedSpecs: LaunchSpec[] = [];
 
-  async spawn(_spec: LaunchSpec): Promise<Handle> {
+  async spawn(spec: LaunchSpec): Promise<Handle> {
+    this.spawnedSpecs.push(spec);
     const pid = this.nextPid++;
     const h = { id: String(pid), pid };
     this.emitters.set(h.id, new EventEmitter());
@@ -55,6 +58,14 @@ class FakeBackend implements SessionBackend {
   emitOutput(pid: number, data: string): void {
     this.emitters.get(String(pid))?.emit('data', data);
   }
+}
+
+class FakeVsCodeAdapter implements TerminalAdapter {
+  readonly app = 'VSCode' as const;
+  readonly verified = true;
+  readonly focus = vi.fn(async () => undefined);
+  readonly sendText = vi.fn(async () => undefined);
+  async listTtys() { return []; }
 }
 
 /** WS test client that queues received frames. */
@@ -91,15 +102,24 @@ let manager: SessionManager;
 let app: ReturnType<typeof buildApp>;
 let wss: WebSocketServer;
 let port: number;
+let vscode: VsCodeBridge;
+let vscodeAdapter: FakeVsCodeAdapter;
+let installVsCode: ReturnType<typeof vi.fn>;
 const clients: Client[] = [];
 
 beforeEach(async () => {
   backend = new FakeBackend();
   store = new Store(':memory:');
   manager = new SessionManager(backend, store);
-  app = buildApp({ config: defaultConfig(), manager });
+  vscode = new VsCodeBridge();
+  vscodeAdapter = new FakeVsCodeAdapter();
+  installVsCode = vi.fn(async () => ({ installed: true as const, reloadRequired: true as const }));
+  app = buildApp({
+    config: defaultConfig(), manager, vscode,
+    terminals: new TerminalRegistry([vscodeAdapter]), installVsCode,
+  });
   await app.listen({ port: 0, host: '127.0.0.1' });
-  wss = attachWs(app.server, manager);
+  wss = attachWs(app.server, manager, '/ws', vscode);
   const addr = app.server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
   port = addr.port;
@@ -119,7 +139,7 @@ async function connect(): Promise<Client> {
   return c;
 }
 
-const SPEC = { agent: 'claude', cwd: '/tmp' };
+const SPEC = { agent: 'claude', cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-')) };
 
 async function launchViaRest(): Promise<{ id: string; pid: number }> {
   const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
@@ -132,9 +152,27 @@ async function launchViaRest(): Promise<{ id: string; pid: number }> {
 }
 
 describe('REST routes', () => {
+  it('reports, installs, and registers the VS Code helper', async () => {
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/integrations/vscode/status`)).json())
+      .toMatchObject({ connected: false, windows: 0, terminals: 0 });
+    const installed = await fetch(`http://127.0.0.1:${port}/api/integrations/vscode/install`, { method: 'POST' });
+    expect(await installed.json()).toEqual({ installed: true, reloadRequired: true });
+    expect(installVsCode).toHaveBeenCalledOnce();
+
+    const client = await connect();
+    client.send({
+      t: 'vscode_register', windowId: 'window-1',
+      terminals: [{ id: 'term-1', name: 'Agent', processId: 123 }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/integrations/vscode/status`)).json())
+      .toMatchObject({ connected: true, windows: 1, terminals: 1 });
+  });
+
   it('POST /api/sessions launches and GET lists it', async () => {
     const created = await launchViaRest();
     expect(created.pid).toBe(1000);
+    expect(backend.spawnedSpecs[0]?.env?.AGENTDECK_SESSION_ID).toBe(created.id);
     const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
     expect(list.map((s: { id: string }) => s.id)).toContain(created.id);
   });
@@ -176,6 +214,9 @@ describe('REST routes', () => {
     expect(((await typed.json()) as { delivered: string }).delivered).toBe('typed');
     await new Promise((r) => setTimeout(r, 400));
     expect(backend.written.get('1000')).toEqual(['run the tests', '\r']);
+    // every successful send lands on the repo bus for the message history
+    expect(fs.readFileSync(path.join(SPEC.cwd, '.agents', 'bus.jsonl'), 'utf8'))
+      .toContain(`"agent":"dashboard:${id}"`);
 
     const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-send-'));
     const base = {
@@ -186,13 +227,75 @@ describe('REST routes', () => {
       statusSource: 'cpu_heuristic',
       terminalApp: 'unknown',
     } as const;
-    store.upsertSession({ ...base, id: 'ext-1-1', origin: 'external', agent: 'claude' });
+    store.upsertSession({
+      ...base, id: 'ext-1-1', origin: 'external', agent: 'claude',
+      agentSessionId: 'claude:s-1',
+    });
     const queued = await send('ext-1-1', 'hello from the deck');
-    expect(((await queued.json()) as { delivered: string }).delivered).toBe('queued');
-    expect(fs.readFileSync(path.join(repoDir, '.agents', 'inbox.jsonl'), 'utf8')).toContain('hello from the deck');
+    expect(await queued.json()).toMatchObject({ delivered: 'queued', hooked: false });
+    expect(fs.readFileSync(path.join(repoDir, '.agents', 'inbox.jsonl'), 'utf8'))
+      .toContain('"to":"claude:s-1"');
+    expect(fs.readFileSync(path.join(repoDir, '.agents', 'bus.jsonl'), 'utf8')).toContain('"agent":"dashboard:ext-1-1"');
+
+    const messagesUrl = `http://127.0.0.1:${port}/api/sessions/ext-1-1/messages`;
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/sessions/ext-1-1/capabilities`)).json())
+      .toEqual({ send: 'queued', replyCapture: false });
+    expect(await (await fetch(messagesUrl)).json()).toEqual([
+      expect.objectContaining({ agent: 'dashboard:ext-1-1', event: 'message', message: 'hello from the deck' }),
+    ]);
+
+    fs.appendFileSync(path.join(repoDir, '.agents', 'bus.jsonl'), `${JSON.stringify({
+      ts: '2026-07-17T00:01:00.000Z', agent: 'claude:s-1', repo: repoDir, event: 'done', message: 'Finished the task.',
+    })}\n`);
+    store.upsertSession({
+      ...base, id: 'ext-3-3', origin: 'external', agent: 'claude',
+      agentSessionId: 'claude:s-2',
+    });
+    fs.appendFileSync(path.join(repoDir, '.agents', 'bus.jsonl'), [
+      JSON.stringify({
+        ts: '2026-07-17T00:02:00.000Z', agent: 'dashboard:ext-3-3', repo: repoDir,
+        event: 'message', message: 'Other terminal question.',
+      }),
+      JSON.stringify({
+        ts: '2026-07-17T00:03:00.000Z', agent: 'claude:s-2', repo: repoDir,
+        event: 'done', message: 'Other terminal answer.',
+      }),
+      '',
+    ].join('\n'));
+    expect(await (await fetch(messagesUrl)).json()).toEqual([
+      expect.objectContaining({ agent: 'dashboard:ext-1-1', event: 'message', message: 'hello from the deck' }),
+      expect.objectContaining({ agent: 'claude:s-1', event: 'done', message: 'Finished the task.' }),
+    ]);
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/sessions/ext-3-3/messages`)).json()).toEqual([
+      expect.objectContaining({ agent: 'dashboard:ext-3-3', message: 'Other terminal question.' }),
+      expect.objectContaining({ agent: 'claude:s-2', message: 'Other terminal answer.' }),
+    ]);
+
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-send-empty-'));
+    store.upsertSession({ ...base, cwd: emptyDir, id: 'ext-empty', origin: 'external', agent: 'claude' });
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/sessions/ext-empty/messages`)).json()).toEqual([]);
+    expect((await send('ext-empty', 'must not leak')).status).toBe(409);
+    expect((await fetch(`http://127.0.0.1:${port}/api/sessions/missing/messages`)).status).toBe(404);
+
+    // once AgentDeck hooks exist in the repo, queued sends report hooked: true
+    fs.mkdirSync(path.join(repoDir, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(repoDir, '.claude', 'settings.json'), '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"node agentdeck-hook.mjs"}]}]}}');
+    expect(await (await send('ext-1-1', 'second')).json()).toMatchObject({ delivered: 'queued', hooked: true });
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/sessions/ext-1-1/capabilities`)).json())
+      .toEqual({ send: 'queued', replyCapture: true });
 
     store.upsertSession({ ...base, id: 'ext-2-2', origin: 'external', agent: 'codex' });
     expect((await send('ext-2-2', 'hi')).status).toBe(400);
+    store.upsertSession({
+      ...base, id: 'ext-vscode', origin: 'external', agent: 'codex', terminalApp: 'VSCode',
+      terminalRef: { windowId: 'window-1', tabId: 'term-1' },
+    });
+    expect(await (await send('ext-vscode', 'hello codex')).json()).toEqual({ delivered: 'typed' });
+    expect(await (await fetch(`http://127.0.0.1:${port}/api/sessions/ext-vscode/capabilities`)).json())
+      .toMatchObject({ send: 'vscode' });
+    expect(vscodeAdapter.sendText).toHaveBeenCalledWith(
+      { windowId: 'window-1', tabId: 'term-1' }, 'hello codex',
+    );
     expect((await send(id, '   ')).status).toBe(400);
   });
 

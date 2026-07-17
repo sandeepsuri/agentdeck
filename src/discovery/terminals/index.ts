@@ -1,5 +1,7 @@
 import type { Session } from '../../types.js';
 
+type ScriptableTerminalApp = Exclude<NonNullable<Session['terminalApp']>, 'unknown'>;
+
 export interface TerminalTab {
   tty: string;
   windowId: string;
@@ -9,7 +11,7 @@ export interface TerminalTab {
 }
 
 export interface TerminalAdapter {
-  readonly app: 'Terminal' | 'iTerm2';
+  readonly app: ScriptableTerminalApp;
   readonly verified: boolean;
   listTtys(): Promise<TerminalTab[]>;
   focus(ref: NonNullable<Session['terminalRef']>): Promise<void>;
@@ -24,7 +26,7 @@ export class AutomationDeniedError extends Error {
 }
 
 export interface TerminalMatch {
-  terminalApp: 'Terminal' | 'iTerm2';
+  terminalApp: ScriptableTerminalApp;
   terminalRef: NonNullable<Session['terminalRef']>;
   title?: string;
 }
@@ -51,7 +53,7 @@ export class TerminalRegistry {
           next.set(tab.tty, match);
         }
       } catch (error) {
-        if (error instanceof AutomationDeniedError) this.deniedApps.add(adapter.app);
+        if (error instanceof AutomationDeniedError) this.deniedApps.add(error.app);
         const key = `${adapter.app}:${error instanceof Error ? error.message : String(error)}`;
         if (!this.logged.has(key)) {
           this.logged.add(key);
@@ -81,7 +83,7 @@ export class TerminalRegistry {
 
   private adapterFor(session: Session): TerminalAdapter {
     if (!session.terminalRef || !session.terminalApp || session.terminalApp === 'unknown') {
-      throw new Error('No Terminal.app or iTerm2 tab is mapped to this tty.');
+      throw new Error('No scriptable terminal is mapped to this tty.');
     }
     const adapter = this.adapters.find((candidate) => candidate.app === session.terminalApp);
     if (!adapter) throw new Error(`No adapter for ${session.terminalApp}.`);
@@ -91,3 +93,4 @@ export class TerminalRegistry {
 
 export { ITerm2Adapter } from './iterm2.js';
 export { TerminalAppAdapter } from './terminal-app.js';
+export { VsCodeAdapter, VsCodeBridge, type VsCodeIntegrationStatus } from './vscode.js';

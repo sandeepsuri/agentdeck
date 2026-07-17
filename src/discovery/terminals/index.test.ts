@@ -14,7 +14,7 @@ class FakeAdapter implements TerminalAdapter {
   readonly sendText = vi.fn(async () => undefined);
 
   constructor(
-    readonly app: 'Terminal' | 'iTerm2',
+    readonly app: 'Terminal' | 'iTerm2' | 'VSCode',
     readonly verified: boolean,
     private tabs: TerminalTab[] | Error,
   ) {}
@@ -81,7 +81,7 @@ describe('TerminalRegistry', () => {
     }, 'hello agent');
     expect(terminal.sendText).toHaveBeenCalledWith({ windowId: '58250', tabId: '1' }, 'hello agent');
     await expect(registry.sendText({ ...external, terminalApp: 'unknown' }, 'x'))
-      .rejects.toThrow(/No Terminal.app or iTerm2 tab/);
+      .rejects.toThrow(/No scriptable terminal/);
   });
 
   it('generates paste-then-submit AppleScript for both terminal apps', async () => {

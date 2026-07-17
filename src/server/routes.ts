@@ -1,6 +1,8 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
 import type { FastifyInstance } from 'fastify';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
+import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
 import { expandTilde } from '../config.js';
 import { checkoutExistingBranch, scanRepos } from '../git/scan.js';
@@ -14,9 +16,78 @@ import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
 import { deriveConflicts } from '../conflicts/derive.js';
-import { appendInboxMessage } from '../coordination/bus.js';
+import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordination/bus.js';
+import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
+const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
+const MESSAGE_TAIL_BYTES = 512 * 1024;
+const execFileAsync = promisify(execFile);
+
+async function readBusTail(repoPath: string) {
+  const file = path.join(repoPath, '.agents', 'bus.jsonl');
+  let handle: fs.promises.FileHandle | undefined;
+  try {
+    handle = await fs.promises.open(file, 'r');
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, MESSAGE_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, stat.size - length);
+    return parseBusLines(buffer.subarray(0, bytesRead).toString('utf8'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+function repoHasClaudeHooks(repoPath: string): boolean {
+  try {
+    return fs.readFileSync(path.join(repoPath, '.claude', 'settings.json'), 'utf8').includes('agentdeck-hook');
+  } catch {
+    return false;
+  }
+}
+
+function userHasCodexHooks(): boolean {
+  try {
+    return fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8').includes('agentdeck-hook');
+  } catch {
+    return false;
+  }
+}
+
+async function resolveVsCodeCli(): Promise<string | undefined> {
+  const configured = process.env.AGENTDECK_VSCODE_CLI;
+  if (configured && fs.existsSync(configured)) return configured;
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/which', ['code'], { encoding: 'utf8', timeout: 5000 });
+    const found = stdout.trim();
+    if (found) return found;
+  } catch { /* fall through to standard application paths */ }
+  return [
+    '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code',
+    '/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code',
+  ].find((candidate) => fs.existsSync(candidate));
+}
+
+export interface VsCodeInstallResult {
+  installed: true;
+  reloadRequired: true;
+}
+
+export async function installVsCodeExtension(): Promise<VsCodeInstallResult> {
+  if (!fs.existsSync(VSCODE_VSIX_PATH)) {
+    throw new Error('The bundled VS Code helper is missing. Run npm run build and try again.');
+  }
+  const cli = await resolveVsCodeCli();
+  if (!cli) throw new Error('VS Code CLI was not found. Install VS Code or add the code command to PATH.');
+  await execFileAsync(cli, ['--install-extension', VSCODE_VSIX_PATH, '--force'], {
+    encoding: 'utf8', timeout: 30_000,
+  });
+  return { installed: true, reloadRequired: true };
+}
 
 function parseLaunchSpec(body: unknown): LaunchSpec | string {
   if (typeof body !== 'object' || body === null) return 'body must be a JSON object';
@@ -50,6 +121,8 @@ export interface RouteContext {
   store?: Store;
   terminals?: TerminalRegistry;
   coordination?: CoordinationService;
+  vscode?: VsCodeBridge;
+  installVsCode?: () => Promise<VsCodeInstallResult>;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -80,7 +153,14 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   });
 
-  app.get('/api/events', async () => ctx.store?.listEvents({ limit: 100 }) ?? []);
+  app.get('/api/events', async (req) => {
+    const { repo, limit } = req.query as { repo?: string; limit?: string };
+    const parsedLimit = Number(limit);
+    return ctx.store?.listEvents({
+      ...(repo ? { repo } : {}),
+      limit: Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 1000) : 100,
+    }) ?? [];
+  });
   app.get('/api/claims', async () => deriveClaims(ctx.store?.listEvents({ limit: 1000 }) ?? []));
   app.get('/api/conflicts', async () => ctx.store ? deriveConflicts(
     manager.listSessions(), ctx.store.listRepos(),
@@ -90,6 +170,19 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.get('/api/terminals/status', async () => ({
     automationHint: ctx.terminals?.automationHint(),
   }));
+
+  app.get('/api/integrations/vscode/status', async () => ({
+    ...(ctx.vscode?.status() ?? { connected: false, windows: 0, terminals: 0 }),
+    installable: fs.existsSync(VSCODE_VSIX_PATH) && Boolean(await resolveVsCodeCli()),
+  }));
+
+  app.post('/api/integrations/vscode/install', async (_req, reply) => {
+    try {
+      return await (ctx.installVsCode ?? installVsCodeExtension)();
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
 
   app.post('/api/sessions', async (req, reply) => {
     const spec = parseLaunchSpec(req.body);
@@ -112,7 +205,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (!body || typeof body.repoPath !== 'string') return reply.code(400).send({ error: 'repoPath is required' });
     installClaudeHooks(body.repoPath, HOOK_PATH);
     if (body.user === true) installCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'), HOOK_PATH);
-    return { ok: true };
+    return { ok: true, restartRequired: true };
   });
 
   app.post('/api/hooks/uninstall', async (req, reply) => {
@@ -120,7 +213,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (!body || typeof body.repoPath !== 'string') return reply.code(400).send({ error: 'repoPath is required' });
     uninstallClaudeHooks(body.repoPath);
     if (body.user === true) uninstallCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'));
-    return { ok: true };
+    return { ok: true, restartRequired: true };
   });
 
   app.post('/api/sessions/:id/stop', async (req, reply) => {
@@ -140,6 +233,43 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return manager.restart(id);
   });
 
+  app.get('/api/sessions/:id/messages', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const messages = await readBusTail(repoPath);
+    return messages.filter((message) => {
+      if (message.agent.startsWith('dashboard:')) {
+        return message.agent === `dashboard:${session.id}` && message.event === 'message';
+      }
+      const belongsToSession = message.sessionId === session.id
+        || (session.agentSessionId !== undefined && message.agent === session.agentSessionId);
+      return belongsToSession && (message.event === 'done' || message.event === 'message')
+        && typeof message.message === 'string' && message.message.trim().length > 0;
+    }).slice(-100);
+  });
+
+  app.get('/api/sessions/:id/capabilities', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const replyCapture = session.agent === 'claude'
+      ? repoHasClaudeHooks(repoPath)
+      : userHasCodexHooks();
+    const send = session.origin === 'managed'
+      ? 'managed'
+      : session.terminalApp === 'VSCode'
+        ? 'vscode'
+        : session.terminalApp === 'Terminal' || session.terminalApp === 'iTerm2'
+          ? 'terminal'
+          : session.agent === 'claude' && session.agentSessionId
+            ? 'queued'
+            : 'unavailable';
+    return { send, replyCapture };
+  });
+
   app.post('/api/sessions/:id/send', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
@@ -148,17 +278,25 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
 
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const recordSend = () => appendAgentMessage(repoPath, {
+      ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath,
+      event: 'message', message: text, sessionId: session.id,
+    });
+
     if (session.origin === 'managed') {
       if (!manager.isLive(id)) return reply.code(400).send({ error: 'session is not running' });
       manager.write(id, text);
       // both agent TUIs debounce paste-then-submit
       setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
+      await recordSend();
       return { delivered: 'typed' };
     }
 
     if (session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
       try {
         await ctx.terminals.sendText(session, text);
+        await recordSend();
         return { delivered: 'typed' };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -167,9 +305,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
 
     if (session.agent === 'claude') {
-      const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
-      await appendInboxMessage(repoPath, { ts: new Date().toISOString(), to: 'claude', text });
-      return { delivered: 'queued' };
+      if (!session.agentSessionId) {
+        return reply.code(409).send({
+          error: 'This Claude session has not completed its AgentDeck hook handshake yet. Run one turn in that terminal, then try again.',
+        });
+      }
+      await appendInboxMessage(repoPath, {
+        ts: new Date().toISOString(), to: session.agentSessionId, text,
+      });
+      await recordSend();
+      return { delivered: 'queued', hooked: repoHasClaudeHooks(repoPath) };
     }
 
     return reply.code(400).send({
