@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage } from '../types.js';
-import { appendAgentMessage, BusWatcher, parseBusLines } from './bus.js';
+import { appendAgentMessage, BusWatcher, ensureBus, parseBusLines } from './bus.js';
 
 const dirs: string[] = [];
 const message: AgentMessage = {
@@ -22,6 +22,12 @@ describe('coordination bus', () => {
     expect(parseBusLines(fs.readFileSync(path.join(repo, '.agents', 'bus.jsonl'), 'utf8'))).toEqual([message]);
   });
 
+  it('rejects records with invalid enums or malformed optional collections', () => {
+    expect(parseBusLines(JSON.stringify({ ...message, event: 'execute' }))).toEqual([]);
+    expect(parseBusLines(JSON.stringify({ ...message, blockers: 'not-an-array' }))).toEqual([]);
+    expect(parseBusLines(JSON.stringify({ ...message, status: 'root' }))).toEqual([]);
+  });
+
   it('tails newly appended records in order without replaying them', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-watch-'));
     dirs.push(repo);
@@ -33,5 +39,20 @@ describe('coordination bus', () => {
     await watcher.scan();
     expect(received).toEqual([message]);
     watcher.stop();
+  });
+
+  it('bounds startup reads while retaining valid messages at the log tail', async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-bus-tail-'));
+    dirs.push(repo);
+    const file = await ensureBus(repo);
+    const tail: AgentMessage = {
+      ts: new Date().toISOString(), agent: 'codex:test', repo, event: 'message',
+    };
+    fs.writeFileSync(file, `${'x'.repeat(1024 * 1024 + 100)}\n${JSON.stringify(tail)}\n`);
+    const received: AgentMessage[] = [];
+    const watcher = new BusWatcher(repo, (entry) => received.push(entry));
+    await watcher.start();
+    watcher.stop();
+    expect(received).toEqual([tail]);
   });
 });

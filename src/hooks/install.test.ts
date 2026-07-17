@@ -3,6 +3,7 @@ import {
   mergeClaudeSettings,
   removeClaudeSettings,
   installCodexNotify,
+  shellQuote,
   uninstallCodexNotify,
 } from './install.js';
 
@@ -26,5 +27,10 @@ describe('hook config merging', () => {
     expect(installed).toContain('agentdeck-hook');
     expect(installed).toContain('agentdeck-previous-notify:');
     expect(uninstallCodexNotify(installed)).toBe(raw);
+  });
+
+  it('shell-quotes hook paths without allowing command substitution', () => {
+    expect(shellQuote("/tmp/a'$(touch bad)/hook.mjs"))
+      .toBe("'/tmp/a'\\''$(touch bad)/hook.mjs'");
   });
 });

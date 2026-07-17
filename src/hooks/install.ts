@@ -62,11 +62,19 @@ function backup(file: string): void {
   if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.agentdeck-backup-${Date.now()}`);
 }
 
+/** POSIX-shell-safe quoting for Claude's string-valued command hooks. */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export function installClaudeHooks(repoPath: string, hookPath: string): void {
   const file = path.join(repoPath, '.claude', 'settings.json');
   fs.mkdirSync(path.dirname(file), { recursive: true });
   backup(file);
-  fs.writeFileSync(file, mergeClaudeSettings(fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '', `node ${JSON.stringify(hookPath)}`));
+  fs.writeFileSync(file, mergeClaudeSettings(
+    fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '',
+    `node ${shellQuote(hookPath)}`,
+  ));
 }
 
 export function uninstallClaudeHooks(repoPath: string): void {

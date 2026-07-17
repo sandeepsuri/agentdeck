@@ -354,9 +354,12 @@ For concurrent work, prefer separate branches or Git worktrees. Automatic worktr
 ## Data and Security
 
 - The HTTP and WebSocket server binds to `127.0.0.1` only.
+- Browser requests must come from the exact loopback origin serving AgentDeck; other localhost sites are rejected.
 - The main database is stored at `~/.agentdeck/agentdeck.db` by default.
+- Database files are restricted to the current OS user, and managed-session prompts, arguments, and environment overrides are kept in memory rather than persisted.
 - Repository coordination files are stored under each repository's `.agents/` directory.
 - Hook installation changes `.claude/settings.json` and optionally `~/.codex/config.toml`; backups are created before edits.
+- The VS Code helper accepts only loopback `ws://` or `wss://` server URLs.
 - AgentDeck does not expose a network listener to other devices by default.
 - Claude Code and Codex still communicate with their respective providers according to their own configuration.
 

@@ -6,7 +6,14 @@
     "agentdeck": "bin/agentdeck.mjs",
     "agentdeck-hook": "bin/agentdeck-hook.mjs"
   },
-  "files": ["bin", "dist", "migrations", "scripts/postinstall.mjs", "README.md", "LICENSE"],
+  "files": [
+    "bin",
+    "dist",
+    "migrations",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "description": "Local-first control panel for Claude Code and Codex CLI sessions on macOS.",
   "type": "module",
   "engines": {
@@ -43,6 +50,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.7"
   }
 }

@@ -2,6 +2,11 @@
 // UI (src/ui/components/Terminal.tsx).
 import type { AgentMessage, Session } from './types.js';
 
+const MAX_ID_LENGTH = 200;
+const MAX_INPUT_LENGTH = 64 * 1024;
+const MAX_ERROR_LENGTH = 4096;
+const MAX_TERMINAL_DIMENSION = 1000;
+
 export interface VsCodeTerminalFrame {
   id: string;
   name: string;
@@ -51,12 +56,18 @@ export function parseClientFrame(raw: string): ClientFrame | null {
   const f = msg as Record<string, unknown>;
   switch (f.t) {
     case 'attach':
-      return typeof f.sessionId === 'string' ? { t: 'attach', sessionId: f.sessionId } : null;
+      return typeof f.sessionId === 'string' && f.sessionId.length <= MAX_ID_LENGTH
+        ? { t: 'attach', sessionId: f.sessionId }
+        : null;
     case 'input':
-      return typeof f.data === 'string' ? { t: 'input', data: f.data } : null;
+      return typeof f.data === 'string' && f.data.length <= MAX_INPUT_LENGTH
+        ? { t: 'input', data: f.data }
+        : null;
     case 'resize':
       return typeof f.cols === 'number' && typeof f.rows === 'number' &&
-        Number.isInteger(f.cols) && Number.isInteger(f.rows) && f.cols > 0 && f.rows > 0
+        Number.isInteger(f.cols) && Number.isInteger(f.rows)
+        && f.cols > 0 && f.cols <= MAX_TERMINAL_DIMENSION
+        && f.rows > 0 && f.rows <= MAX_TERMINAL_DIMENSION
         ? { t: 'resize', cols: f.cols, rows: f.rows }
         : null;
     case 'detach':
@@ -69,8 +80,9 @@ export function parseClientFrame(raw: string): ClientFrame | null {
         : null;
     }
     case 'vscode_result':
-      return typeof f.requestId === 'string' && typeof f.ok === 'boolean'
-        && (f.error === undefined || typeof f.error === 'string')
+      return typeof f.requestId === 'string' && f.requestId.length <= MAX_ID_LENGTH
+        && typeof f.ok === 'boolean'
+        && (f.error === undefined || (typeof f.error === 'string' && f.error.length <= MAX_ERROR_LENGTH))
         ? { t: 'vscode_result', requestId: f.requestId, ok: f.ok, ...(typeof f.error === 'string' ? { error: f.error } : {}) }
         : null;
     default:

@@ -18,10 +18,21 @@ import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallC
 import { deriveConflicts } from '../conflicts/derive.js';
 import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordination/bus.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
+import { publicSession } from './security.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
 const MESSAGE_TAIL_BYTES = 512 * 1024;
+const MAX_NAME_LENGTH = 200;
+const MAX_PATH_LENGTH = 4096;
+const MAX_BRANCH_LENGTH = 1024;
+const MAX_PROMPT_LENGTH = 256 * 1024;
+const MAX_MESSAGE_LENGTH = 64 * 1024;
+const MAX_EXTRA_ARGS = 100;
+const MAX_EXTRA_ARG_LENGTH = 16 * 1024;
+const MAX_ENV_VARS = 100;
+const MAX_ENV_VALUE_LENGTH = 64 * 1024;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const execFileAsync = promisify(execFile);
 
 async function readBusTail(repoPath: string) {
@@ -55,6 +66,18 @@ function userHasCodexHooks(): boolean {
     return fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8').includes('agentdeck-hook');
   } catch {
     return false;
+  }
+}
+
+function parseRepoPath(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_PATH_LENGTH) return undefined;
+  const repoPath = expandTilde(value);
+  try {
+    return fs.statSync(repoPath).isDirectory() && fs.existsSync(path.join(repoPath, '.git'))
+      ? repoPath
+      : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -94,21 +117,40 @@ function parseLaunchSpec(body: unknown): LaunchSpec | string {
   const b = body as Record<string, unknown>;
   if (b.agent !== 'claude' && b.agent !== 'codex') return 'agent must be "claude" or "codex"';
   if (typeof b.cwd !== 'string' || b.cwd === '') return 'cwd is required';
+  if (b.cwd.length > MAX_PATH_LENGTH) return 'cwd is too long';
   const cwd = expandTilde(b.cwd);
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
     return `cwd is not a directory: ${cwd}`;
   }
   const spec: LaunchSpec = { agent: b.agent as AgentType, cwd };
+  if (b.initialPrompt !== undefined && typeof b.initialPrompt !== 'string') return 'initialPrompt must be a string';
+  if (typeof b.initialPrompt === 'string' && b.initialPrompt.length > MAX_PROMPT_LENGTH) return 'initialPrompt is too long';
   if (typeof b.initialPrompt === 'string' && b.initialPrompt !== '') spec.initialPrompt = b.initialPrompt;
+  if (b.name !== undefined && typeof b.name !== 'string') return 'name must be a string';
+  if (typeof b.name === 'string' && b.name.length > MAX_NAME_LENGTH) return 'name is too long';
   if (typeof b.name === 'string' && b.name !== '') spec.name = b.name;
+  if (b.branch !== undefined && typeof b.branch !== 'string') return 'branch must be a string';
+  if (typeof b.branch === 'string' && b.branch.length > MAX_BRANCH_LENGTH) return 'branch is too long';
   if (typeof b.branch === 'string' && b.branch !== '') spec.branch = b.branch;
-  if (Array.isArray(b.extraArgs) && b.extraArgs.every((a) => typeof a === 'string')) {
+  if (b.extraArgs !== undefined) {
+    if (!Array.isArray(b.extraArgs) || b.extraArgs.length > MAX_EXTRA_ARGS
+      || !b.extraArgs.every((arg) => typeof arg === 'string' && arg.length <= MAX_EXTRA_ARG_LENGTH)) {
+      return 'extraArgs must contain at most 100 bounded strings';
+    }
     spec.extraArgs = b.extraArgs as string[];
   }
-  if (typeof b.env === 'object' && b.env !== null) {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(b.env as Record<string, unknown>)) {
-      if (typeof v === 'string') env[k] = v;
+  if (b.env !== undefined) {
+    if (typeof b.env !== 'object' || b.env === null || Array.isArray(b.env)) {
+      return 'env must be an object';
+    }
+    const entries = Object.entries(b.env as Record<string, unknown>);
+    if (entries.length > MAX_ENV_VARS) return 'env contains too many variables';
+    const env: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const [k, v] of entries) {
+      if (!ENV_NAME.test(k)) return `invalid environment variable name: ${k}`;
+      if (typeof v !== 'string') return `environment variable ${k} must be a string`;
+      if (v.length > MAX_ENV_VALUE_LENGTH) return `environment variable ${k} is too long`;
+      env[k] = v;
     }
     spec.env = env;
   }
@@ -127,7 +169,7 @@ export interface RouteContext {
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
-  app.get('/api/sessions', async () => manager.listSessions());
+  app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
 
   app.patch('/api/sessions/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -138,8 +180,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (name !== undefined && typeof name !== 'string') {
       return reply.code(400).send({ error: 'name must be a string' });
     }
+    if (typeof name === 'string' && name.length > MAX_NAME_LENGTH) {
+      return reply.code(400).send({ error: 'name is too long' });
+    }
     const session = manager.renameSession(id, name?.trim() || undefined);
-    return session ?? reply.code(404).send({ error: 'no such session' });
+    return session ? publicSession(session) : reply.code(404).send({ error: 'no such session' });
   });
 
   app.get('/api/repos', async () => {
@@ -193,7 +238,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify(['node', HOOK_PATH])}`];
       }
       const session = await manager.launch(spec);
-      return reply.code(201).send(session);
+      return reply.code(201).send(publicSession(session));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(400).send({ error: message });
@@ -202,18 +247,28 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.post('/api/hooks/install', async (req, reply) => {
     const body = req.body as { repoPath?: unknown; user?: unknown } | null;
-    if (!body || typeof body.repoPath !== 'string') return reply.code(400).send({ error: 'repoPath is required' });
-    installClaudeHooks(body.repoPath, HOOK_PATH);
-    if (body.user === true) installCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'), HOOK_PATH);
-    return { ok: true, restartRequired: true };
+    const repoPath = parseRepoPath(body?.repoPath);
+    if (!repoPath) return reply.code(400).send({ error: 'repoPath must be an existing Git repository' });
+    try {
+      installClaudeHooks(repoPath, HOOK_PATH);
+      if (body?.user === true) installCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'), HOOK_PATH);
+      return { ok: true, restartRequired: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.post('/api/hooks/uninstall', async (req, reply) => {
     const body = req.body as { repoPath?: unknown; user?: unknown } | null;
-    if (!body || typeof body.repoPath !== 'string') return reply.code(400).send({ error: 'repoPath is required' });
-    uninstallClaudeHooks(body.repoPath);
-    if (body.user === true) uninstallCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'));
-    return { ok: true, restartRequired: true };
+    const repoPath = parseRepoPath(body?.repoPath);
+    if (!repoPath) return reply.code(400).send({ error: 'repoPath must be an existing Git repository' });
+    try {
+      uninstallClaudeHooks(repoPath);
+      if (body?.user === true) uninstallCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'));
+      return { ok: true, restartRequired: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.post('/api/sessions/:id/stop', async (req, reply) => {
@@ -227,10 +282,14 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
     if (!session) return reply.code(404).send({ error: 'no such session' });
-    if (session.origin !== 'managed' || !session.launchSpec) {
+    if (session.origin !== 'managed') {
       return reply.code(400).send({ error: 'session is not restartable' });
     }
-    return manager.restart(id);
+    try {
+      return publicSession(await manager.restart(id));
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get('/api/sessions/:id/messages', async (req, reply) => {
@@ -277,6 +336,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const body = req.body as { text?: unknown } | null;
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > MAX_MESSAGE_LENGTH) return reply.code(400).send({ error: 'text is too long' });
 
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const recordSend = () => appendAgentMessage(repoPath, {
