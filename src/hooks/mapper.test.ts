@@ -13,12 +13,15 @@ describe('mapHookPayload', () => {
     const mapped = claude.map((payload) => mapHookPayload(payload)).filter(Boolean);
     expect(mapped.find((entry) => entry?.status === 'waiting_input')).toMatchObject({ agent: expect.stringMatching(/^claude:/), event: 'status' });
     expect(mapped.find((entry) => entry?.event === 'claim')).toMatchObject({ files: [expect.not.stringMatching(/^\//)] });
-    expect(mapped.find((entry) => entry?.event === 'done')).toMatchObject({ status: 'idle' });
+    expect(mapped.find((entry) => entry?.event === 'done')).toMatchObject({
+      status: 'idle', turnId: expect.any(String),
+    });
   });
 
   it('maps the real kebab-case Codex notification', () => {
     expect(mapHookPayload(codex[0])).toMatchObject({
-      agent: expect.stringMatching(/^codex:/), event: 'status', status: 'idle', message: 'DONE',
+      agent: expect.stringMatching(/^codex:/), event: 'message', status: 'idle', message: 'DONE',
+      turnId: expect.any(String),
     });
   });
 });

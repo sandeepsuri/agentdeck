@@ -47,6 +47,7 @@ const externalSession: Session = {
   tty: 'ttys008',
   terminalApp: 'Terminal',
   terminalRef: { windowId: '58250', tabId: '1' },
+  agentSessionId: 'codex:thread-123',
 };
 
 describe('sessions', () => {

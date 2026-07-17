@@ -92,7 +92,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   private async attachProcess(session: Session, spec: LaunchSpec): Promise<void> {
-    const handle = await this.backend.spawn(spec);
+    const handle = await this.backend.spawn({
+      ...spec,
+      env: { ...(spec.env ?? {}), AGENTDECK_SESSION_ID: session.id },
+    });
     session.pid = handle.pid;
     const live: Live = { handle, buffer: new RingBuffer(this.opts.bufferSize), exited: false };
     this.live.set(session.id, live);

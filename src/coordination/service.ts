@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SessionManager } from '../sessions/manager.js';
 import type { Store } from '../store/index.js';
-import type { AgentMessage, Repo, Task } from '../types.js';
+import type { AgentMessage, Repo, Session, Task } from '../types.js';
 import { BusWatcher, agentsDir } from './bus.js';
 import { renderStatusMarkdown } from './status.js';
+
+const hasConcreteAgentIdentity = (message: AgentMessage): boolean =>
+  !message.agent.endsWith(':unknown');
 
 export class CoordinationService {
   private watchers = new Map<string, BusWatcher>();
@@ -28,12 +31,58 @@ export class CoordinationService {
     this.timers.clear();
   }
 
+  /** Bind a newly discovered process to a hook event that arrived first. */
+  reconcileSession(session: Session): Session {
+    if (session.agentSessionId) return session;
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const event = this.store.listEvents({ repo: repoPath, limit: 250 }).reverse().find((candidate) => {
+      if (!hasConcreteAgentIdentity(candidate)) return false;
+      if (candidate.agent.split(':')[0] !== session.agent) return false;
+      if (Date.parse(candidate.ts) < Date.parse(session.startedAt)) return false;
+      if (candidate.sessionId === session.id || candidate.agent === session.agentSessionId) return true;
+      if (session.pid !== undefined && candidate.sourcePids?.includes(session.pid)) return true;
+      return session.tty !== undefined && candidate.tty === session.tty;
+    });
+    if (!event) return session;
+    const updated = event.agent === session.agentSessionId
+      ? session
+      : { ...session, agentSessionId: event.agent };
+    if (updated !== session) {
+      this.store.upsertSession(updated);
+      this.manager.publishSessionUpdate(updated);
+    }
+    if (event.status) this.manager.applyHookStatus(updated.id, event.status, event.ts);
+    return this.manager.getSession(updated.id) ?? updated;
+  }
+
   private ingest(repoPath: string, message: AgentMessage): void {
     this.store.appendEvent(message);
+    if (!hasConcreteAgentIdentity(message)) {
+      this.manager.publishAgentEvent(message);
+      return;
+    }
+    const messageAt = Date.parse(message.ts);
     const candidates = this.store.listSessions().filter((session) =>
       session.status !== 'exited' && session.agent === message.agent.split(':')[0]
       && (session.repoId === repoPath || session.cwd.startsWith(`${repoPath}${path.sep}`) || session.cwd === repoPath));
-    const session = candidates.sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    const currentCandidates = candidates.filter((candidate) =>
+      !Number.isFinite(messageAt) || messageAt >= Date.parse(candidate.startedAt));
+    let session = message.sessionId
+      ? currentCandidates.find((candidate) => candidate.id === message.sessionId)
+      : currentCandidates.find((candidate) => candidate.agentSessionId === message.agent);
+    if (!session && message.sourcePids?.length) {
+      session = currentCandidates.find((candidate) =>
+        candidate.pid !== undefined && message.sourcePids!.includes(candidate.pid));
+    }
+    if (!session && message.tty) {
+      const ttyMatches = currentCandidates.filter((candidate) => candidate.tty === message.tty);
+      if (ttyMatches.length === 1) session = ttyMatches[0];
+    }
+    if (session && session.agentSessionId !== message.agent) {
+      session = { ...(this.manager.getSession(session.id) ?? session), agentSessionId: message.agent };
+      this.store.upsertSession(session);
+      this.manager.publishSessionUpdate(session);
+    }
     if (session && message.status) this.manager.applyHookStatus(session.id, message.status, message.ts);
     if (message.task) this.updateTask(repoPath, message, session?.id);
     if (session && message.task && session.taskId !== message.task) {

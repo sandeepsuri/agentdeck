@@ -33,8 +33,10 @@ export interface Session {
   launchSpec?: LaunchSpec; // for restart
   // external only
   tty?: string; // e.g. ttys004
-  terminalApp?: 'Terminal' | 'iTerm2' | 'unknown';
+  terminalApp?: 'Terminal' | 'iTerm2' | 'VSCode' | 'unknown';
   terminalRef?: { windowId: string; tabId: string; sessionId?: string };
+  // Claude session UUID / Codex thread ID emitted by the CLI hook.
+  agentSessionId?: string;
 }
 
 export interface LaunchSpec {
@@ -89,6 +91,11 @@ export interface AgentMessage {
   blockers?: string[];
   message?: string; // free text for other agents
   summary?: string; // completion summary on 'done'
+  // Correlation metadata used to bind a hook event to one AgentDeck session.
+  sessionId?: string; // explicit AgentDeck session id (managed sessions)
+  sourcePids?: number[]; // hook process ancestry (external sessions)
+  tty?: string;
+  turnId?: string; // stable Claude prompt / Codex turn id for deduplication
 }
 
 export interface FileClaim {

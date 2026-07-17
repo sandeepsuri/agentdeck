@@ -17,9 +17,10 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
       ts,
       agent: `codex:${text(payload['thread-id']) ?? 'unknown'}`,
       repo: cwd,
-      event: 'status',
+      event: 'message',
       status: 'idle',
       message: text(payload['last-assistant-message']),
+      turnId: text(payload['turn-id']),
     };
   }
 
@@ -41,6 +42,7 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
     return {
       ts, agent, repo: cwd, event: 'done', status: 'idle',
       message: text(payload.last_assistant_message), summary: text(payload.last_assistant_message),
+      turnId: text(payload.prompt_id),
     };
   }
   return null;

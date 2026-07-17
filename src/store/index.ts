@@ -23,7 +23,7 @@ interface SessionRow {
   pid: number | null; started_at: string; last_activity_at: string; status: string;
   status_source: string; backend: string | null; tmux_target: string | null;
   launch_spec: string | null; tty: string | null; terminal_app: string | null;
-  terminal_ref: string | null;
+  terminal_ref: string | null; agent_session_id: string | null;
 }
 
 function rowToSession(r: SessionRow): Session {
@@ -51,6 +51,7 @@ function rowToSession(r: SessionRow): Session {
   if (r.terminal_app !== null) s.terminalApp = r.terminal_app as Session['terminalApp'];
   const terminalRef = fromJson<Session['terminalRef']>(r.terminal_ref);
   if (terminalRef !== undefined) s.terminalRef = terminalRef;
+  if (r.agent_session_id !== null) s.agentSessionId = r.agent_session_id;
   return s;
 }
 
@@ -118,10 +119,12 @@ export class Store {
       .prepare(
         `INSERT INTO sessions (id, origin, agent, name, task_id, repo_id, cwd, branch,
            worktree_path, pid, started_at, last_activity_at, status, status_source,
-           backend, tmux_target, launch_spec, tty, terminal_app, terminal_ref)
+           backend, tmux_target, launch_spec, tty, terminal_app, terminal_ref,
+           agent_session_id)
          VALUES (@id, @origin, @agent, @name, @taskId, @repoId, @cwd, @branch,
            @worktreePath, @pid, @startedAt, @lastActivityAt, @status, @statusSource,
-           @backend, @tmuxTarget, @launchSpec, @tty, @terminalApp, @terminalRef)
+           @backend, @tmuxTarget, @launchSpec, @tty, @terminalApp, @terminalRef,
+           @agentSessionId)
          ON CONFLICT(id) DO UPDATE SET
            origin=excluded.origin, agent=excluded.agent, name=excluded.name,
            task_id=excluded.task_id, repo_id=excluded.repo_id, cwd=excluded.cwd,
@@ -131,7 +134,8 @@ export class Store {
            status_source=excluded.status_source, backend=excluded.backend,
            tmux_target=excluded.tmux_target, launch_spec=excluded.launch_spec,
            tty=excluded.tty, terminal_app=excluded.terminal_app,
-           terminal_ref=excluded.terminal_ref`,
+           terminal_ref=excluded.terminal_ref,
+           agent_session_id=excluded.agent_session_id`,
       )
       .run({
         id: s.id,
@@ -154,6 +158,7 @@ export class Store {
         tty: s.tty ?? null,
         terminalApp: s.terminalApp ?? null,
         terminalRef: toJson(s.terminalRef),
+        agentSessionId: s.agentSessionId ?? null,
       });
   }
 
