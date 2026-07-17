@@ -1,0 +1,46 @@
+{
+  "name": "agentdeck",
+  "version": "0.1.0",
+  "license": "MIT",
+  "bin": {
+    "agentdeck": "bin/agentdeck.mjs",
+    "agentdeck-hook": "bin/agentdeck-hook.mjs"
+  },
+  "files": ["bin", "dist", "migrations", "scripts/postinstall.mjs", "README.md", "LICENSE"],
+  "description": "Local-first control panel for Claude Code and Codex CLI sessions on macOS.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
+    "start": "node bin/agentdeck.mjs",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "better-sqlite3": "^12.11.1",
+    "fastify": "^5.2.0",
+    "node-pty": "^1.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
