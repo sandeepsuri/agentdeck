@@ -14,7 +14,8 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && npm run build:vscode",
+    "build:vscode": "node scripts/build-vscode-extension.mjs",
     "start": "node bin/agentdeck.mjs",
     "prepack": "npm run build",
     "test": "vitest run",
@@ -38,6 +39,7 @@
     "@types/react-dom": "^18.3.5",
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",

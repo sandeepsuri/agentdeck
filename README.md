@@ -32,7 +32,7 @@ All screenshot data is fictional.
 - See Claude Code and Codex sessions across multiple repositories in one place.
 - Launch managed agents and interact with their terminal directly in the browser.
 - Discover agents already running in Terminal.app, iTerm2, Cursor, or VS Code terminals.
-- Focus a mapped Terminal.app or iTerm2 tab from the dashboard.
+- Focus a mapped Terminal.app, iTerm2, or VS Code integrated terminal from the dashboard.
 - Send prompts or follow-up messages to supported managed and external sessions.
 - Track whether an agent is starting, working, waiting for input, idle, completed, or gone.
 - Filter and group sessions by repository, agent, status, or origin.
@@ -50,7 +50,7 @@ All screenshot data is fictional.
 | Repository scanner | Scans one directory level for Git repositories and linked worktrees, including branch and dirty-tree information. |
 | Safe branch selection | Can check out an existing local branch before launch, but refuses to switch branches while the working tree is dirty. |
 | Live dashboard | WebSocket updates, repository grouping, search, filters, editable labels, origin badges, activity times, and status-source tooltips. |
-| Terminal focus | Maps TTYs to Terminal.app and iTerm2 tabs and can bring a mapped tab to the foreground. |
+| Terminal focus | Maps TTYs to Terminal.app, iTerm2, and connected VS Code terminals and can bring the exact terminal to the foreground. |
 | Agent status | Combines hook events, managed terminal output, process liveness, and sustained CPU activity using `hook > output > CPU` precedence. |
 | Hooks | Claude Code hooks report prompts, tool usage, edits, notifications, starts, and stops. Codex notify reports completed turns. |
 | Messaging | Sends directly to managed PTYs and scriptable terminal tabs; queued Claude messages can be delivered through hooks on the next turn. |
@@ -143,11 +143,15 @@ If permission was denied, open:
 
 AgentDeck continues running when Automation permission is unavailable.
 
-### 8. Install hooks for richer status and messaging
+### 8. Connect VS Code integrated terminals
+
+Click **Install VS Code helper**, then reload each open VS Code window once. The bundled local extension reports terminal shell process IDs to AgentDeck so prompts and focus actions reach the exact split terminal. It connects only to AgentDeck on loopback.
+
+### 9. Install hooks for richer status and messaging
 
 From the dashboard:
 
-1. Select the target repository with the repository filter.
+1. Open a session in the target repository (or select it with the repository filter).
 2. Click **Install hooks**.
 3. Run a turn in the agent so AgentDeck can associate the hook identity with the discovered session.
 
@@ -212,7 +216,7 @@ External sessions were started elsewhere and discovered from the macOS process t
 - Owning terminal application, when known
 - **Focus terminal** and message controls, when supported
 
-Terminal.app and iTerm2 sessions can usually be focused. Cursor and VS Code integrated terminals may appear as `unknown` because their TTYs are real but do not belong to a Terminal.app or iTerm2 tab.
+Terminal.app and iTerm2 sessions use macOS Automation. VS Code integrated terminals become focusable and scriptable after the bundled helper connects. Cursor terminals may still appear as `unknown`.
 
 ### Filters and keyboard shortcuts
 
@@ -276,13 +280,14 @@ The **Install hooks** and **Remove hooks** buttons control enhanced monitoring a
 - Hooks on: richer status changes, edit claims, completed-turn messages, and queued Claude delivery.
 - Hooks off: process discovery and CPU status still work, but hook-driven details are unavailable.
 
-Use the repository filter before clicking the hook button so the intended repository is selected.
+Open a session before clicking the hook button so its repository is targeted; the repository filter is used as the fallback when no session is open.
 
 ## Send Messages to Agents
 
 Managed sessions expose their terminal directly in AgentDeck; type into that terminal as you would in the original CLI. External session rows provide a separate conversation panel:
 
 - Terminal.app/iTerm2 sessions: AgentDeck types into the mapped tab through Automation.
+- VS Code sessions: the companion extension sends the prompt to the exact mapped integrated terminal.
 - Claude in an unknown terminal: with hooks installed and associated, the message is queued and delivered as additional context on the next prompt or session start.
 - Codex in an unknown terminal: queued inbound delivery is not currently available.
 
@@ -397,8 +402,9 @@ ps -p <pid> -o pid,ppid,tty,lstart,command
 ### Focus is unavailable
 
 - Confirm macOS Automation permission.
-- Confirm the session belongs to Terminal.app or iTerm2.
-- Cursor and VS Code integrated terminals may remain `unknown` and cannot currently be focused.
+- For Terminal.app/iTerm2, confirm the session belongs to the expected tab.
+- For VS Code, install the helper and reload the VS Code window once.
+- Cursor integrated terminals may remain `unknown` and cannot currently be focused.
 
 ### Repositories do not appear
 
