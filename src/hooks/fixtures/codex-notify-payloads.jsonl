@@ -1,0 +1,1 @@
+{"type": "agent-turn-complete", "thread-id": "019f6ec4-cd8f-7552-a51c-693d0240498b", "turn-id": "019f6ec4-cecf-7d72-8d6c-8f3690b908b8", "cwd": "/Users/dev/projects/example-app", "client": "codex_exec", "input-messages": ["Create a file named codex-hello.txt containing exactly \"hi\". Then reply DONE."], "last-assistant-message": "DONE"}
