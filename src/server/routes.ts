@@ -8,6 +8,7 @@ import { expandTilde } from '../config.js';
 import { checkoutBranch, scanRepos, git } from '../git/scan.js';
 import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
 import type { SessionManager } from '../sessions/manager.js';
+import { resolveAgentExecutable } from '../sessions/executable.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
 import type { AgentType, LaunchSpec } from '../types.js';
@@ -251,11 +252,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
     checks.push({ label: branch ? 'Branch available' : 'Keep current branch', ok: branchOk, ...(!branchOk ? { detail: 'Enable “Create branch if missing” or choose an existing branch.' } : {}) });
     const executable = agent === 'claude' || agent === 'codex' ? agent : '';
-    let cliOk = false;
-    if (executable) {
-      try { await execFileAsync('/usr/bin/which', [executable], { encoding: 'utf8', timeout: 3000 }); cliOk = true; } catch { /* unavailable */ }
-    }
-    checks.push({ label: `${agent === 'codex' ? 'Codex' : 'Claude'} CLI detected`, ok: cliOk, ...(!cliOk ? { detail: `${executable || 'Agent'} is not on PATH.` } : {}) });
+    const cliPath = executable ? resolveAgentExecutable(executable) : undefined;
+    const cliOk = Boolean(cliPath);
+    checks.push({ label: `${agent === 'codex' ? 'Codex' : 'Claude'} CLI detected`, ok: cliOk, ...(!cliOk ? { detail: `${executable || 'Agent'} could not be resolved from PATH or common install locations.` } : {}) });
     checks.push({ label: 'PTY engine available', ok: true });
     return reply.send({ ready: checks.every((check) => check.ok), checks });
   });

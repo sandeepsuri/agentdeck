@@ -56,7 +56,8 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
   });
 
   useEffect(() => {
-    if (!cwd) return setPreflight(null);
+    setPreflight(null);
+    if (!cwd) return;
     let disposed = false;
     const timer = setTimeout(() => {
       fetch('/api/launch/preflight', {

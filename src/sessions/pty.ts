@@ -2,6 +2,7 @@
 import * as pty from 'node-pty';
 import type { LaunchSpec } from '../types.js';
 import type { Handle, SessionBackend } from './backend.js';
+import { resolveAgentExecutable } from './executable.js';
 
 export interface CommandSpec {
   file: string;
@@ -10,7 +11,7 @@ export interface CommandSpec {
 
 /** agent → executable. Overridable so tests can substitute bash/cat. */
 export function defaultCommandFor(spec: LaunchSpec): CommandSpec {
-  return { file: spec.agent, args: spec.extraArgs ?? [] };
+  return { file: resolveAgentExecutable(spec.agent) ?? spec.agent, args: spec.extraArgs ?? [] };
 }
 
 export interface PtyBackendOptions {
