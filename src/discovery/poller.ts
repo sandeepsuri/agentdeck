@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Store } from '../store/index.js';
-import type { Session } from '../types.js';
+import type { DiscoveryStatus, Session } from '../types.js';
 import { findAgentProcesses, parseLsofCwd, parsePs } from './ps.js';
 import type { TerminalRegistry } from './terminals/index.js';
 import { reduceStatus } from '../sessions/status.js';
@@ -28,7 +28,10 @@ export interface DiscoveryPollerOptions {
 }
 
 async function runCommand(file: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(file, args, { encoding: 'utf8', timeout: 10_000 });
+  const { stdout } = await execFileAsync(file, args, {
+    encoding: 'utf8', timeout: 10_000,
+    env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+  });
   return stdout;
 }
 
@@ -48,9 +51,20 @@ async function resolveGitDefault(cwd: string): Promise<GitResolution> {
 }
 
 export class DiscoveryPoller {
-  private interval?: NodeJS.Timeout;
+  private timer?: NodeJS.Timeout;
+  private running = false;
+  private generation = 0;
   private polling = false;
+  private inFlight?: Promise<void>;
   private hotSamples = new Map<string, number>();
+  private health: DiscoveryStatus = {
+    running: false,
+    polling: false,
+    scannedProcesses: 0,
+    managedPids: 0,
+    detectedProcesses: 0,
+    publishedSessions: 0,
+  };
   private readonly run: CommandRunner;
   private readonly resolveGit: (cwd: string) => Promise<GitResolution>;
 
@@ -60,28 +74,54 @@ export class DiscoveryPoller {
   }
 
   start(): void {
-    if (this.interval) return;
-    this.pollSafely();
-    this.interval = setInterval(() => this.pollSafely(), this.options.intervalMs ?? 5000);
+    if (this.running) return;
+    this.running = true;
+    const generation = ++this.generation;
+    this.health.running = true;
+    void this.runScheduled(generation);
   }
 
   stop(): void {
-    if (this.interval) clearInterval(this.interval);
-    this.interval = undefined;
+    this.running = false;
+    this.generation += 1;
+    this.health.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
   }
 
   async poll(): Promise<void> {
-    if (this.polling) return;
+    if (this.inFlight) return this.inFlight;
+    const cycle = this.pollOnce();
+    this.inFlight = cycle;
+    try {
+      await cycle;
+    } finally {
+      if (this.inFlight === cycle) this.inFlight = undefined;
+    }
+  }
+
+  status(): DiscoveryStatus {
+    return { ...this.health, running: this.running, polling: this.polling };
+  }
+
+  private async pollOnce(): Promise<void> {
     this.polling = true;
+    this.health.polling = true;
+    this.health.lastStartedAt = new Date().toISOString();
     try {
       const psOutput = await this.run('ps', [
         'axo',
         'pid=,ppid=,tty=,state=,%cpu=,lstart=,command=',
       ]);
-      const processes = findAgentProcesses(parsePs(psOutput), this.options.getManagedPids());
-      await this.options.terminals?.refresh();
+      const rows = parsePs(psOutput);
+      const managedPids = this.options.getManagedPids();
+      const processes = findAgentProcesses(rows, managedPids);
+      this.health.scannedProcesses = rows.length;
+      this.health.managedPids = managedPids.size;
+      this.health.detectedProcesses = processes.length;
       const seen = new Set<string>();
       const now = new Date().toISOString();
+      let published = 0;
 
       for (const process of processes) {
         const id = `ext-${process.pid}-${process.startEpoch}`;
@@ -138,6 +178,7 @@ export class DiscoveryPoller {
           delete session.terminalRef;
         }
         this.saveAndPublish(session);
+        published += 1;
       }
 
       // A closed terminal means the session is gone — remove its row so it
@@ -148,8 +189,39 @@ export class DiscoveryPoller {
         this.options.store.deleteSession(session.id);
         this.options.remove(session.id);
       }
+
+      // Terminal automation enriches already-visible sessions. A slow or
+      // unavailable adapter must never prevent process discovery itself.
+      if (this.options.terminals) {
+        await this.options.terminals.refresh();
+        for (const process of processes) {
+          const id = `ext-${process.pid}-${process.startEpoch}`;
+          const session = this.options.store.getSession(id);
+          if (!session) continue;
+          const terminal = this.options.terminals.lookup(process.tty);
+          const previousApp = session.terminalApp;
+          const previousRef = JSON.stringify(session.terminalRef);
+          if (terminal) {
+            session.terminalApp = terminal.terminalApp;
+            session.terminalRef = terminal.terminalRef;
+          } else {
+            session.terminalApp = 'unknown';
+            delete session.terminalRef;
+          }
+          if (previousApp !== session.terminalApp || previousRef !== JSON.stringify(session.terminalRef)) {
+            this.saveAndPublish(session);
+          }
+        }
+      }
+      this.health.publishedSessions = published;
+      this.health.lastCompletedAt = new Date().toISOString();
+      delete this.health.lastError;
+    } catch (error) {
+      this.health.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
     } finally {
       this.polling = false;
+      this.health.polling = false;
     }
   }
 
@@ -158,9 +230,15 @@ export class DiscoveryPoller {
     this.options.publish(session);
   }
 
-  private pollSafely(): void {
-    void this.poll().catch((error) => {
+  private async runScheduled(generation: number): Promise<void> {
+    try {
+      await this.poll();
+    } catch (error) {
       console.warn(`[agentdeck] discovery poll failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    } finally {
+      if (this.running && generation === this.generation) {
+        this.timer = setTimeout(() => void this.runScheduled(generation), this.options.intervalMs ?? 5000);
+      }
+    }
   }
 }

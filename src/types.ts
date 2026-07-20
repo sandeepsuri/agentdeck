@@ -12,6 +12,18 @@ export type SessionStatus =
   | 'unknown';
 export type StatusSource = 'hook' | 'output_heuristic' | 'cpu_heuristic' | 'process_gone';
 
+export interface DiscoveryStatus {
+  running: boolean;
+  polling: boolean;
+  lastStartedAt?: string;
+  lastCompletedAt?: string;
+  lastError?: string;
+  scannedProcesses: number;
+  managedPids: number;
+  detectedProcesses: number;
+  publishedSessions: number;
+}
+
 export interface Session {
   id: string; // uuid (managed) | `ext-${pid}-${startTime}` (external)
   origin: SessionOrigin;

@@ -19,6 +19,7 @@ import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallC
 import { deriveConflicts } from '../conflicts/derive.js';
 import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordination/bus.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
+import type { DiscoveryPoller } from '../discovery/poller.js';
 import { publicSession } from './security.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
@@ -165,12 +166,28 @@ export interface RouteContext {
   terminals?: TerminalRegistry;
   coordination?: CoordinationService;
   vscode?: VsCodeBridge;
+  discovery?: DiscoveryPoller;
   installVsCode?: () => Promise<VsCodeInstallResult>;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
   app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
+
+  app.get('/api/discovery/status', async () => ctx.discovery?.status() ?? {
+    running: false, polling: false, scannedProcesses: 0, managedPids: 0,
+    detectedProcesses: 0, publishedSessions: 0,
+  });
+
+  app.post('/api/discovery/refresh', async (_req, reply) => {
+    if (!ctx.discovery) return reply.code(503).send({ error: 'discovery is unavailable' });
+    try {
+      await ctx.discovery.poll();
+      return ctx.discovery.status();
+    } catch {
+      return reply.code(503).send(ctx.discovery.status());
+    }
+  });
 
   app.patch('/api/sessions/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
