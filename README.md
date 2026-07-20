@@ -56,6 +56,7 @@ All screenshot data is fictional.
 - Track whether an agent is starting, working, waiting for input, idle, completed, or gone.
 - Watch staged, unstaged, and untracked changes land live, or compare the current branch with its base branch.
 - Review unified or split diffs, stage or unstage files, discard changes, and open files in your editor.
+- Commit staged changes locally or publish the current branch as a draft or ready GitHub pull request.
 - Scan every session at once in the terminal-style mission control grid.
 - Jump between views, sessions, and actions with the command palette.
 - Label sessions so long-running work is easier to identify.
@@ -74,6 +75,7 @@ All screenshot data is fictional.
 | Unified workspace | Persistent managed/discovered rail with Operations, Terminal, Changes, Grid, command palette, inspector controls, and live WebSocket updates. |
 | Adaptive appearance | Follows the operating system by default with warm Porcelain light and Obsidian dark themes, plus persistent System, Light, and Dark overrides. |
 | Code review | Shows uncommitted or branch changes with a file rail, agent claims, unified/split layouts, whitespace control, staging, discard, review, and editor actions. |
+| Git publishing | Commits only staged changes, pushes the current branch to `origin`, and creates draft or ready GitHub pull requests through the authenticated GitHub CLI. |
 | Terminal focus | Maps TTYs to Terminal.app, iTerm2, and connected VS Code terminals and can bring the exact terminal to the foreground. |
 | Agent status | Combines hook events, managed terminal output, process liveness, and sustained CPU activity using `hook > output > CPU` precedence. |
 | Hooks | Claude Code hooks report prompts, tool usage, edits, notifications, starts, and stops. Codex notify reports completed turns. |
@@ -269,6 +271,19 @@ The viewer has two modes:
 - **vs base branch** shows committed changes on the current branch since it diverged from its base. AgentDeck resolves the base from `origin/HEAD`, then falls back to `main` or `master`.
 
 Each file shows its Git status (`M`, `A`, `D`, `R`, or `?`) and added/deleted line counts. Select a file to review its colored diff in **Unified** or **Split** layout, optionally ignoring whitespace. You can move between files, stage or unstage the selection, discard it after confirmation, mark it reviewed, or open it through the VS Code CLI. Binary files are identified without rendering text, and very large file diffs are limited to the first 512 KB. The summary and open diff refresh every five seconds so you can follow an agent's edits as they land.
+
+## Commit and Publish Changes
+
+In **Changes**, use **Commit staged** to create a local commit or **Create PR** to publish the current branch. AgentDeck commits only Git's staged snapshot; partially staged and unstaged edits remain in the working tree.
+
+Pull request publishing supports GitHub repositories with an `origin` remote and uses the authenticated [GitHub CLI](https://cli.github.com/) without storing access tokens. Install and authenticate it before creating a pull request:
+
+```bash
+brew install gh
+gh auth login
+```
+
+The publish preflight checks the current branch, base branch, Git identity, remote, upstream, GitHub authentication, and existing pull requests. If a later step fails after a commit or push succeeds, retrying resumes at the failed step instead of repeating completed work.
 
 ## How to Start, Stop, and Restart Agents
 
