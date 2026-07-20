@@ -6,6 +6,14 @@ interface EnvRow {
   value: string;
 }
 
+type PermissionMode = 'default' | 'acceptEdits' | 'plan';
+
+const PERMISSION_MODES: { value: PermissionMode; label: string }[] = [
+  { value: 'default', label: 'Ask' },
+  { value: 'acceptEdits', label: 'Auto-edit' },
+  { value: 'plan', label: 'Plan' },
+];
+
 export interface LaunchModalProps {
   repos: Repo[];
   onClose: () => void;
@@ -19,6 +27,7 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
   const [useFreePath, setUseFreePath] = useState(repos.length === 0);
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [branch, setBranch] = useState('');
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -57,6 +66,7 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
     const body: Record<string, unknown> = { agent, cwd };
     if (name.trim()) body.name = name.trim();
     if (prompt.trim()) body.initialPrompt = prompt;
+    body.permissionMode = permissionMode;
     if (branch.trim()) body.branch = branch.trim();
     if (Object.keys(env).length > 0) body.env = env;
     try {
@@ -123,6 +133,18 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
           <datalist id="launch-branches">{branchSuggestions.map((item) => <option key={item} value={item} />)}</datalist>
         </div>
         <label style={styles.field}>Initial prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} style={{ ...styles.input, resize: 'vertical' }} /></label>
+        <label style={styles.label}>Permission mode</label>
+        <div style={styles.modeRow}>
+          {PERMISSION_MODES.map(({ value, label }) => (
+            <button
+              key={value}
+              onClick={() => setPermissionMode(value)}
+              style={permissionMode === value ? styles.modeActive : styles.modeButton}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
 
         <div style={styles.envHeader}>
           <span>Environment</span>

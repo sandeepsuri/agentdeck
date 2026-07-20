@@ -128,6 +128,12 @@ function parseLaunchSpec(body: unknown): LaunchSpec | string {
   if (b.initialPrompt !== undefined && typeof b.initialPrompt !== 'string') return 'initialPrompt must be a string';
   if (typeof b.initialPrompt === 'string' && b.initialPrompt.length > MAX_PROMPT_LENGTH) return 'initialPrompt is too long';
   if (typeof b.initialPrompt === 'string' && b.initialPrompt !== '') spec.initialPrompt = b.initialPrompt;
+  if (b.permissionMode !== undefined) {
+    if (b.permissionMode !== 'default' && b.permissionMode !== 'acceptEdits' && b.permissionMode !== 'plan') {
+      return 'permissionMode must be "default", "acceptEdits", or "plan"';
+    }
+    spec.permissionMode = b.permissionMode;
+  }
   if (b.name !== undefined && typeof b.name !== 'string') return 'name must be a string';
   if (typeof b.name === 'string' && b.name.length > MAX_NAME_LENGTH) return 'name is too long';
   if (typeof b.name === 'string' && b.name !== '') spec.name = b.name;
@@ -295,7 +301,27 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (typeof spec === 'string') return reply.code(400).send({ error: spec });
     try {
       if (spec.branch) await checkoutExistingBranch(spec.cwd, spec.branch);
+      if (spec.agent === 'claude' && spec.permissionMode) {
+        if (spec.permissionMode !== 'default') {
+          spec.extraArgs = [...(spec.extraArgs ?? []), '--permission-mode', spec.permissionMode];
+        }
+      }
       if (spec.agent === 'codex') {
+        if (spec.permissionMode === 'default') {
+          spec.extraArgs = [
+            ...(spec.extraArgs ?? []),
+            '--sandbox', 'read-only',
+            '--ask-for-approval', 'on-request',
+          ];
+        } else if (spec.permissionMode === 'acceptEdits') {
+          spec.extraArgs = [
+            ...(spec.extraArgs ?? []),
+            '--sandbox', 'workspace-write',
+            '--ask-for-approval', 'on-request',
+          ];
+        } else if (spec.permissionMode === 'plan') {
+          spec.initialPrompt = spec.initialPrompt ? `/plan ${spec.initialPrompt}` : '/plan';
+        }
         spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify(['node', HOOK_PATH])}`];
       }
       const session = await manager.launch(spec);

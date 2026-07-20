@@ -227,6 +227,74 @@ describe('REST routes', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST /api/sessions maps permissionMode to --permission-mode for claude', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...SPEC, permissionMode: 'plan' }),
+    });
+    expect(res.status).toBe(201);
+    const spawned = backend.spawnedSpecs.at(-1);
+    expect(spawned?.extraArgs).toEqual(['--permission-mode', 'plan']);
+  });
+
+  it('POST /api/sessions maps Ask to read-only on-request permissions for codex', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...SPEC, agent: 'codex', permissionMode: 'default' }),
+    });
+    expect(res.status).toBe(201);
+    const spawned = backend.spawnedSpecs.at(-1);
+    expect(spawned?.extraArgs?.slice(0, 4)).toEqual([
+      '--sandbox', 'read-only', '--ask-for-approval', 'on-request',
+    ]);
+  });
+
+  it('POST /api/sessions maps Auto-edit to workspace-write on-request permissions for codex', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...SPEC, agent: 'codex', permissionMode: 'acceptEdits' }),
+    });
+    expect(res.status).toBe(201);
+    const spawned = backend.spawnedSpecs.at(-1);
+    expect(spawned?.extraArgs?.slice(0, 4)).toEqual([
+      '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request',
+    ]);
+  });
+
+  it('POST /api/sessions starts codex Plan mode with the initial prompt', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...SPEC, agent: 'codex', permissionMode: 'plan', initialPrompt: 'Design the migration',
+      }),
+    });
+    expect(res.status).toBe(201);
+    expect(backend.spawnedSpecs.at(-1)?.initialPrompt).toBe('/plan Design the migration');
+  });
+
+  it('POST /api/sessions starts codex Plan mode without an initial prompt', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...SPEC, agent: 'codex', permissionMode: 'plan' }),
+    });
+    expect(res.status).toBe(201);
+    expect(backend.spawnedSpecs.at(-1)?.initialPrompt).toBe('/plan');
+  });
+
+  it('POST /api/sessions rejects an invalid permissionMode', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...SPEC, permissionMode: 'bypassPermissions' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it('stop removes the session and broadcasts session_removed', async () => {
     const c = await connect();
     const { id } = await launchViaRest();
