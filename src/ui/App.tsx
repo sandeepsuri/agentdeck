@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentMessage, Conflict, Repo, Session, SessionOrigin, SessionStatus } from '../types.js';
+import type { AgentMessage, Conflict, DiscoveryStatus, Repo, Session, SessionOrigin, SessionStatus } from '../types.js';
 import type { ServerFrame } from '../protocol.js';
 import { DiffPanel } from './components/DiffPanel.js';
 import { LaunchModal } from './components/LaunchModal.js';
@@ -73,6 +73,7 @@ export function App() {
   const [showLaunch, setShowLaunch] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [terminalHint, setTerminalHint] = useState<string | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
   const [events, setEvents] = useState<AgentMessage[]>([]);
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
@@ -118,6 +119,24 @@ export function App() {
   const refreshEvents = useCallback(() => {
     fetch('/api/events').then((response) => response.json()).then(setEvents).catch(() => undefined);
   }, []);
+  const refreshDiscoveryStatus = useCallback(() => {
+    fetch('/api/discovery/status')
+      .then((response) => response.json())
+      .then(setDiscoveryStatus)
+      .catch(() => undefined);
+  }, []);
+
+  const retryDiscovery = useCallback(async () => {
+    setDiscoveryStatus((current) => current ? { ...current, polling: true } : current);
+    try {
+      const response = await fetch('/api/discovery/refresh', { method: 'POST' });
+      const status = await response.json() as DiscoveryStatus;
+      setDiscoveryStatus(status);
+      refresh();
+    } catch {
+      refreshDiscoveryStatus();
+    }
+  }, [refresh, refreshDiscoveryStatus]);
   const refreshConflicts = useCallback(() => {
     fetch('/api/conflicts').then((response) => response.json()).then(setConflicts).catch(() => undefined);
   }, []);
@@ -127,6 +146,7 @@ export function App() {
     refreshRepos();
     refreshEvents();
     refreshConflicts();
+    refreshDiscoveryStatus();
     const clock = setInterval(() => setNow(Date.now()), 30_000);
     const refreshTerminalHint = () => {
       fetch('/api/terminals/status')
@@ -144,12 +164,14 @@ export function App() {
     refreshVsCodeStatus();
     const terminalStatus = setInterval(refreshTerminalHint, 5000);
     const vscodeIntegrationStatus = setInterval(refreshVsCodeStatus, 5000);
+    const discoveryHealth = setInterval(refreshDiscoveryStatus, 5000);
     return () => {
       clearInterval(clock);
       clearInterval(terminalStatus);
       clearInterval(vscodeIntegrationStatus);
+      clearInterval(discoveryHealth);
     };
-  }, [refresh, refreshConflicts, refreshEvents, refreshRepos]);
+  }, [refresh, refreshConflicts, refreshDiscoveryStatus, refreshEvents, refreshRepos]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -379,7 +401,23 @@ export function App() {
                 )}
               </section>
             ))}
-            {visibleSessions.length === 0 && <div style={styles.empty}>No sessions match these filters.</div>}
+            {sessions.length === 0 && (
+              <div style={styles.empty}>
+                <div style={styles.emptyTitle}>
+                  {discoveryStatus?.lastError
+                    ? 'Session discovery is unavailable.'
+                    : discoveryStatus?.polling ? 'Scanning for sessions…' : 'No running Codex or Claude sessions detected.'}
+                </div>
+                {discoveryStatus?.lastError && <div style={styles.emptyDetail}>{discoveryStatus.lastError}</div>}
+                {!discoveryStatus?.lastError && discoveryStatus?.lastCompletedAt && (
+                  <div style={styles.emptyDetail}>Last checked {relativeTime(discoveryStatus.lastCompletedAt, now)}.</div>
+                )}
+                <button disabled={discoveryStatus?.polling} onClick={() => void retryDiscovery()} style={styles.secondaryButton}>
+                  {discoveryStatus?.polling ? 'Scanning…' : 'Retry discovery'}
+                </button>
+              </div>
+            )}
+            {sessions.length > 0 && visibleSessions.length === 0 && <div style={styles.empty}>No sessions match these filters.</div>}
           </div>
           <div style={styles.activityBar}>
             <strong>Coordination</strong>
@@ -644,6 +682,8 @@ const styles: Record<string, React.CSSProperties> = {
   originCell: { display: 'flex', alignItems: 'center', gap: 4 },
   rowFocus: { border: 0, background: 'transparent', color: '#58a6ff', padding: 0, cursor: 'pointer', font: 'inherit', fontSize: 9 },
   empty: { padding: 40, color: '#697586', textAlign: 'center' },
+  emptyTitle: { color: '#9da8b5', marginBottom: 8 },
+  emptyDetail: { color: '#697586', fontSize: 11, marginBottom: 12 },
   detail: { width: 440, minWidth: 360, borderLeft: '1px solid #242b35', background: '#0b1016', display: 'flex', flexDirection: 'column', minHeight: 0 },
   detailHeader: { padding: 14, borderBottom: '1px solid #242b35', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
   detailSub: { color: '#697586', fontSize: 10, marginTop: 4, wordBreak: 'break-all' },

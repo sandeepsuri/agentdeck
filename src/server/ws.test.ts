@@ -15,6 +15,7 @@ import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs } from './ws.js';
 import type { ServerFrame } from '../protocol.js';
 import { TerminalRegistry, VsCodeBridge, type TerminalAdapter } from '../discovery/terminals/index.js';
+import { DiscoveryPoller } from '../discovery/poller.js';
 
 /** Scriptable in-memory backend: no real processes. */
 class FakeBackend implements SessionBackend {
@@ -105,6 +106,7 @@ let port: number;
 let vscode: VsCodeBridge;
 let vscodeAdapter: FakeVsCodeAdapter;
 let installVsCode: ReturnType<typeof vi.fn>;
+let discovery: DiscoveryPoller;
 const clients: Client[] = [];
 
 beforeEach(async () => {
@@ -114,9 +116,16 @@ beforeEach(async () => {
   vscode = new VsCodeBridge();
   vscodeAdapter = new FakeVsCodeAdapter();
   installVsCode = vi.fn(async () => ({ installed: true as const, reloadRequired: true as const }));
+  discovery = new DiscoveryPoller({
+    store,
+    getManagedPids: () => new Set(),
+    publish: vi.fn(),
+    remove: vi.fn(),
+    run: vi.fn(async () => ''),
+  });
   app = buildApp({
     config: defaultConfig(), manager, vscode,
-    terminals: new TerminalRegistry([vscodeAdapter]), installVsCode,
+    terminals: new TerminalRegistry([vscodeAdapter]), installVsCode, discovery,
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
   wss = attachWs(app.server, manager, '/ws', vscode);
@@ -152,6 +161,17 @@ async function launchViaRest(): Promise<{ id: string; pid: number }> {
 }
 
 describe('REST routes', () => {
+  it('reports discovery health and supports an immediate refresh', async () => {
+    const initial = await (await fetch(`http://127.0.0.1:${port}/api/discovery/status`)).json();
+    expect(initial).toMatchObject({ running: false, polling: false, detectedProcesses: 0 });
+
+    const refreshed = await fetch(`http://127.0.0.1:${port}/api/discovery/refresh`, { method: 'POST' });
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toMatchObject({
+      polling: false, detectedProcesses: 0, publishedSessions: 0,
+    });
+  });
+
   it('reports, installs, and registers the VS Code helper', async () => {
     expect(await (await fetch(`http://127.0.0.1:${port}/api/integrations/vscode/status`)).json())
       .toMatchObject({ connected: false, windows: 0, terminals: 0 });

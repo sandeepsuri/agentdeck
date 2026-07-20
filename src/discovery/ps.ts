@@ -15,7 +15,10 @@ export interface AgentProcess extends PsRow {
   agent: AgentType;
 }
 
-const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+([\d.]+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
+// macOS localizes lstart's month/day order (for example en_US uses
+// "Sat May 16" while en_CA uses "Sat 16 May"). Capture its five tokens
+// without assuming either order and let Date validate the value.
+const PS_LINE = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+([\d.]+)\s+(\S+\s+\S+\s+\S+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
 const AGENT_COMMAND = /(?:^|[\s/])(claude|codex)(?=\s|$)/i;
 
 export function parsePs(output: string): PsRow[] {

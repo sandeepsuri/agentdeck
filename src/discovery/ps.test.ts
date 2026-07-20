@@ -21,6 +21,13 @@ describe('parsePs', () => {
     });
     expect(launcher?.startEpoch).toBe(Math.floor(new Date('Thu Jul 16 17:39:00 2026').getTime() / 1000));
   });
+
+  it('parses the Canadian macOS day-month lstart format', () => {
+    const rows = parsePs('60808 59908 ttys036 S+ 0.0 Sun 19 Jul 23:06:31 2026 node /opt/bin/codex');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ pid: 60808, startedAt: 'Sun 19 Jul 23:06:31 2026' });
+    expect(rows[0]?.startEpoch).toBe(Math.floor(new Date('Sun 19 Jul 23:06:31 2026').getTime() / 1000));
+  });
 });
 
 describe('findAgentProcesses', () => {

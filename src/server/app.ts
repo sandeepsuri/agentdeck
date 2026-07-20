@@ -7,6 +7,7 @@ import type { Store } from '../store/index.js';
 import type { TerminalRegistry } from '../discovery/terminals/index.js';
 import type { CoordinationService } from '../coordination/service.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
+import type { DiscoveryPoller } from '../discovery/poller.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 
 const CONTENT_SECURITY_POLICY = [
@@ -67,6 +68,7 @@ export interface AppContext {
   terminals?: TerminalRegistry;
   coordination?: CoordinationService;
   vscode?: VsCodeBridge;
+  discovery?: DiscoveryPoller;
   installVsCode?: RouteContext['installVsCode'];
 }
 
@@ -103,6 +105,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     terminals: ctx.terminals,
     coordination: ctx.coordination,
     vscode: ctx.vscode,
+    discovery: ctx.discovery,
     installVsCode: ctx.installVsCode,
   });
 

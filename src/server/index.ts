@@ -38,7 +38,7 @@ export async function startServer(): Promise<RunningServer> {
     },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
-  const app = buildApp({ config, manager, store, terminals, coordination, vscode });
+  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery });
   let wss: WebSocketServer | undefined;
   let closing = false;
   const close = async () => {
