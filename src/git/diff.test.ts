@@ -118,4 +118,13 @@ describe('diffFile', () => {
     initRepo(repoPath);
     await expect(diffFile(repoPath, '../outside.txt', 'uncommitted')).rejects.toThrow(/outside/);
   });
+
+  it('can hide whitespace-only changes', async () => {
+    const repoPath = path.join(tempDir(), 'repo');
+    initRepo(repoPath);
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'one\n  two\n');
+
+    expect((await diffFile(repoPath, 'README.md', 'uncommitted')).diff).not.toBe('');
+    expect((await diffFile(repoPath, 'README.md', 'uncommitted', true)).diff).toBe('');
+  });
 });

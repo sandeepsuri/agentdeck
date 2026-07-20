@@ -1,0 +1,164 @@
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #edeae1;
+  --surface-sidebar: #f5f2ea;
+  --surface-panel: #faf8f2;
+  --surface-elevated: #ffffff;
+  --surface-input: #f7f4ec;
+  --surface-hover: #e7e3d8;
+  --surface-selected: #ddd8cb;
+  --surface-terminal: #fbfaf6;
+  --surface-code: #f7f5ef;
+
+  --border-muted: #d8d3c7;
+  --border-strong: #b9b3a6;
+  --border-selection: #45443e;
+
+  --text-primary: #171714;
+  --text-secondary: #575750;
+  --text-muted: #85837a;
+  --text-on-action: #f4f1e8;
+  --action-primary: #171714;
+  --action-primary-hover: #302f2a;
+  --focus-ring: #45443e;
+
+  --status-starting: #2563a8;
+  --status-working: #18794e;
+  --status-waiting: #9a6500;
+  --status-idle: #686b66;
+  --status-completed: #2563a8;
+  --status-exited: #686b66;
+  --status-error: #b4232d;
+  --warning: #8a5a00;
+
+  --status-working-bg: #e1f3e8;
+  --status-waiting-bg: #f4ead0;
+  --status-error-bg: #f8e2e3;
+  --status-starting-bg: #e3edf8;
+  --diff-add-text: #146c43;
+  --diff-add-bg: #e1f3e8;
+  --diff-delete-text: #a61b27;
+  --diff-delete-bg: #f8e2e3;
+  --diff-hunk-text: #255f95;
+  --diff-hunk-bg: #e5edf5;
+
+  --overlay: rgba(23, 23, 20, 0.42);
+  --modal-shadow: 0 24px 70px rgba(46, 43, 34, 0.24);
+  --selection-bg: rgba(69, 68, 62, 0.18);
+  --scrollbar: rgba(23, 23, 20, 0.2);
+  --scrollbar-hover: rgba(23, 23, 20, 0.34);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #090909;
+  --surface-sidebar: #0c0c0b;
+  --surface-panel: #11110f;
+  --surface-elevated: #171715;
+  --surface-input: #0c0c0b;
+  --surface-hover: #1e1e1b;
+  --surface-selected: #1e1e1b;
+  --surface-terminal: #090909;
+  --surface-code: #0c0c0b;
+
+  --border-muted: #242420;
+  --border-strong: #35352f;
+  --border-selection: #d9d6cc;
+
+  --text-primary: #f2f0e8;
+  --text-secondary: #b1b0a8;
+  --text-muted: #6f706a;
+  --text-on-action: #10100e;
+  --action-primary: #ece9df;
+  --action-primary-hover: #ffffff;
+  --focus-ring: #d9d6cc;
+
+  --status-starting: #6ca8ff;
+  --status-working: #55d98b;
+  --status-waiting: #f5b94c;
+  --status-idle: #7c817c;
+  --status-completed: #6ca8ff;
+  --status-exited: #7c817c;
+  --status-error: #f07178;
+  --warning: #f5b94c;
+
+  --status-working-bg: rgba(85, 217, 139, 0.11);
+  --status-waiting-bg: rgba(245, 185, 76, 0.11);
+  --status-error-bg: rgba(240, 113, 120, 0.11);
+  --status-starting-bg: rgba(108, 168, 255, 0.11);
+  --diff-add-text: #75e39d;
+  --diff-add-bg: rgba(85, 217, 139, 0.11);
+  --diff-delete-text: #f5969b;
+  --diff-delete-bg: rgba(240, 113, 120, 0.11);
+  --diff-hunk-text: #8bbcff;
+  --diff-hunk-bg: rgba(108, 168, 255, 0.1);
+
+  --overlay: rgba(0, 0, 0, 0.72);
+  --modal-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+  --selection-bg: rgba(217, 214, 204, 0.18);
+  --scrollbar: rgba(242, 240, 232, 0.16);
+  --scrollbar-hover: rgba(242, 240, 232, 0.28);
+}
+
+* { box-sizing: border-box; }
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--text-primary);
+  font-family: "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+::selection { background: var(--selection-bg); }
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-hover);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner { background: transparent; }
+
+a { color: var(--text-primary); text-underline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

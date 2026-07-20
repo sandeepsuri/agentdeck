@@ -1,18 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentType, Repo, Session } from '../../types.js';
 
-interface EnvRow {
-  key: string;
-  value: string;
-}
-
+interface EnvRow { key: string; value: string }
 type PermissionMode = 'default' | 'acceptEdits' | 'plan';
 
-const PERMISSION_MODES: { value: PermissionMode; label: string }[] = [
-  { value: 'default', label: 'Ask' },
-  { value: 'acceptEdits', label: 'Auto-edit' },
-  { value: 'plan', label: 'Plan' },
-];
+interface PreflightResult {
+  ready: boolean;
+  checks: { label: string; ok: boolean; detail?: string }[];
+}
 
 export interface LaunchModalProps {
   repos: Repo[];
@@ -20,64 +15,89 @@ export interface LaunchModalProps {
   onLaunched: (session: Session) => void;
 }
 
+const PERMISSIONS: { value: PermissionMode; label: string; icon: string; description: string }[] = [
+  { value: 'default', label: 'Ask', icon: '✋', description: 'Approve before commands run' },
+  { value: 'acceptEdits', label: 'Auto-edit', icon: '✎', description: 'Edit files without asking' },
+  { value: 'plan', label: 'Plan', icon: '☰', description: 'Plan first, wait for approval' },
+];
+
+function parseEnvFile(contents: string): EnvRow[] {
+  return contents.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#') && line.includes('=')).map((line) => {
+    const index = line.indexOf('=');
+    return { key: line.slice(0, index).trim(), value: line.slice(index + 1).trim().replace(/^(['"])(.*)\1$/, '$2') };
+  });
+}
+
 export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
   const [agent, setAgent] = useState<AgentType>('claude');
+  const [workspaceMode, setWorkspaceMode] = useState<'repo' | 'free'>(repos.length ? 'repo' : 'free');
   const [repoPath, setRepoPath] = useState(repos[0]?.path ?? '');
   const [freePath, setFreePath] = useState('');
-  const [useFreePath, setUseFreePath] = useState(repos.length === 0);
   const [name, setName] = useState('');
+  const [branch, setBranch] = useState('');
+  const [createBranch, setCreateBranch] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
-  const [branch, setBranch] = useState('');
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const envFileRef = useRef<HTMLInputElement | null>(null);
+  const cwd = workspaceMode === 'repo' ? repoPath : freePath.trim();
+  const selectedRepo = repos.find((repo) => repo.path === repoPath);
 
-  const selectedRepo = useMemo(
-    () => repos.find((repo) => repo.path === repoPath),
-    [repoPath, repos],
-  );
-  const branchSuggestions = useMemo(
-    () =>
-      [...new Set([
-        selectedRepo?.currentBranch,
-        ...(selectedRepo?.worktrees?.map((worktree) => worktree.branch) ?? []),
-      ].filter((value): value is string => Boolean(value)))],
-    [selectedRepo],
-  );
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void submit();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
 
-  const updateEnv = (index: number, field: keyof EnvRow, value: string) => {
-    setEnvRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
-  };
+  useEffect(() => {
+    if (!cwd) return setPreflight(null);
+    let disposed = false;
+    const timer = setTimeout(() => {
+      fetch('/api/launch/preflight', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent, cwd, branch: branch.trim() || undefined, createBranchIfMissing: createBranch }),
+      }).then((response) => response.json()).then((body: PreflightResult) => { if (!disposed) setPreflight(body); }).catch(() => { if (!disposed) setPreflight(null); });
+    }, 250);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [agent, branch, createBranch, cwd]);
+
+  const manifest = useMemo(() => [
+    ['Agent', agent === 'claude' ? 'Claude Code' : 'Codex CLI'],
+    ['Directory', cwd || '—'],
+    ['Name', name.trim() || '—'],
+    ['Branch', branch.trim() || selectedRepo?.currentBranch || 'current'],
+    ['Mode', PERMISSIONS.find((item) => item.value === permissionMode)?.label ?? permissionMode],
+    ['Environment', `${envRows.filter((row) => row.key.trim()).length} variables`],
+  ], [agent, branch, cwd, envRows, name, permissionMode, selectedRepo?.currentBranch]);
+
+  const command = useMemo(() => [
+    `$ agentdeck launch ${agent}`,
+    `    --cwd ${cwd || '<directory>'}`,
+    ...(branch.trim() ? [`    --branch ${branch.trim()}`] : []),
+    `    --permission ${permissionMode === 'default' ? 'ask' : permissionMode === 'acceptEdits' ? 'auto-edit' : 'plan'}`,
+  ], [agent, branch, cwd, permissionMode]);
+
+  const updateEnv = (index: number, field: keyof EnvRow, value: string) => setEnvRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
 
   const submit = async () => {
-    const cwd = useFreePath ? freePath.trim() : repoPath;
-    if (!cwd) {
-      setError('Choose a repository or enter a path.');
-      return;
-    }
+    if (!cwd || submitting) return setError('Choose a repository or enter a working directory.');
     setSubmitting(true);
     setError(null);
-    const env = Object.fromEntries(
-      envRows
-        .map((row) => [row.key.trim(), row.value] as const)
-        .filter(([key]) => key.length > 0),
-    );
-    const body: Record<string, unknown> = { agent, cwd };
-    if (name.trim()) body.name = name.trim();
-    if (prompt.trim()) body.initialPrompt = prompt;
-    body.permissionMode = permissionMode;
-    if (branch.trim()) body.branch = branch.trim();
-    if (Object.keys(env).length > 0) body.env = env;
+    const env = Object.fromEntries(envRows.map((row) => [row.key.trim(), row.value] as const).filter(([key]) => key));
     try {
       const response = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agent, cwd, permissionMode, ...(name.trim() ? { name: name.trim() } : {}), ...(branch.trim() ? { branch: branch.trim(), createBranchIfMissing: createBranch } : {}), ...(prompt.trim() ? { initialPrompt: prompt } : {}), ...(Object.keys(env).length ? { env } : {}) }),
       });
-      const data = await response.json() as Session & { error?: string };
-      if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
-      onLaunched(data);
+      const body = await response.json() as Session & { error?: string };
+      if (!response.ok) throw new Error(body.error ?? `Launch failed (${response.status})`);
+      onLaunched(body);
     } catch (launchError) {
       setError(launchError instanceof Error ? launchError.message : String(launchError));
     } finally {
@@ -86,111 +106,78 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
   };
 
   return (
-    <div style={styles.backdrop} role="presentation" onMouseDown={onClose}>
-      <section
-        aria-label="Launch session"
-        aria-modal="true"
-        role="dialog"
-        style={styles.modal}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header style={styles.header}>
-          <h2 style={styles.title}>Launch agent</h2>
-          <button aria-label="Close" onClick={onClose} style={styles.ghostButton}>×</button>
+    <div className="launch-backdrop" onMouseDown={onClose} role="presentation">
+      <section aria-label="Launch agent" aria-modal="true" className="launch-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <header className="launch-header">
+          <span className="launch-mark">&gt;_</span>
+          <span><strong>Launch agent</strong><small>Configure a managed coding session</small></span>
+          <em>Draft</em><kbd>ESC</kbd><button aria-label="Close" onClick={onClose} type="button">×</button>
         </header>
 
-        <label style={styles.label}>Agent</label>
-        <div style={styles.radioRow}>
-          {(['claude', 'codex'] as const).map((option) => (
-            <label key={option} style={styles.radioLabel}>
-              <input
-                checked={agent === option}
-                name="agent"
-                onChange={() => setAgent(option)}
-                type="radio"
-              />
-              {option}
-            </label>
-          ))}
-        </div>
+        <div className="launch-content">
+          <div className="launch-form">
+            <fieldset>
+              <legend>01 · Agent</legend>
+              <div className="agent-options">
+                {(['claude', 'codex'] as const).map((option) => <button className={agent === option ? 'is-selected' : ''} key={option} onClick={() => setAgent(option)} type="button"><span>{option === 'claude' ? '⚡' : '✦'}</span><strong>{option === 'claude' ? 'Claude Code' : 'Codex CLI'}<small>{option} · {option === 'claude' ? 'anthropic' : 'openai'}</small></strong></button>)}
+              </div>
+            </fieldset>
 
-        <label style={styles.label}>Working directory</label>
-        <div style={styles.modeRow}>
-          <button onClick={() => setUseFreePath(false)} style={useFreePath ? styles.modeButton : styles.modeActive}>Repository</button>
-          <button onClick={() => setUseFreePath(true)} style={useFreePath ? styles.modeActive : styles.modeButton}>Free path</button>
-        </div>
-        {useFreePath ? (
-          <input value={freePath} onChange={(event) => setFreePath(event.target.value)} placeholder="~/Documents/project" style={styles.input} />
-        ) : (
-          <select value={repoPath} onChange={(event) => setRepoPath(event.target.value)} style={styles.input}>
-            {repos.map((repo) => <option key={repo.id} value={repo.path}>{repo.name} — {repo.path}</option>)}
-          </select>
-        )}
+            <fieldset>
+              <div className="fieldset-heading"><legend>02 · Workspace</legend><div className="segmented-control"><button className={workspaceMode === 'repo' ? 'is-active' : ''} onClick={() => setWorkspaceMode('repo')} type="button">Repository</button><button className={workspaceMode === 'free' ? 'is-active' : ''} onClick={() => setWorkspaceMode('free')} type="button">Free path</button></div></div>
+              {workspaceMode === 'repo' ? <select onChange={(event) => setRepoPath(event.target.value)} value={repoPath}>{repos.map((repo) => <option key={repo.id} value={repo.path}>{repo.name} — {repo.path}{repo.isDirty ? ' · dirty' : ''}</option>)}</select> : <input onChange={(event) => setFreePath(event.target.value)} placeholder="~/Documents/project" value={freePath} />}
+              <div className="launch-two-col"><input onChange={(event) => setName(event.target.value)} placeholder="Session name (optional)" value={name} /><input onChange={(event) => setBranch(event.target.value)} placeholder="Git branch — keep current" value={branch} /></div>
+              <label className="checkbox-line"><input checked={createBranch} onChange={(event) => setCreateBranch(event.target.checked)} type="checkbox" /> Create branch if missing <span title="Branch creation is refused when the working tree is dirty">safe checkout</span></label>
+            </fieldset>
 
-        <div style={styles.twoColumns}>
-          <label style={styles.field}>Name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="Optional label" style={styles.input} /></label>
-          <label style={styles.field}>Existing branch<input list="launch-branches" value={branch} onChange={(event) => setBranch(event.target.value)} placeholder="Keep current" style={styles.input} /></label>
-          <datalist id="launch-branches">{branchSuggestions.map((item) => <option key={item} value={item} />)}</datalist>
-        </div>
-        <label style={styles.field}>Initial prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} style={{ ...styles.input, resize: 'vertical' }} /></label>
-        <label style={styles.label}>Permission mode</label>
-        <div style={styles.modeRow}>
-          {PERMISSION_MODES.map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => setPermissionMode(value)}
-              style={permissionMode === value ? styles.modeActive : styles.modeButton}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+            <fieldset>
+              <legend>03 · Instructions</legend>
+              <textarea maxLength={4000} onChange={(event) => setPrompt(event.target.value)} placeholder="Initial objective — injected when the agent is ready" rows={3} value={prompt} />
+              <div className="field-hint"><span>Injected when the agent is ready</span><span>{prompt.length} / 4000</span></div>
+            </fieldset>
 
-        <div style={styles.envHeader}>
-          <span>Environment</span>
-          <button onClick={() => setEnvRows((rows) => [...rows, { key: '', value: '' }])} style={styles.ghostButton}>+ variable</button>
-        </div>
-        {envRows.map((row, index) => (
-          <div key={index} style={styles.envRow}>
-            <input aria-label={`Environment key ${index + 1}`} value={row.key} onChange={(event) => updateEnv(index, 'key', event.target.value)} placeholder="KEY" style={styles.input} />
-            <input aria-label={`Environment value ${index + 1}`} value={row.value} onChange={(event) => updateEnv(index, 'value', event.target.value)} placeholder="value" style={styles.input} />
-            <button aria-label="Remove environment variable" onClick={() => setEnvRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))} style={styles.ghostButton}>×</button>
+            <fieldset>
+              <legend>04 · Permission</legend>
+              <div className="permission-options">{PERMISSIONS.map((option) => <button className={permissionMode === option.value ? 'is-selected' : ''} key={option.value} onClick={() => setPermissionMode(option.value)} type="button"><strong>{option.icon} {option.label}</strong><span>{option.description}</span></button>)}</div>
+              {permissionMode === 'default' && <div className="permission-note">△ Prompts requiring approval will enter the Attention queue.</div>}
+            </fieldset>
+
+            <fieldset>
+              <div className="fieldset-heading"><legend>05 · Environment</legend><button className="text-button" onClick={() => envFileRef.current?.click()} type="button">⇪ Import .env</button></div>
+              <input accept=".env,text/plain" hidden ref={envFileRef} type="file" onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) return;
+                file.text().then((contents) => setEnvRows(parseEnvFile(contents))).catch(() => setError('Unable to read that .env file.'));
+              }} />
+              {envRows.map((row, index) => <div className="env-row" key={index}><input aria-label={`Environment key ${index + 1}`} onChange={(event) => updateEnv(index, 'key', event.target.value)} placeholder="KEY" value={row.key} /><input aria-label={`Environment value ${index + 1}`} onChange={(event) => updateEnv(index, 'value', event.target.value)} placeholder="value" value={row.value} /><button aria-label="Remove variable" onClick={() => setEnvRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))} type="button">×</button></div>)}
+              <button className="add-variable-button" onClick={() => setEnvRows((rows) => [...rows, { key: '', value: '' }])} type="button">＋ Add variable</button>
+            </fieldset>
+            {error && <div className="form-error">{error}</div>}
           </div>
-        ))}
 
-        <label style={styles.disabledOption} title="Worktree creation is planned for v0.2">
-          <input disabled type="checkbox" /> Create a new worktree (coming in v0.2)
-        </label>
-        {error && <div style={styles.error}>{error}</div>}
-        <footer style={styles.footer}>
-          <button onClick={onClose} style={styles.secondaryButton}>Cancel</button>
-          <button disabled={submitting} onClick={() => void submit()} style={styles.primaryButton}>{submitting ? 'Launching…' : 'Launch'}</button>
+          <aside className="launch-manifest">
+            <div className="micro-heading">Launch manifest</div>
+            {manifest.map(([key, value]) => <div className="manifest-row" key={key}><span>{key}</span><strong title={value}>{value}</strong></div>)}
+            <hr />
+            <div className="micro-heading">Preflight</div>
+            {(preflight?.checks ?? [{ label: 'Checking local environment', ok: false }]).map((check) => <div className={`preflight-row${check.ok ? ' is-ok' : ''}`} key={check.label}><span>{check.ok ? '✓' : '·'}</span><strong>{check.label}<small>{check.detail}</small></strong></div>)}
+            <hr />
+            <div className="micro-heading">Command preview</div>
+            <pre className="command-preview">{command.join('\n')}</pre>
+            <hr />
+            <div className="micro-heading">After launch</div>
+            <div className="preflight-row is-ok"><span>✓</span><strong>Open terminal</strong></div>
+            <div className="preflight-row is-ok"><span>✓</span><strong>Inject objective</strong></div>
+            <p>Local process · nothing leaves this machine.</p>
+          </aside>
+        </div>
+
+        <footer className="launch-footer">
+          <span className={preflight?.ready ? 'is-ready' : ''}><i />{preflight?.ready ? 'Local engine ready — all preflight checks passed' : 'Waiting for valid launch configuration'}</span>
+          <button className="button" onClick={onClose} type="button">Cancel</button>
+          <button className="button button-primary" disabled={submitting || preflight?.ready === false} onClick={() => void submit()} type="button">{submitting ? 'Initializing…' : 'Initialize session'} <kbd>⌘⏎</kbd></button>
         </footer>
       </section>
     </div>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  backdrop: { position: 'fixed', inset: 0, zIndex: 20, background: 'rgba(0,0,0,.68)', display: 'grid', placeItems: 'center', padding: 24 },
-  modal: { width: 'min(680px, 100%)', maxHeight: '90vh', overflowY: 'auto', background: '#11161d', border: '1px solid #303844', borderRadius: 12, boxShadow: '0 24px 80px rgba(0,0,0,.5)', padding: 20, display: 'flex', flexDirection: 'column', gap: 10 },
-  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
-  title: { margin: 0, fontSize: 18 },
-  label: { color: '#9da8b5', fontSize: 12, marginTop: 4 },
-  field: { display: 'flex', flexDirection: 'column', gap: 5, color: '#9da8b5', fontSize: 12 },
-  radioRow: { display: 'flex', gap: 18 },
-  radioLabel: { display: 'flex', alignItems: 'center', gap: 6, textTransform: 'capitalize' },
-  modeRow: { display: 'flex', gap: 6 },
-  modeButton: { background: '#171d25', border: '1px solid #303844', color: '#9da8b5', borderRadius: 5, padding: '5px 9px', cursor: 'pointer' },
-  modeActive: { background: '#214b80', border: '1px solid #3677bd', color: '#fff', borderRadius: 5, padding: '5px 9px', cursor: 'pointer' },
-  input: { boxSizing: 'border-box', width: '100%', background: '#0b0f14', border: '1px solid #303844', color: '#e6edf3', borderRadius: 6, padding: '8px 10px', font: 'inherit' },
-  twoColumns: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
-  envHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#9da8b5', fontSize: 12 },
-  envRow: { display: 'grid', gridTemplateColumns: '1fr 1.5fr auto', gap: 6 },
-  ghostButton: { background: 'transparent', border: 0, color: '#9da8b5', cursor: 'pointer', font: 'inherit' },
-  disabledOption: { color: '#606b78', fontSize: 12, marginTop: 4 },
-  error: { color: '#ff7b72', fontSize: 12, whiteSpace: 'pre-wrap' },
-  footer: { display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 },
-  secondaryButton: { background: '#1b222c', border: '1px solid #303844', color: '#d8dee4', borderRadius: 6, padding: '8px 14px', cursor: 'pointer' },
-  primaryButton: { background: '#238636', border: '1px solid #2ea043', color: '#fff', borderRadius: 6, padding: '8px 16px', cursor: 'pointer' },
-};

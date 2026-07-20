@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
 import { expandTilde } from '../config.js';
-import { checkoutExistingBranch, scanRepos } from '../git/scan.js';
-import { diffFile, diffSummary, type DiffMode } from '../git/diff.js';
+import { checkoutBranch, scanRepos, git } from '../git/scan.js';
+import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
@@ -140,6 +140,13 @@ function parseLaunchSpec(body: unknown): LaunchSpec | string {
   if (b.branch !== undefined && typeof b.branch !== 'string') return 'branch must be a string';
   if (typeof b.branch === 'string' && b.branch.length > MAX_BRANCH_LENGTH) return 'branch is too long';
   if (typeof b.branch === 'string' && b.branch !== '') spec.branch = b.branch;
+  if (b.createBranchIfMissing !== undefined && typeof b.createBranchIfMissing !== 'boolean') {
+    return 'createBranchIfMissing must be a boolean';
+  }
+  if (b.createBranchIfMissing === true) {
+    if (!spec.branch) return 'createBranchIfMissing requires a branch';
+    spec.createBranchIfMissing = true;
+  }
   if (b.extraArgs !== undefined) {
     if (!Array.isArray(b.extraArgs) || b.extraArgs.length > MAX_EXTRA_ARGS
       || !b.extraArgs.every((arg) => typeof arg === 'string' && arg.length <= MAX_EXTRA_ARG_LENGTH)) {
@@ -222,6 +229,37 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   });
 
+  app.post('/api/launch/preflight', async (req, reply) => {
+    const body = req.body as { agent?: unknown; cwd?: unknown; branch?: unknown; createBranchIfMissing?: unknown } | null;
+    const agent = body?.agent;
+    const cwdValue = body?.cwd;
+    const branch = typeof body?.branch === 'string' ? body.branch.trim() : '';
+    const checks: { label: string; ok: boolean; detail?: string }[] = [];
+    const cwd = typeof cwdValue === 'string' && cwdValue.length <= MAX_PATH_LENGTH ? expandTilde(cwdValue) : '';
+    const directoryOk = Boolean(cwd) && fs.existsSync(cwd) && fs.statSync(cwd).isDirectory();
+    checks.push({ label: 'Working directory found', ok: directoryOk, ...(!directoryOk ? { detail: 'Choose an existing directory.' } : {}) });
+    const gitRepo = directoryOk && fs.existsSync(path.join(cwd, '.git'));
+    checks.push({ label: 'Repository available', ok: gitRepo || !branch, ...(!gitRepo && branch ? { detail: 'A branch requires a Git repository.' } : {}) });
+    let branchOk = !branch;
+    if (directoryOk && gitRepo && branch) {
+      try {
+        await git(cwd, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+        branchOk = true;
+      } catch {
+        branchOk = body?.createBranchIfMissing === true;
+      }
+    }
+    checks.push({ label: branch ? 'Branch available' : 'Keep current branch', ok: branchOk, ...(!branchOk ? { detail: 'Enable “Create branch if missing” or choose an existing branch.' } : {}) });
+    const executable = agent === 'claude' || agent === 'codex' ? agent : '';
+    let cliOk = false;
+    if (executable) {
+      try { await execFileAsync('/usr/bin/which', [executable], { encoding: 'utf8', timeout: 3000 }); cliOk = true; } catch { /* unavailable */ }
+    }
+    checks.push({ label: `${agent === 'codex' ? 'Codex' : 'Claude'} CLI detected`, ok: cliOk, ...(!cliOk ? { detail: `${executable || 'Agent'} is not on PATH.` } : {}) });
+    checks.push({ label: 'PTY engine available', ok: true });
+    return reply.send({ ready: checks.every((check) => check.ok), checks });
+  });
+
   // Only paths already known to the repo store may be diffed — never run git
   // against an arbitrary request-supplied directory.
   const knownRepoPath = (repo: string | undefined): string | undefined => {
@@ -250,7 +288,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   });
 
   app.get('/api/repos/diff/file', async (req, reply) => {
-    const { repo, mode, path: filePath } = req.query as { repo?: string; mode?: string; path?: string };
+    const { repo, mode, path: filePath, ignoreWhitespace } = req.query as { repo?: string; mode?: string; path?: string; ignoreWhitespace?: string };
     const repoPath = knownRepoPath(repo);
     if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
     const diffMode = parseDiffMode(mode);
@@ -259,9 +297,56 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return reply.code(400).send({ error: 'path is required' });
     }
     try {
-      return await diffFile(repoPath, filePath, diffMode);
+      return await diffFile(repoPath, filePath, diffMode, ignoreWhitespace === 'true');
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/repos/file-action', async (req, reply) => {
+    const body = req.body as { repo?: unknown; path?: unknown; action?: unknown } | null;
+    const repoPath = knownRepoPath(typeof body?.repo === 'string' ? body.repo : undefined);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    if (typeof body?.path !== 'string' || body.path.length === 0 || body.path.length > MAX_PATH_LENGTH) {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    const resolvedFile = resolveRepoFile(repoPath, body.path);
+    if (!resolvedFile) return reply.code(400).send({ error: 'path is outside the repository' });
+    if (body.action !== 'stage' && body.action !== 'unstage' && body.action !== 'discard') {
+      return reply.code(400).send({ error: 'action must be stage, unstage, or discard' });
+    }
+    try {
+      if (body.action === 'stage') await git(repoPath, ['add', '--', body.path]);
+      if (body.action === 'unstage') await git(repoPath, ['reset', '--', body.path]);
+      if (body.action === 'discard') {
+        const status = await git(repoPath, ['status', '--porcelain', '--', body.path]);
+        if (status.startsWith('??')) await fs.promises.unlink(resolvedFile);
+        else {
+          await git(repoPath, ['reset', '--', body.path]);
+          await git(repoPath, ['checkout', '--', body.path]);
+        }
+      }
+      return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/repos/open-file', async (req, reply) => {
+    const body = req.body as { repo?: unknown; path?: unknown; line?: unknown } | null;
+    const repoPath = knownRepoPath(typeof body?.repo === 'string' ? body.repo : undefined);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    if (typeof body?.path !== 'string' || body.path.length === 0 || body.path.length > MAX_PATH_LENGTH) {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    const resolvedFile = resolveRepoFile(repoPath, body.path);
+    if (!resolvedFile || !fs.existsSync(resolvedFile)) return reply.code(404).send({ error: 'file not found' });
+    const line = typeof body.line === 'number' && Number.isInteger(body.line) && body.line > 0 ? body.line : undefined;
+    try {
+      await execFileAsync('code', ['--goto', `${resolvedFile}${line ? `:${line}` : ''}`], { encoding: 'utf8', timeout: 10_000 });
+      return { ok: true };
+    } catch {
+      return reply.code(503).send({ error: 'VS Code CLI is unavailable. Install the “code” shell command to open files from AgentDeck.' });
     }
   });
 
@@ -300,7 +385,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const spec = parseLaunchSpec(req.body);
     if (typeof spec === 'string') return reply.code(400).send({ error: spec });
     try {
-      if (spec.branch) await checkoutExistingBranch(spec.cwd, spec.branch);
+      if (spec.branch) await checkoutBranch(spec.cwd, spec.branch, spec.createBranchIfMissing === true);
       if (spec.agent === 'claude' && spec.permissionMode) {
         if (spec.permissionMode !== 'default') {
           spec.extraArgs = [...(spec.extraArgs ?? []), '--permission-mode', spec.permissionMode];
@@ -394,6 +479,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return belongsToSession && (message.event === 'done' || message.event === 'message')
         && typeof message.message === 'string' && message.message.trim().length > 0;
     }).slice(-100);
+  });
+
+  app.get('/api/sessions/:id/terminal-tail', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    return { data: session.origin === 'managed' ? manager.getBuffer(id) : '' };
   });
 
   app.get('/api/sessions/:id/capabilities', async (req, reply) => {

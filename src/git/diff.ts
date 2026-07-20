@@ -174,24 +174,25 @@ export async function diffSummary(repoPath: string, mode: DiffMode): Promise<Dif
   return summary;
 }
 
-export async function diffFile(repoPath: string, filePath: string, mode: DiffMode): Promise<FileDiff> {
+export async function diffFile(repoPath: string, filePath: string, mode: DiffMode, ignoreWhitespace = false): Promise<FileDiff> {
   if (!resolveRepoFile(repoPath, filePath)) throw new Error('path is outside the repository');
+  const whitespaceArgs = ignoreWhitespace ? ['--ignore-all-space'] : [];
 
   let output: { stdout: string; truncated: boolean };
   if (mode === 'branch') {
     const baseBranch = await resolveBaseBranch(repoPath);
     if (!baseBranch) return { diff: '', truncated: false };
     const mergeBase = await git(repoPath, ['merge-base', baseBranch, 'HEAD']);
-    output = await gitDiffOutput(repoPath, ['diff', '--no-renames', mergeBase, 'HEAD', '--', filePath]);
+    output = await gitDiffOutput(repoPath, ['diff', '--no-renames', ...whitespaceArgs, mergeBase, 'HEAD', '--', filePath]);
   } else {
     const { stdout: porcelain } = await gitDiffOutput(repoPath, ['status', '--porcelain', '--', filePath]);
     if (porcelain.startsWith('??')) {
-      output = await gitDiffOutput(repoPath, ['diff', '--no-index', '--', '/dev/null', filePath]);
+      output = await gitDiffOutput(repoPath, ['diff', '--no-index', ...whitespaceArgs, '--', '/dev/null', filePath]);
     } else {
       try {
-        output = await gitDiffOutput(repoPath, ['diff', 'HEAD', '--no-renames', '--', filePath]);
+        output = await gitDiffOutput(repoPath, ['diff', 'HEAD', '--no-renames', ...whitespaceArgs, '--', filePath]);
       } catch {
-        output = await gitDiffOutput(repoPath, ['diff', '--no-renames', '--', filePath]);
+        output = await gitDiffOutput(repoPath, ['diff', '--no-renames', ...whitespaceArgs, '--', filePath]);
       }
     }
   }

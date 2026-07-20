@@ -22,22 +22,22 @@ interface FileDiff {
 }
 
 const STATUS_STYLE: Record<DiffFileSummary['status'], { color: string; label: string }> = {
-  M: { color: '#d29922', label: 'modified' },
-  A: { color: '#3fb950', label: 'added' },
-  D: { color: '#f85149', label: 'deleted' },
-  R: { color: '#58a6ff', label: 'renamed' },
-  '?': { color: '#8b949e', label: 'untracked' },
+  M: { color: 'var(--status-waiting)', label: 'modified' },
+  A: { color: 'var(--status-working)', label: 'added' },
+  D: { color: 'var(--status-error)', label: 'deleted' },
+  R: { color: 'var(--status-starting)', label: 'renamed' },
+  '?': { color: 'var(--text-muted)', label: 'untracked' },
 };
 
 function lineStyle(line: string): React.CSSProperties {
-  if (line.startsWith('+++') || line.startsWith('---')) return { color: '#8b949e' };
-  if (line.startsWith('@@')) return { color: '#58a6ff', background: '#101b2c' };
-  if (line.startsWith('+')) return { color: '#7ee787', background: '#0d2416' };
-  if (line.startsWith('-')) return { color: '#ffa198', background: '#2a0f12' };
+  if (line.startsWith('+++') || line.startsWith('---')) return { color: 'var(--text-muted)' };
+  if (line.startsWith('@@')) return { color: 'var(--diff-hunk-text)', background: 'var(--diff-hunk-bg)' };
+  if (line.startsWith('+')) return { color: 'var(--diff-add-text)', background: 'var(--diff-add-bg)' };
+  if (line.startsWith('-')) return { color: 'var(--diff-delete-text)', background: 'var(--diff-delete-bg)' };
   if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('new file') || line.startsWith('deleted file')) {
-    return { color: '#697586' };
+    return { color: 'var(--text-muted)' };
   }
-  return { color: '#c9d1d9' };
+  return { color: 'var(--text-secondary)' };
 }
 
 function FileDiffView({ repoPath, file, mode }: { repoPath: string; file: DiffFileSummary; mode: DiffMode }) {
@@ -128,8 +128,8 @@ export function DiffPanel({ repoPath, onCount }: { repoPath: string; onCount?: (
         {summary && (
           <span style={styles.totals}>
             {summary.files.length} file{summary.files.length === 1 ? '' : 's'}
-            {' '}<span style={{ color: '#3fb950' }}>+{totals.additions}</span>
-            {' '}<span style={{ color: '#f85149' }}>−{totals.deletions}</span>
+            {' '}<span style={{ color: 'var(--status-working)' }}>+{totals.additions}</span>
+            {' '}<span style={{ color: 'var(--status-error)' }}>−{totals.deletions}</span>
           </span>
         )}
       </div>
@@ -151,7 +151,7 @@ export function DiffPanel({ repoPath, onCount }: { repoPath: string; onCount?: (
               </span>
               <span style={styles.filePath} title={file.path}>{file.path}</span>
               <span style={styles.fileCounts}>
-                {file.binary ? 'binary' : <><span style={{ color: '#3fb950' }}>+{file.additions}</span> <span style={{ color: '#f85149' }}>−{file.deletions}</span></>}
+                {file.binary ? 'binary' : <><span style={{ color: 'var(--status-working)' }}>+{file.additions}</span> <span style={{ color: 'var(--status-error)' }}>−{file.deletions}</span></>}
               </span>
               <span style={styles.chevron}>{expanded.has(file.path) ? '▾' : '▸'}</span>
             </div>
@@ -165,20 +165,20 @@ export function DiffPanel({ repoPath, onCount }: { repoPath: string; onCount?: (
 
 const styles: Record<string, React.CSSProperties> = {
   panel: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', borderBottom: '1px solid #242b35' },
-  modeToggle: { display: 'flex', border: '1px solid #303844', borderRadius: 5, overflow: 'hidden' },
-  modeButton: { border: 0, background: '#111820', color: '#8b949e', padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 11 },
-  modeActive: { background: '#1c2a3d', color: '#cde3f8' },
-  totals: { color: '#8b949e', fontSize: 11, whiteSpace: 'nowrap' },
+  toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--border-muted)' },
+  modeToggle: { display: 'flex', border: '1px solid var(--border-strong)', borderRadius: 4, overflow: 'hidden' },
+  modeButton: { border: 0, background: 'var(--surface-input)', color: 'var(--text-secondary)', padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 11 },
+  modeActive: { background: 'var(--surface-selected)', color: 'var(--text-primary)', boxShadow: 'inset 0 -2px var(--border-selection)' },
+  totals: { color: 'var(--text-secondary)', fontSize: 11, whiteSpace: 'nowrap', fontFamily: '"JetBrains Mono", ui-monospace, monospace' },
   fileList: { flex: 1, minHeight: 0, overflowY: 'auto' },
-  fileRow: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid #171d25', cursor: 'pointer' },
+  fileRow: { display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--border-muted)', cursor: 'pointer' },
   statusLetter: { width: 14, fontWeight: 700, fontSize: 11, flexShrink: 0, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
   filePath: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left', fontSize: 12 },
-  fileCounts: { fontSize: 11, whiteSpace: 'nowrap', color: '#8b949e' },
-  chevron: { color: '#697586', fontSize: 10, width: 12, textAlign: 'center' },
-  diffNotice: { padding: '10px 12px', color: '#697586', fontSize: 11 },
-  truncated: { padding: '6px 12px', color: '#d29922', background: '#241d0b', fontSize: 11 },
-  diffBody: { borderBottom: '1px solid #242b35', background: '#0a0e13', maxHeight: '45vh', overflow: 'auto' },
-  diffPre: { margin: 0, padding: '6px 0', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, lineHeight: 1.5, minWidth: 'fit-content' },
+  fileCounts: { fontSize: 11, whiteSpace: 'nowrap', color: 'var(--text-secondary)', fontFamily: '"JetBrains Mono", ui-monospace, monospace' },
+  chevron: { color: 'var(--text-muted)', fontSize: 10, width: 12, textAlign: 'center' },
+  diffNotice: { padding: '10px 12px', color: 'var(--text-muted)', fontSize: 11 },
+  truncated: { padding: '6px 12px', color: 'var(--warning)', background: 'var(--status-waiting-bg)', fontSize: 11 },
+  diffBody: { borderBottom: '1px solid var(--border-muted)', background: 'var(--surface-code)', maxHeight: '45vh', overflow: 'auto' },
+  diffPre: { margin: 0, padding: '6px 0', fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, lineHeight: 1.5, minWidth: 'fit-content' },
   diffLine: { padding: '0 12px', whiteSpace: 'pre' },
 };

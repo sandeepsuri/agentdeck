@@ -3,7 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>AgentDeck</title>
+    <script>
+      (() => {
+        const key = 'agentdeck.theme';
+        let preference = 'system';
+        try {
+          const stored = localStorage.getItem(key);
+          if (stored === 'light' || stored === 'dark' || stored === 'system') preference = stored;
+        } catch {}
+        const dark = preference === 'dark'
+          || (preference === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+        const resolved = dark ? 'dark' : 'light';
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.style.colorScheme = resolved;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
