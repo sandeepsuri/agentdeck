@@ -7,6 +7,10 @@ import type { AgentDeckConfig } from '../config.js';
 import { expandTilde } from '../config.js';
 import { checkoutBranch, scanRepos, git } from '../git/scan.js';
 import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
+import {
+  gitPublishService, MAX_COMMIT_SUBJECT_LENGTH, MAX_PR_TITLE_LENGTH,
+  MAX_PUBLISH_BODY_LENGTH, type GitPublishService,
+} from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
 import type { Store } from '../store/index.js';
@@ -182,6 +186,7 @@ export interface RouteContext {
   vscode?: VsCodeBridge;
   discovery?: DiscoveryPoller;
   installVsCode?: () => Promise<VsCodeInstallResult>;
+  publish?: GitPublishService;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -326,6 +331,77 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         }
       }
       return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.get('/api/repos/publish-status', async (req, reply) => {
+    const { repo } = req.query as { repo?: string };
+    const repoPath = knownRepoPath(repo);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    try {
+      return await (ctx.publish ?? gitPublishService).status(repoPath);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/repos/commit', async (req, reply) => {
+    const body = req.body as { repo?: unknown; subject?: unknown; body?: unknown } | null;
+    const repoPath = knownRepoPath(typeof body?.repo === 'string' ? body.repo : undefined);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    if (typeof body?.subject !== 'string' || body.subject.trim().length === 0) {
+      return reply.code(400).send({ error: 'commit subject is required' });
+    }
+    if (body.subject.trim().length > MAX_COMMIT_SUBJECT_LENGTH) {
+      return reply.code(400).send({ error: `commit subject must be ${MAX_COMMIT_SUBJECT_LENGTH} characters or fewer` });
+    }
+    if (body.body !== undefined && typeof body.body !== 'string') {
+      return reply.code(400).send({ error: 'commit body must be a string' });
+    }
+    if (typeof body.body === 'string' && body.body.length > MAX_PUBLISH_BODY_LENGTH) {
+      return reply.code(400).send({ error: 'commit body is too long' });
+    }
+    try {
+      return await (ctx.publish ?? gitPublishService).commit(repoPath, body.subject, body.body as string | undefined);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/repos/push', async (req, reply) => {
+    const body = req.body as { repo?: unknown } | null;
+    const repoPath = knownRepoPath(typeof body?.repo === 'string' ? body.repo : undefined);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    try {
+      return await (ctx.publish ?? gitPublishService).push(repoPath);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post('/api/repos/pull-request', async (req, reply) => {
+    const body = req.body as { repo?: unknown; base?: unknown; title?: unknown; body?: unknown; draft?: unknown } | null;
+    const repoPath = knownRepoPath(typeof body?.repo === 'string' ? body.repo : undefined);
+    if (!repoPath) return reply.code(404).send({ error: 'no such repo' });
+    if (typeof body?.base !== 'string' || body.base.trim().length === 0 || body.base.length > MAX_BRANCH_LENGTH) {
+      return reply.code(400).send({ error: 'base branch is required' });
+    }
+    if (typeof body.title !== 'string' || body.title.trim().length === 0) {
+      return reply.code(400).send({ error: 'pull request title is required' });
+    }
+    if (body.title.trim().length > MAX_PR_TITLE_LENGTH) {
+      return reply.code(400).send({ error: `pull request title must be ${MAX_PR_TITLE_LENGTH} characters or fewer` });
+    }
+    if (typeof body.body !== 'string' || body.body.length > MAX_PUBLISH_BODY_LENGTH) {
+      return reply.code(400).send({ error: typeof body.body === 'string' ? 'pull request description is too long' : 'pull request description must be a string' });
+    }
+    if (typeof body.draft !== 'boolean') return reply.code(400).send({ error: 'draft must be a boolean' });
+    try {
+      return await (ctx.publish ?? gitPublishService).createPullRequest(repoPath, {
+        base: body.base, title: body.title, body: body.body, draft: body.draft,
+      });
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }

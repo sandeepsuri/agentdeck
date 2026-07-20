@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
 import type { ServerFrame } from '../protocol.js';
 import { LaunchModal } from './components/LaunchModal.js';
+import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
 import { type ThemePreference, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
@@ -53,6 +54,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
   const [now, setNow] = useState(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -131,6 +133,10 @@ export function App() {
 
   useEffect(() => { if (view === 'terminal') setTerminalVisited(true); }, [view]);
 
+  useEffect(() => {
+    persistInspectorCollapsed(inspectorPreferenceStorage(), inspectorCollapsed);
+  }, [inspectorCollapsed]);
+
   const selectSession = (session: Session) => setSelectedId(session.id);
   const openTerminal = (session: Session) => { setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
 
@@ -190,7 +196,20 @@ export function App() {
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} /></div>
           <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
         </main>
-        <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selected} view={view} />
+        <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`}>
+          <button
+            aria-controls="agentdeck-inspector-panel"
+            aria-expanded={!inspectorCollapsed}
+            aria-label={inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector'}
+            className="inspector-toggle"
+            onClick={() => setInspectorCollapsed((current) => !current)}
+            title={inspectorCollapsed ? 'Expand inspector' : 'Collapse inspector'}
+            type="button"
+          >{inspectorCollapsed ? '‹' : '›'}</button>
+          <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
+            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selected} view={view} />
+          </div>
+        </div>
       </div>
 
       <footer className="app-statusbar">

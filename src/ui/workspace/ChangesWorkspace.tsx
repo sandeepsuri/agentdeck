@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FileClaim, Session } from '../../types.js';
+import { PublishModal, type PublishMode } from '../components/PublishModal.js';
 import { sessionLabel } from './model.js';
 
 type DiffMode = 'uncommitted' | 'branch';
@@ -11,6 +12,10 @@ interface DiffFile {
   additions: number;
   deletions: number;
   binary?: boolean;
+  indexStatus?: 'M' | 'A' | 'D' | 'R';
+  worktreeStatus?: 'M' | 'A' | 'D' | 'R' | '?';
+  staged?: boolean;
+  partiallyStaged?: boolean;
 }
 
 interface Summary {
@@ -36,19 +41,31 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
   const [layout, setLayout] = useState<DiffLayout>('unified');
   const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
   const [summary, setSummary] = useState<Summary>({ files: [] });
+  const [stagedCount, setStagedCount] = useState(0);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [diff, setDiff] = useState('');
   const [loading, setLoading] = useState(false);
-  const [staged, setStaged] = useState<Set<string>>(new Set());
+  const [fileActionPath, setFileActionPath] = useState<string | null>(null);
   const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  const [publishMode, setPublishMode] = useState<PublishMode | null>(null);
 
   const refresh = useCallback(() => {
-    if (!repoPath) return setSummary({ files: [] });
-    const query = new URLSearchParams({ repo: repoPath, mode });
-    fetch(`/api/repos/diff?${query}`)
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error('Unable to load repository changes.')))
-      .then((body: Summary) => {
+    if (!repoPath) {
+      setSummary({ files: [] });
+      setStagedCount(0);
+      return;
+    }
+    const requestSummary = (requestedMode: DiffMode) => {
+      const query = new URLSearchParams({ repo: repoPath, mode: requestedMode });
+      return fetch(`/api/repos/diff?${query}`)
+        .then((response) => response.ok ? response.json() as Promise<Summary> : Promise.reject(new Error('Unable to load repository changes.')));
+    };
+    const visibleSummary = requestSummary(mode);
+    const worktreeSummary = mode === 'uncommitted' ? visibleSummary : requestSummary('uncommitted');
+    Promise.all([visibleSummary, worktreeSummary])
+      .then(([body, worktree]) => {
         setSummary(body);
+        setStagedCount(worktree.files.filter((file) => file.staged).length);
         setSelectedPath((current) => current && body.files.some((file) => file.path === current) ? current : body.files[0]?.path ?? null);
       })
       .catch((error) => onError(error instanceof Error ? error.message : String(error)));
@@ -79,23 +96,24 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
   }), { additions: 0, deletions: 0 }), [summary.files]);
   const repoClaims = claims.filter((claim) => claim.repo === repoPath);
 
-  const fileAction = async (action: 'stage' | 'unstage' | 'discard') => {
-    if (!repoPath || !selectedPath) return;
-    if (action === 'discard' && !window.confirm(`Discard all uncommitted changes in ${selectedPath}?`)) return;
-    const response = await fetch('/api/repos/file-action', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ repo: repoPath, path: selectedPath, action }),
-    });
-    const body = await response.json() as { error?: string };
-    if (!response.ok) return onError(body.error ?? `Unable to ${action} file.`);
-    setStaged((current) => {
-      const next = new Set(current);
-      if (action === 'stage') next.add(selectedPath);
-      if (action === 'unstage' || action === 'discard') next.delete(selectedPath);
-      return next;
-    });
-    refresh();
+  const fileAction = async (filePath: string, action: 'stage' | 'unstage' | 'discard') => {
+    if (!repoPath) return;
+    if (action === 'discard' && !window.confirm(`Discard all uncommitted changes in ${filePath}?`)) return;
+    setFileActionPath(filePath);
+    try {
+      const response = await fetch('/api/repos/file-action', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repo: repoPath, path: filePath, action }),
+      });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) return onError(body.error ?? `Unable to ${action} file.`);
+      refresh();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileActionPath(null);
+    }
   };
 
   const openInEditor = async () => {
@@ -111,30 +129,53 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
 
   if (!repoPath) return <div className="empty-workspace"><strong>Select a repository session</strong><span>Working-tree and branch changes will appear here.</span></div>;
 
-  return (
+  const fileGroups = mode === 'branch'
+    ? [
+      { label: 'Modified', files: summary.files.filter((file) => file.status !== '?') },
+      { label: 'Untracked', files: summary.files.filter((file) => file.status === '?') },
+    ]
+    : [
+      { label: 'Staged', files: summary.files.filter((file) => file.staged && !file.partiallyStaged) },
+      { label: 'Partially staged', files: summary.files.filter((file) => file.partiallyStaged) },
+      { label: 'Unstaged', files: summary.files.filter((file) => !file.staged) },
+    ];
+  return <>
     <section className="changes-workspace">
-      <aside className="change-files-rail">
+      <header className="changes-workspace-header">
+        <span><strong>Changes</strong><small>{summary.files.length} file{summary.files.length === 1 ? '' : 's'} · {stagedCount} staged</small></span>
+        <div className="diff-publish-actions"><button className="button" disabled={stagedCount === 0} onClick={() => setPublishMode('commit')} type="button">Commit staged</button><button className="button button-primary" onClick={() => setPublishMode('pr')} type="button">Create PR</button></div>
+      </header>
+      <div className="changes-workspace-body">
+        <aside className="change-files-rail">
         <div className="change-scope segmented-control">
           <button className={mode === 'uncommitted' ? 'is-active' : ''} onClick={() => setMode('uncommitted')} type="button">Worktree · {summary.files.length}</button>
           <button className={mode === 'branch' ? 'is-active' : ''} onClick={() => setMode('branch')} type="button">vs {summary.baseBranch ?? 'main'}</button>
         </div>
         <div className="change-file-scroll">
-          {(['modified', 'untracked'] as const).map((group) => {
-            const files = summary.files.filter((file) => group === 'untracked' ? file.status === '?' : file.status !== '?');
-            return (
-              <div key={group}>
-                <div className="sidebar-section-label"><span>{group}</span><span>{files.length}</span></div>
-                {files.map((file) => (
-                  <button className={`change-file-row${file.path === selectedPath ? ' is-selected' : ''}`} key={file.path} onClick={() => setSelectedPath(file.path)} type="button">
-                    <span title={file.path}>{file.path}</span>
-                    {staged.has(file.path) && <em>Staged</em>}
-                    <small><b>+{file.additions}</b> <i>−{file.deletions}</i></small>
-                    <span className="change-density"><i /><i /><i /><i /><i /><i /></span>
-                  </button>
+          {fileGroups.map((group) => (
+              <div key={group.label}>
+                <div className="sidebar-section-label"><span>{group.label}</span><span>{group.files.length}</span></div>
+                {group.files.map((file) => (
+                  <div className={`change-file-row${file.path === selectedPath ? ' is-selected' : ''}${mode === 'branch' ? ' is-readonly' : ''}`} key={file.path}>
+                    {mode === 'uncommitted' && <button
+                      aria-checked={file.partiallyStaged ? 'mixed' : Boolean(file.staged)}
+                      aria-label={`${file.staged ? 'Unstage' : 'Stage'} ${file.path}`}
+                      className={`change-stage-checkbox${file.staged ? ' is-checked' : ''}${file.partiallyStaged ? ' is-mixed' : ''}`}
+                      disabled={fileActionPath === file.path}
+                      onClick={() => void fileAction(file.path, file.staged ? 'unstage' : 'stage')}
+                      role="checkbox"
+                      type="button"
+                    >{fileActionPath === file.path ? '·' : file.partiallyStaged ? '−' : file.staged ? '✓' : ''}</button>}
+                    <button className="change-file-select" onClick={() => setSelectedPath(file.path)} type="button">
+                      <span title={file.path}>{file.path}</span>
+                      {file.staged && <em>{file.partiallyStaged ? 'Partial' : 'Staged'}</em>}
+                      <small><b>+{file.additions}</b> <i>−{file.deletions}</i></small>
+                      <span className="change-density"><i /><i /><i /><i /><i /><i /></span>
+                    </button>
+                  </div>
                 ))}
               </div>
-            );
-          })}
+          ))}
           <div className="sidebar-section-label claim-heading"><span>Agent claims</span><span>{repoClaims.length}</span></div>
           {repoClaims.map((claim) => (
             <div className="claim-row" key={`${claim.agent}-${claim.file}`}>
@@ -144,12 +185,12 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
             </div>
           ))}
         </div>
-        <button className="button open-editor-button" disabled={!selectedPath} onClick={() => void openInEditor()} type="button">Open in editor ↗</button>
-      </aside>
+          <button className="button open-editor-button" disabled={!selectedPath} onClick={() => void openInEditor()} type="button">Open in editor ↗</button>
+        </aside>
 
-      <div className="diff-stage">
-        <header className="diff-stage-header">
-          <div className="diff-path"><span>{repoPath.split('/').pop()} /</span><strong>{selectedPath ?? 'No file selected'}</strong>{selected && <em>{selected.status === '?' ? 'Untracked' : 'Modified'}</em>}</div>
+        <div className="diff-stage">
+          <header className="diff-stage-header">
+          <div className="diff-path"><span>{repoPath.split('/').pop()} /</span><strong>{selectedPath ?? 'No file selected'}</strong>{selected && <em>{selected.partiallyStaged ? 'Partial' : selected.staged ? 'Staged' : selected.status === '?' ? 'Untracked' : 'Modified'}</em>}</div>
           <div className="diff-toolbar">
             <div className="segmented-control">
               <button className={layout === 'unified' ? 'is-active' : ''} onClick={() => setLayout('unified')} type="button">Unified</button>
@@ -176,18 +217,20 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
             </div>
           ))}
         </div>
-        <footer className="diff-footer">
+          <footer className="diff-footer">
           <span>💬 0 comments · <b>+{selected?.additions ?? 0}</b> <i>−{selected?.deletions ?? 0}</i></span>
           <span className="diff-footer-totals">Repository +{totals.additions} −{totals.deletions}</span>
-          <button className="button" disabled={!selected} onClick={() => void fileAction(staged.has(selectedPath ?? '') ? 'unstage' : 'stage')} type="button">{staged.has(selectedPath ?? '') ? '✓ Staged — unstage' : 'Stage file'}</button>
-          <button className="button danger-button" disabled={!selected} onClick={() => void fileAction('discard')} type="button">Discard</button>
+          <button className="button" disabled={!selected || mode !== 'uncommitted' || fileActionPath === selectedPath} onClick={() => selectedPath && void fileAction(selectedPath, selected?.staged ? 'unstage' : 'stage')} type="button">{selected?.staged ? '✓ Staged — unstage' : 'Stage file'}</button>
+          <button className="button danger-button" disabled={!selected || mode !== 'uncommitted' || fileActionPath === selectedPath} onClick={() => selectedPath && void fileAction(selectedPath, 'discard')} type="button">Discard</button>
           <button className={`button button-primary${reviewed.has(selectedPath ?? '') ? ' is-reviewed' : ''}`} disabled={!selected} onClick={() => selectedPath && setReviewed((current) => {
             const next = new Set(current);
             if (next.has(selectedPath)) next.delete(selectedPath); else next.add(selectedPath);
             return next;
           })} type="button">{reviewed.has(selectedPath ?? '') ? '✓ Reviewed' : 'Review changes'}</button>
-        </footer>
+          </footer>
+        </div>
       </div>
     </section>
-  );
+    {publishMode && <PublishModal initialMode={publishMode} onChanged={refresh} onClose={() => setPublishMode(null)} repoPath={repoPath} />}
+  </>;
 }

@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentDeck · Commit and PR flow prototype</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #0b0e12;
+      --sidebar: #0f1319;
+      --panel: #12171e;
+      --raised: #171d25;
+      --input: #0d1117;
+      --hover: #1b222c;
+      --selected: #1e2834;
+      --border: #252d38;
+      --border-strong: #3a4655;
+      --text: #e6edf5;
+      --text-2: #aeb9c7;
+      --muted: #718093;
+      --primary: #4f7cff;
+      --primary-hover: #638cff;
+      --green: #4ec9a5;
+      --green-bg: rgba(78, 201, 165, .1);
+      --amber: #e9b949;
+      --amber-bg: rgba(233, 185, 73, .1);
+      --red: #f07070;
+      --red-bg: rgba(240, 112, 112, .1);
+      --purple: #a998ff;
+      --shadow: 0 28px 90px rgba(0, 0, 0, .56);
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { margin: 0; overflow: hidden; background: var(--canvas); color: var(--text); font: 13px Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    .app { min-width: 1120px; height: 100vh; display: grid; grid-template-rows: 50px minmax(0, 1fr) 29px; }
+    .topbar { display: flex; align-items: center; gap: 18px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+    .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+    .brand-mark { width: 21px; height: 21px; display: grid; place-items: center; border: 1px solid #6d91ff; border-radius: 6px; background: var(--primary); }
+    .brand-mark::after { width: 7px; height: 7px; border-radius: 2px; background: white; content: ""; transform: rotate(45deg); }
+    .tabs { display: flex; gap: 3px; }
+    .tabs button { border: 0; border-radius: 6px; padding: 7px 12px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; }
+    .tabs .active { background: var(--selected); color: var(--text); }
+    .tabs span { margin-left: 5px; padding: 1px 6px; border-radius: 8px; background: #2a3441; font: 9px var(--mono); }
+    .jump { width: min(360px, 28vw); margin-left: auto; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--input); color: var(--muted); text-align: left; }
+    .live { display: flex; align-items: center; gap: 6px; color: var(--green); font: 10px var(--mono); }
+    .live i, .statusbar i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .btn { min-height: 30px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--border-strong); border-radius: 5px; padding: 6px 12px; background: var(--raised); color: var(--text-2); font-size: 12px; font-weight: 650; }
+    .btn:hover { border-color: #69788b; color: var(--text); }
+    .btn.primary { border-color: var(--primary); background: var(--primary); color: white; }
+    .btn.primary:hover { background: var(--primary-hover); }
+    .btn:disabled { opacity: .42; cursor: default; }
+    .body { min-height: 0; display: grid; grid-template-columns: 246px minmax(0, 1fr) 276px; }
+    .sidebar, .inspector { min-height: 0; background: var(--sidebar); }
+    .sidebar { border-right: 1px solid var(--border); }
+    .inspector { border-left: 1px solid var(--border); }
+    .side-title { padding: 15px; border-bottom: 1px solid var(--border); }
+    .side-title strong { display: block; font-size: 12px; }
+    .side-title small { color: var(--muted); font: 9px var(--mono); }
+    .section-label { display: flex; justify-content: space-between; padding: 14px 13px 7px; color: var(--muted); font: 9px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    .session { display: flex; gap: 9px; margin: 2px 8px; padding: 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--selected); }
+    .session .dot { width: 8px; height: 8px; margin-top: 3px; border-radius: 2px; background: var(--green); }
+    .session strong, .session small { display: block; }
+    .session strong { font-size: 12px; }
+    .session small { margin-top: 3px; color: var(--muted); font: 9px var(--mono); }
+    .main { min-width: 0; min-height: 0; display: grid; grid-template-columns: 235px minmax(0, 1fr); }
+    .files { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--border); background: #0d1117; }
+    .scope { display: flex; padding: 9px; border-bottom: 1px solid var(--border); }
+    .segment { display: flex; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 5px; }
+    .segment button { border: 0; padding: 6px 9px; background: var(--input); color: var(--muted); font-size: 10px; }
+    .segment .active { background: var(--selected); color: var(--text); box-shadow: inset 0 -2px var(--primary); }
+    .file-list { flex: 1; overflow: hidden; }
+    .file-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 9px 11px; border-bottom: 1px solid #1a2029; color: var(--text-2); font: 10px var(--mono); }
+    .file-row.active { background: var(--selected); color: var(--text); }
+    .file-row .check { width: 13px; height: 13px; display: grid; place-items: center; border: 1px solid var(--green); border-radius: 3px; background: var(--green-bg); color: var(--green); font-size: 9px; }
+    .file-row .partial { border-color: var(--amber); background: var(--amber-bg); color: var(--amber); }
+    .file-row b { color: var(--green); font-weight: 500; }
+    .file-row em { color: var(--red); font-style: normal; }
+    .diff { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .diff-head { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
+    .diff-head strong { font: 11px var(--mono); }
+    .diff-head span { color: var(--muted); }
+    .publish-actions { display: flex; gap: 7px; margin-left: auto; }
+    .diff-code { flex: 1; min-height: 0; overflow: hidden; padding-top: 9px; background: #090c10; font: 10px/1.65 var(--mono); }
+    .code-line { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); white-space: pre; }
+    .code-line > span { padding-right: 10px; color: #465364; text-align: right; user-select: none; }
+    .code-line code { padding-left: 12px; color: #9aa7b7; }
+    .code-line.add { background: rgba(46, 160, 112, .1); }.code-line.add code { color: #8edbbd; }
+    .code-line.del { background: rgba(224, 88, 88, .1); }.code-line.del code { color: #efa1a1; }
+    .code-line.hunk { background: rgba(79, 124, 255, .08); }.code-line.hunk code { color: #91adff; }
+    .inspector section { padding: 14px; border-bottom: 1px solid var(--border); }
+    .inspector h3 { margin: 0 0 12px; color: var(--muted); font: 9px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    .repo-name { font-size: 14px; }
+    .branch { margin-top: 5px; color: var(--purple); font: 10px var(--mono); }
+    .metric { display: flex; justify-content: space-between; margin: 8px 0; color: var(--muted); font: 10px var(--mono); }
+    .metric strong { color: var(--text-2); font-weight: 500; }
+    .statusbar { display: flex; align-items: center; gap: 18px; padding: 0 13px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font: 9px var(--mono); }
+    .statusbar .ok { display: flex; align-items: center; gap: 5px; color: var(--green); }
+
+    .backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 28px 28px 74px; background: rgba(3, 5, 8, .67); backdrop-filter: blur(2px); }
+    .backdrop.hidden { display: none; }
+    .dialog { width: min(1000px, calc(100vw - 56px)); max-height: min(760px, calc(100vh - 104px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid #4b596a; border-radius: 9px; background: var(--panel); box-shadow: var(--shadow); }
+    .dialog-head { min-height: 58px; display: flex; align-items: center; gap: 11px; padding: 0 17px; border-bottom: 1px solid var(--border); }
+    .dialog-glyph { width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--selected); color: var(--purple); font: 14px var(--mono); }
+    .dialog-head > span strong, .dialog-head > span small { display: block; }
+    .dialog-head > span strong { font-size: 14px; }
+    .dialog-head > span small { margin-top: 2px; color: var(--muted); font: 9px var(--mono); }
+    .dialog-head .repo-pill { margin-left: auto; padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-2); font: 9px var(--mono); }
+    .dialog-head kbd { color: var(--muted); font: 9px var(--mono); }
+    .close { width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 18px; }
+    .close:hover { background: var(--hover); color: var(--text); }
+    .dialog-tabs { display: flex; gap: 3px; padding: 10px 16px 0; border-bottom: 1px solid var(--border); background: #10151b; }
+    .dialog-tabs button { min-width: 138px; border: 0; border-bottom: 2px solid transparent; padding: 9px 13px 11px; background: transparent; color: var(--muted); font-weight: 650; }
+    .dialog-tabs button.active { border-bottom-color: var(--primary); color: var(--text); }
+    .dialog-content { min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 310px; overflow: auto; }
+    .form { padding: 19px 21px 24px; }
+    .field { margin-bottom: 17px; }
+    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    label, .field-label { display: flex; justify-content: space-between; margin-bottom: 7px; color: var(--text-2); font-size: 11px; font-weight: 650; }
+    label small, .field-label small { color: var(--muted); font: 9px var(--mono); font-weight: 400; }
+    input, textarea, select { width: 100%; border: 1px solid var(--border-strong); border-radius: 5px; outline: 0; background: var(--input); color: var(--text); }
+    input, select { height: 35px; padding: 0 10px; }
+    textarea { min-height: 78px; resize: vertical; padding: 9px 10px; line-height: 1.45; }
+    input:focus, textarea:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(79, 124, 255, .15); }
+    .branch-route { display: flex; align-items: center; gap: 7px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 5px; background: var(--input); color: var(--text-2); font: 10px var(--mono); }
+    .branch-route strong { color: var(--purple); }
+    .branch-route i { color: var(--muted); font-style: normal; }
+    .toggle-row { display: flex; align-items: center; gap: 10px; padding: 11px; border: 1px solid var(--border); border-radius: 5px; background: #10151b; }
+    .toggle { width: 34px; height: 19px; position: relative; flex: none; border: 0; border-radius: 12px; background: var(--primary); }
+    .toggle::after { position: absolute; top: 3px; right: 3px; width: 13px; height: 13px; border-radius: 50%; background: white; content: ""; }
+    .toggle.off { background: #344050; }.toggle.off::after { right: 18px; }
+    .toggle-copy strong, .toggle-copy small { display: block; }
+    .toggle-copy strong { font-size: 11px; }.toggle-copy small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .summary { padding: 18px 17px; border-left: 1px solid var(--border); background: #0e1319; }
+    .micro { margin: 0 0 10px; color: var(--muted); font: 9px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+    .summary-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #1e2630; }
+    .summary-row > span:first-child { width: 16px; color: var(--green); font: 11px var(--mono); }
+    .summary-row strong { flex: 1; overflow: hidden; font: 10px var(--mono); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+    .summary-row small { color: var(--muted); font: 9px var(--mono); }
+    .summary-note { margin: 12px 0 18px; padding: 10px; border-left: 2px solid var(--amber); background: var(--amber-bg); color: var(--text-2); font-size: 10px; line-height: 1.45; }
+    .check-row { display: grid; grid-template-columns: 19px 1fr; gap: 7px; padding: 7px 0; }
+    .check-row > span { color: var(--green); font: 11px var(--mono); }
+    .check-row strong, .check-row small { display: block; }
+    .check-row strong { color: var(--text-2); font-size: 10px; }.check-row small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+    .progress-step { display: grid; grid-template-columns: 23px 1fr auto; align-items: center; gap: 8px; padding: 9px 0; }
+    .step-dot { width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid var(--border-strong); border-radius: 50%; color: var(--muted); font: 9px var(--mono); }
+    .progress-step.done .step-dot { border-color: var(--green); background: var(--green-bg); color: var(--green); }
+    .progress-step.active .step-dot { border-color: var(--primary); color: white; box-shadow: 0 0 0 3px rgba(79,124,255,.13); }
+    .progress-step strong { display: block; color: var(--text-2); font-size: 10px; }.progress-step small { color: var(--muted); font-size: 9px; }
+    .progress-step em { color: var(--muted); font: 9px var(--mono); font-style: normal; }
+    .dialog-footer { min-height: 58px; display: flex; align-items: center; gap: 9px; padding: 0 17px; border-top: 1px solid var(--border); background: #10151b; }
+    .footer-state { display: flex; align-items: center; gap: 7px; margin-right: auto; color: var(--green); font: 9px var(--mono); }
+    .footer-state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .footer-state.warn { color: var(--amber); }
+    .prereq, .success { min-height: 430px; display: grid; place-content: center; justify-items: center; padding: 40px; text-align: center; }
+    .state-icon { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid var(--amber); border-radius: 13px; background: var(--amber-bg); color: var(--amber); font: 23px var(--mono); }
+    .success .state-icon { border-color: var(--green); background: var(--green-bg); color: var(--green); }
+    .prereq h2, .success h2 { margin: 16px 0 7px; font-size: 18px; }
+    .prereq p, .success p { max-width: 480px; margin: 0 0 18px; color: var(--muted); line-height: 1.55; }
+    .command { width: min(520px, 70vw); padding: 11px 13px; border: 1px solid var(--border); border-radius: 5px; background: var(--input); color: var(--text-2); text-align: left; font: 10px var(--mono); }
+    .success-link { display: flex; align-items: center; gap: 8px; width: min(520px, 70vw); margin-bottom: 18px; padding: 11px 13px; border: 1px solid var(--border); border-radius: 5px; background: var(--input); color: #8eafff; font: 10px var(--mono); }
+    .success-link span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .success-meta { display: flex; gap: 10px; margin-bottom: 20px; }
+    .success-meta span { padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text-2); font: 9px var(--mono); }
+    .hidden { display: none !important; }
+
+    .prototype-bar { position: fixed; z-index: 40; left: 50%; bottom: 14px; display: flex; align-items: center; gap: 4px; padding: 6px; border: 1px solid #536174; border-radius: 8px; background: rgba(18, 23, 30, .96); box-shadow: 0 12px 40px rgba(0,0,0,.4); transform: translateX(-50%); }
+    .prototype-bar > span { padding: 0 8px 0 5px; color: var(--muted); font: 8px var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    .prototype-bar button { border: 0; border-radius: 4px; padding: 7px 9px; background: transparent; color: var(--text-2); font-size: 10px; }
+    .prototype-bar button:hover, .prototype-bar button.active { background: var(--selected); color: var(--text); }
+    @media (max-height: 700px) { .dialog { max-height: calc(100vh - 84px); }.backdrop { padding-top: 12px; }.form { padding-top: 14px; }.field { margin-bottom: 12px; } }
+  </style>
+</head>
+<body>
+  <div class="app" aria-hidden="true">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark"></span>AgentDeck</div>
+      <nav class="tabs"><button>Operations</button><button>Terminal</button><button class="active">Changes <span>5</span></button><button>Grid</button></nav>
+      <button class="jump">&gt;_ &nbsp; Jump to session, file, or action…</button>
+      <span class="live"><i></i>live</span>
+      <button class="btn">Install hooks</button><button class="btn primary">Launch agent</button>
+    </header>
+    <div class="body">
+      <aside class="sidebar">
+        <div class="side-title"><strong>Control plane</strong><small>5 sessions · 3 repositories</small></div>
+        <div class="section-label"><span>Managed</span><span>3</span></div>
+        <div class="session"><span class="dot"></span><span><strong>Git publish workflow</strong><small>agentdeck · feature/git-publish</small></span></div>
+        <div class="section-label"><span>External</span><span>2</span></div>
+      </aside>
+      <main class="main">
+        <aside class="files">
+          <div class="scope"><div class="segment"><button class="active">Worktree · 5</button><button>vs main</button></div></div>
+          <div class="file-list">
+            <div class="section-label"><span>Staged</span><span>3</span></div>
+            <div class="file-row active"><span class="check">✓</span><span>src/git/publish.ts</span><span><b>+84</b> <em>−2</em></span></div>
+            <div class="file-row"><span class="check">✓</span><span>src/server/routes.ts</span><span><b>+41</b></span></div>
+            <div class="file-row"><span class="check partial">—</span><span>src/ui/workspace/ChangesWorkspace.tsx</span><span><b>+96</b> <em>−8</em></span></div>
+            <div class="section-label"><span>Unstaged</span><span>2</span></div>
+            <div class="file-row"><span></span><span>README.md</span><span><b>+8</b></span></div>
+            <div class="file-row"><span></span><span>notes.txt</span><span><b>+3</b></span></div>
+          </div>
+        </aside>
+        <section class="diff">
+          <header class="diff-head"><span>agentdeck /</span><strong>src/git/publish.ts</strong><div class="publish-actions"><button class="btn" data-open="commit">Commit staged</button><button class="btn primary" data-open="pr">Create PR</button></div></header>
+          <div class="diff-code" id="diffCode"></div>
+        </section>
+      </main>
+      <aside class="inspector">
+        <section><h3>Repository</h3><strong class="repo-name">agentdeck</strong><div class="branch">feature/git-publish</div></section>
+        <section><h3>Git state</h3><div class="metric"><span>Staged</span><strong>3 files</strong></div><div class="metric"><span>Unstaged</span><strong>2 files</strong></div><div class="metric"><span>Ahead of main</span><strong>2 commits</strong></div><div class="metric"><span>Remote</span><strong>origin</strong></div></section>
+      </aside>
+    </div>
+    <footer class="statusbar"><span class="ok"><i></i>Live</span><span>AgentDeck v0.1.0</span><span>▣ agentdeck</span><span>feature/git-publish</span></footer>
+  </div>
+
+  <div class="backdrop" id="backdrop">
+    <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+      <header class="dialog-head">
+        <span class="dialog-glyph">⇧</span>
+        <span><strong id="dialogTitle">Publish changes</strong><small>Commit locally or open a GitHub pull request</small></span>
+        <span class="repo-pill">agentdeck · feature/git-publish</span><kbd>ESC</kbd><button class="close" id="closeDialog" aria-label="Close">×</button>
+      </header>
+      <div class="dialog-tabs" id="dialogTabs"><button data-mode="commit">Commit locally</button><button data-mode="pr" class="active">Create pull request</button></div>
+
+      <div id="formState">
+        <div class="dialog-content">
+          <form class="form" onsubmit="return false">
+            <div class="field" id="routeField">
+              <div class="field-label"><span>Publish route</span><small>remote and head are inferred</small></div>
+              <div class="branch-route"><strong>feature/git-publish</strong><i>→</i><span>origin</span><i>→</i><strong>main</strong></div>
+            </div>
+            <div class="field-row">
+              <div class="field"><label for="commitSubject"><span>Commit subject</span><small>required</small></label><input id="commitSubject" maxlength="160" value="Add commit and PR workflow" /></div>
+              <div class="field" id="baseField"><label for="baseBranch"><span>Base branch</span><small>GitHub</small></label><select id="baseBranch"><option>main</option><option>develop</option><option>release/0.2</option></select></div>
+            </div>
+            <div class="field"><label for="commitBody"><span>Commit details</span><small>optional</small></label><textarea id="commitBody">Add repository-scoped publish status and safe staged-only commit support.</textarea></div>
+            <div id="prFields">
+              <div class="field"><label for="prTitle"><span>Pull request title</span><small>required</small></label><input id="prTitle" maxlength="256" value="Add commit and PR workflow" /></div>
+              <div class="field"><label for="prBody"><span>Description</span><small>Markdown supported</small></label><textarea id="prBody" rows="5">## Summary
+• commit staged changes from AgentDeck
+• push the current branch safely
+• create draft pull requests through GitHub CLI
+
+## Test plan
+• route, Git parsing, and interaction tests</textarea></div>
+              <div class="toggle-row"><button class="toggle" id="draftToggle" type="button" aria-pressed="true"></button><span class="toggle-copy"><strong>Create as draft</strong><small>Mark ready for review later on GitHub.</small></span></div>
+            </div>
+          </form>
+          <aside class="summary">
+            <h3 class="micro">Staged for commit · 3</h3>
+            <div class="summary-row"><span>✓</span><strong>src/git/publish.ts</strong><small>+84 −2</small></div>
+            <div class="summary-row"><span>✓</span><strong>src/server/routes.ts</strong><small>+41</small></div>
+            <div class="summary-row"><span>◐</span><strong>src/ui/workspace/ChangesWorkspace.tsx</strong><small>+96 −8</small></div>
+            <div class="summary-note">Only staged hunks will be committed. Two unstaged files stay in your worktree.</div>
+            <h3 class="micro">Preflight</h3>
+            <div class="check-row"><span>✓</span><span><strong>Git identity configured</strong><small>Sandeep Suri &lt;sandeep@example.com&gt;</small></span></div>
+            <div class="check-row"><span>✓</span><span><strong>GitHub CLI authenticated</strong><small>github.com · sandeepsuri</small></span></div>
+            <div class="check-row"><span>✓</span><span><strong>No pull request exists</strong><small>feature/git-publish is available</small></span></div>
+            <div class="check-row"><span>✓</span><span><strong>Remote ready</strong><small>origin · push with upstream</small></span></div>
+          </aside>
+        </div>
+        <footer class="dialog-footer"><span class="footer-state"><i></i><span id="readyText">Ready · 3 staged files will be committed and published</span></span><button class="btn" id="cancelButton">Cancel</button><button class="btn primary" id="submitButton">Create draft PR &nbsp; ⌘↵</button></footer>
+      </div>
+
+      <div id="missingState" class="hidden">
+        <div class="prereq"><span class="state-icon">!</span><h2>GitHub CLI is required</h2><p>Commits remain available, but AgentDeck uses an authenticated GitHub CLI to create pull requests without storing access tokens.</p><div class="command">$ brew install gh &amp;&amp; gh auth login</div></div>
+        <footer class="dialog-footer"><span class="footer-state warn"><i></i>Pull request publishing unavailable</span><button class="btn" data-mode-switch="commit">Commit locally instead</button><button class="btn" id="recheckButton">Recheck</button></footer>
+      </div>
+
+      <div id="progressState" class="hidden">
+        <div class="dialog-content"><div class="form"><h2 style="margin:0 0 7px;font-size:17px">Publishing feature/git-publish</h2><p style="margin:0;color:var(--muted);line-height:1.5">Keep this window open while AgentDeck commits, pushes, and asks GitHub to create the pull request.</p><div style="margin-top:25px"><div class="progress-step done"><span class="step-dot">✓</span><span><strong>Committed staged changes</strong><small>7b91d42 · Add commit and PR workflow</small></span><em>done</em></div><div class="progress-step active"><span class="step-dot">2</span><span><strong>Push branch to origin</strong><small>Setting upstream for feature/git-publish</small></span><em>working</em></div><div class="progress-step"><span class="step-dot">3</span><span><strong>Create draft pull request</strong><small>Waiting for branch push</small></span><em>queued</em></div></div></div><aside class="summary"><h3 class="micro">Completed safely</h3><div class="check-row"><span>✓</span><span><strong>Local commit created</strong><small>This step will not be repeated if retry is needed.</small></span></div><div class="summary-note">If a later step fails, AgentDeck reports exactly what completed and lets you retry from the failed step.</div></aside></div>
+        <footer class="dialog-footer"><span class="footer-state"><i></i>Publishing · step 2 of 3</span><button class="btn" disabled>Close</button><button class="btn primary" disabled>Working…</button></footer>
+      </div>
+
+      <div id="successState" class="hidden">
+        <div class="success"><span class="state-icon">✓</span><h2 id="successTitle">Draft pull request created</h2><p id="successCopy">Your staged changes were committed, the branch was pushed to origin, and GitHub opened pull request #42.</p><div class="success-meta"><span>7b91d42</span><span>feature/git-publish → main</span><span id="draftPill">Draft</span></div><div class="success-link"><span id="resultUrl">github.com/sandeepsuri/agentdeck/pull/42</span><button class="btn" id="copyButton">Copy</button><button class="btn primary" id="openButton">Open ↗</button></div><button class="btn" id="doneButton">Done</button></div>
+      </div>
+    </section>
+  </div>
+
+  <nav class="prototype-bar" aria-label="Prototype states"><span>Prototype</span><button data-preview="workspace">Workspace</button><button data-preview="commit">Commit</button><button data-preview="pr" class="active">Create PR</button><button data-preview="missing">gh missing</button><button data-preview="progress">Publishing</button><button data-preview="success">Success</button></nav>
+
+  <script>
+    const $ = (selector) => document.querySelector(selector);
+    const $$ = (selector) => [...document.querySelectorAll(selector)];
+    const states = ['formState', 'missingState', 'progressState', 'successState'];
+    let mode = 'pr';
+    let draft = true;
+
+    const diffLines = [
+      ['hunk', '', '', '@@ -0,0 +1,18 @@'],
+      ['add', '', '1', '+export interface PublishStatus {'],
+      ['add', '', '2', '+  branch: string;'],
+      ['add', '', '3', '+  baseBranch?: string;'],
+      ['add', '', '4', '+  stagedFiles: number;'],
+      ['add', '', '5', '+  github: { available: boolean; authenticated: boolean };'],
+      ['add', '', '6', '+}'],
+      ['', '7', '7', ''],
+      ['', '8', '8', 'export async function publishStatus(repoPath: string) {'],
+      ['del', '9', '', '-  return git(repoPath, [\'status\']);'],
+      ['add', '', '9', '+  const branch = await currentBranch(repoPath);'],
+      ['add', '', '10', '+  const stagedFiles = await stagedFileCount(repoPath);'],
+      ['add', '', '11', '+  return { branch, stagedFiles, github: await githubStatus(repoPath) };'],
+      ['', '12', '12', '}'],
+    ];
+    $('#diffCode').innerHTML = diffLines.map(([kind, left, right, code]) => `<div class="code-line ${kind}"><span>${left}</span><span>${right}</span><code>${code || ' '}</code></div>`).join('');
+
+    function showState(id) {
+      states.forEach((state) => $('#' + state).classList.toggle('hidden', state !== id));
+    }
+    function setMode(nextMode) {
+      mode = nextMode;
+      showState('formState');
+      $('#backdrop').classList.remove('hidden');
+      $$('#dialogTabs [data-mode]').forEach((button) => button.classList.toggle('active', button.dataset.mode === mode));
+      $('#prFields').classList.toggle('hidden', mode === 'commit');
+      $('#baseField').classList.toggle('hidden', mode === 'commit');
+      $('#routeField').classList.toggle('hidden', mode === 'commit');
+      $('#dialogTitle').textContent = mode === 'commit' ? 'Commit staged changes' : 'Publish changes';
+      $('#readyText').textContent = mode === 'commit' ? 'Ready · 3 staged files will be committed locally' : 'Ready · 3 staged files will be committed and published';
+      $('#submitButton').textContent = mode === 'commit' ? 'Commit staged  ⌘↵' : `${draft ? 'Create draft PR' : 'Create PR'}  ⌘↵`;
+      $$('.prototype-bar button').forEach((button) => button.classList.toggle('active', button.dataset.preview === mode));
+      setTimeout(() => $('#commitSubject').focus(), 20);
+    }
+    function closeDialog() { $('#backdrop').classList.add('hidden'); $$('.prototype-bar button').forEach((button) => button.classList.toggle('active', button.dataset.preview === 'workspace')); }
+    function preview(state) {
+      if (state === 'workspace') return closeDialog();
+      $('#backdrop').classList.remove('hidden');
+      if (state === 'commit' || state === 'pr') setMode(state);
+      if (state === 'missing') { mode = 'pr'; showState('missingState'); }
+      if (state === 'progress') { mode = 'pr'; showState('progressState'); }
+      if (state === 'success') { mode = 'pr'; configureSuccess('pr'); showState('successState'); }
+      $$('.prototype-bar button').forEach((button) => button.classList.toggle('active', button.dataset.preview === state));
+    }
+    function configureSuccess(kind) {
+      const commitOnly = kind === 'commit';
+      $('#successTitle').textContent = commitOnly ? 'Changes committed' : `${draft ? 'Draft pull request' : 'Pull request'} created`;
+      $('#successCopy').textContent = commitOnly ? 'Three staged files were committed locally. Your unstaged work is unchanged.' : 'Your staged changes were committed, the branch was pushed to origin, and GitHub opened pull request #42.';
+      $('#draftPill').classList.toggle('hidden', commitOnly || !draft);
+      $('#resultUrl').textContent = commitOnly ? '7b91d42 · Add commit and PR workflow' : 'github.com/sandeepsuri/agentdeck/pull/42';
+      $('#openButton').classList.toggle('hidden', commitOnly);
+    }
+    $$('[data-open]').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.open)));
+    $$('#dialogTabs [data-mode]').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.mode)));
+    $$('.prototype-bar [data-preview]').forEach((button) => button.addEventListener('click', () => preview(button.dataset.preview)));
+    $('[data-mode-switch]').addEventListener('click', () => setMode('commit'));
+    $('#draftToggle').addEventListener('click', () => { draft = !draft; $('#draftToggle').classList.toggle('off', !draft); $('#draftToggle').setAttribute('aria-pressed', String(draft)); $('#submitButton').textContent = `${draft ? 'Create draft PR' : 'Create PR'}  ⌘↵`; });
+    $('#submitButton').addEventListener('click', () => {
+      if (!$('#commitSubject').value.trim()) { $('#commitSubject').focus(); $('#commitSubject').style.borderColor = 'var(--red)'; return; }
+      if (mode === 'commit') { configureSuccess('commit'); showState('successState'); return; }
+      showState('progressState');
+      window.setTimeout(() => { configureSuccess('pr'); showState('successState'); $$('.prototype-bar button').forEach((button) => button.classList.toggle('active', button.dataset.preview === 'success')); }, 1900);
+    });
+    $('#recheckButton').addEventListener('click', () => setMode('pr'));
+    $('#copyButton').addEventListener('click', async () => { try { await navigator.clipboard.writeText($('#resultUrl').textContent); } catch {} $('#copyButton').textContent = 'Copied'; });
+    $('#openButton').addEventListener('click', () => alert('Prototype: this opens the pull request in a new browser tab.'));
+    $('#closeDialog').addEventListener('click', closeDialog); $('#cancelButton').addEventListener('click', closeDialog); $('#doneButton').addEventListener('click', closeDialog);
+    $('#backdrop').addEventListener('mousedown', (event) => { if (event.target === $('#backdrop')) closeDialog(); });
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeDialog(); if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !$('#formState').classList.contains('hidden')) $('#submitButton').click(); });
+  </script>
+</body>
+</html>

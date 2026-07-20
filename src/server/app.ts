@@ -70,6 +70,7 @@ export interface AppContext {
   vscode?: VsCodeBridge;
   discovery?: DiscoveryPoller;
   installVsCode?: RouteContext['installVsCode'];
+  publish?: RouteContext['publish'];
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -107,6 +108,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     vscode: ctx.vscode,
     discovery: ctx.discovery,
     installVsCode: ctx.installVsCode,
+    publish: ctx.publish,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the

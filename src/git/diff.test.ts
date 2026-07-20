@@ -73,12 +73,32 @@ describe('diffSummary', () => {
     const repoPath = path.join(tempDir(), 'repo');
     initRepo(repoPath);
     fs.writeFileSync(path.join(repoPath, 'README.md'), 'one\nchanged\nthree\n');
-    fs.writeFileSync(path.join(repoPath, 'notes.txt'), 'a\nb\n');
+    fs.mkdirSync(path.join(repoPath, 'notes'));
+    fs.writeFileSync(path.join(repoPath, 'notes', 'todo.txt'), 'a\nb\n');
 
     const summary = await diffSummary(repoPath, 'uncommitted');
     expect(summary.baseBranch).toBe('main');
-    expect(summary.files).toContainEqual({ path: 'README.md', status: 'M', additions: 2, deletions: 1, binary: false });
-    expect(summary.files).toContainEqual({ path: 'notes.txt', status: '?', additions: 2, deletions: 0, binary: false });
+    expect(summary.files).toContainEqual(expect.objectContaining({
+      path: 'README.md', status: 'M', additions: 2, deletions: 1, binary: false,
+      staged: false, partiallyStaged: false, worktreeStatus: 'M',
+    }));
+    expect(summary.files).toContainEqual(expect.objectContaining({
+      path: 'notes/todo.txt', status: '?', additions: 2, deletions: 0, binary: false,
+      staged: false, partiallyStaged: false, worktreeStatus: '?',
+    }));
+  });
+
+  it('reports staged and partially staged files from porcelain columns', async () => {
+    const repoPath = path.join(tempDir(), 'repo');
+    initRepo(repoPath);
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'one\nstaged\n');
+    git(repoPath, 'add', 'README.md');
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'one\nstaged\nunstaged\n');
+
+    const summary = await diffSummary(repoPath, 'uncommitted');
+    expect(summary.files).toContainEqual(expect.objectContaining({
+      path: 'README.md', indexStatus: 'M', worktreeStatus: 'M', staged: true, partiallyStaged: true,
+    }));
   });
 
   it('reports committed branch changes against the base branch', async () => {
