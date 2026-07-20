@@ -1,0 +1,68 @@
+import type { Session, SessionStatus } from '../../types.js';
+
+export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals';
+
+export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
+  { id: 'operations', label: 'Operations' },
+  { id: 'terminal', label: 'Terminal' },
+  { id: 'changes', label: 'Changes' },
+  { id: 'grid', label: 'Grid' },
+];
+
+export const STATUS_LABELS: Record<SessionStatus, string> = {
+  starting: 'Starting',
+  working: 'Working',
+  waiting_input: 'Waiting',
+  idle: 'Idle',
+  completed: 'Complete',
+  exited: 'Exited',
+  unknown: 'Unknown',
+};
+
+export function sessionLabel(session: Session): string {
+  return session.name ?? `${session.agent === 'claude' ? 'Claude' : 'Codex'} · ${session.cwd.split('/').pop() ?? session.cwd}`;
+}
+
+export function repoPathOf(session: Session): string {
+  return session.worktreePath ?? session.repoId ?? session.cwd;
+}
+
+export function relativeTime(iso: string, now = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  if (seconds < 10) return 'now';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+export function elapsedTime(startedAt: string, now = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remaining = seconds % 60;
+  return hours > 0
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`;
+}
+
+export function StatusLamp({ status, pulse = false }: { status: SessionStatus; pulse?: boolean }) {
+  return <span aria-label={STATUS_LABELS[status]} className={`status-lamp status-${status}${pulse ? ' is-pulsing' : ''}`} />;
+}
+
+export function StatusBadge({ status }: { status: SessionStatus }) {
+  return <span className={`status-badge status-${status}`}>{STATUS_LABELS[status]}</span>;
+}
+
+export function SparkBars({ seed, active = false, count = 18 }: { seed: number; active?: boolean; count?: number }) {
+  return (
+    <span aria-hidden="true" className={`spark-bars${active ? ' is-active' : ''}`}>
+      {Array.from({ length: count }, (_, index) => {
+        const height = 3 + Math.abs(Math.sin(seed * 7.3 + index * 1.7) * Math.cos(seed + index * 0.61)) * 10;
+        return <i key={index} style={{ height }} />;
+      })}
+    </span>
+  );
+}

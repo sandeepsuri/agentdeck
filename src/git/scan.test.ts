@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Store } from '../store/index.js';
-import { checkoutExistingBranch, scanRepos } from './scan.js';
+import { checkoutBranch, checkoutExistingBranch, scanRepos } from './scan.js';
 
 const tempDirs: string[] = [];
 
@@ -75,5 +75,16 @@ describe('checkoutExistingBranch', () => {
     fs.writeFileSync(path.join(repoPath, 'README.md'), 'dirty\n');
     await expect(checkoutExistingBranch(repoPath, 'main')).rejects.toThrow(/dirty/i);
     expect(git(repoPath, 'symbolic-ref', '--short', 'HEAD')).toBe('ready');
+  });
+});
+
+describe('checkoutBranch', () => {
+  it('creates a missing branch only when explicitly requested', async () => {
+    const repoPath = path.join(tempDir(), 'repo');
+    initRepo(repoPath);
+
+    await expect(checkoutBranch(repoPath, 'feature/dashboard')).rejects.toThrow(/does not exist/i);
+    await checkoutBranch(repoPath, 'feature/dashboard', true);
+    expect(git(repoPath, 'symbolic-ref', '--short', 'HEAD')).toBe('feature/dashboard');
   });
 });

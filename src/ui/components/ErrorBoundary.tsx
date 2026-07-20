@@ -10,7 +10,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: 
   }
 
   override render(): ReactNode {
-    if (this.state.error) return <main style={{ background: '#090d12', color: '#f0f6fc', minHeight: '100vh', padding: 32, fontFamily: 'system-ui' }}><h1>AgentDeck encountered an error</h1><pre>{this.state.error.message}</pre><button onClick={() => location.reload()}>Reload</button></main>;
+    if (this.state.error) return <main style={{ background: 'var(--canvas)', color: 'var(--text-primary)', minHeight: '100vh', padding: 32, fontFamily: '"Instrument Sans", system-ui, sans-serif' }}><h1>AgentDeck encountered an error</h1><pre>{this.state.error.message}</pre><button onClick={() => location.reload()}>Reload</button></main>;
     return this.props.children;
   }
 }

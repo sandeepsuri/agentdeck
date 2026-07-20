@@ -59,6 +59,8 @@ export interface LaunchSpec {
   permissionMode?: 'default' | 'acceptEdits' | 'plan';
   name?: string;
   branch?: string;
+  /** Create the requested local branch when it does not already exist. */
+  createBranchIfMissing?: boolean;
   createWorktree?: boolean;
   env?: Record<string, string>;
   extraArgs?: string[];

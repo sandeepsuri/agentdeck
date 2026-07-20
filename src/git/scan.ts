@@ -83,3 +83,16 @@ export async function checkoutExistingBranch(cwd: string, branch: string): Promi
   }
   await git(cwd, ['checkout', branch]);
 }
+
+export async function checkoutBranch(cwd: string, branch: string, createIfMissing = false): Promise<void> {
+  const status = await git(cwd, ['status', '--porcelain']);
+  if (status) throw new Error('Cannot change branches: the working tree is dirty.');
+  let exists = true;
+  try {
+    await git(cwd, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+  } catch {
+    exists = false;
+  }
+  if (!exists && !createIfMissing) throw new Error(`Branch does not exist locally: ${branch}`);
+  await git(cwd, exists ? ['checkout', branch] : ['checkout', '-b', branch]);
+}

@@ -11,6 +11,12 @@ export interface DiffFileSummary {
   additions: number;
   deletions: number;
   binary?: boolean;
+  /** Status recorded in Git's index (the first porcelain status column). */
+  indexStatus?: 'M' | 'A' | 'D' | 'R';
+  /** Status still present in the worktree (the second porcelain status column). */
+  worktreeStatus?: 'M' | 'A' | 'D' | 'R' | '?';
+  staged?: boolean;
+  partiallyStaged?: boolean;
 }
 
 export interface DiffSummary {
@@ -84,6 +90,11 @@ export function porcelainStatusLetter(code: string): DiffFileSummary['status'] {
   return 'M';
 }
 
+function porcelainColumnStatus(value: string | undefined): Exclude<DiffFileSummary['status'], '?'> | undefined {
+  if (!value || value === ' ' || value === '?') return undefined;
+  return value === 'A' || value === 'D' || value === 'R' ? value : 'M';
+}
+
 export async function resolveBaseBranch(repoPath: string): Promise<string | undefined> {
   const candidates: string[] = [];
   try {
@@ -155,7 +166,7 @@ export async function diffSummary(repoPath: string, mode: DiffMode): Promise<Dif
   // status --porcelain output is position-sensitive; git() trims stdout and
   // would eat the leading space of the first " M file" line, so use the raw runner.
   const [{ stdout: porcelain }, stats] = await Promise.all([
-    gitDiffOutput(repoPath, ['status', '--porcelain']),
+    gitDiffOutput(repoPath, ['status', '--porcelain', '--untracked-files=all']),
     trackedNumstat(repoPath),
   ]);
   const files = await Promise.all(porcelain.split('\n').filter(Boolean).map(async (line) => {
@@ -164,34 +175,47 @@ export async function diffSummary(repoPath: string, mode: DiffMode): Promise<Dif
     const status = porcelainStatusLetter(code);
     if (status === '?') {
       const { additions, binary } = await untrackedNumstat(repoPath, filePath);
-      return { path: filePath, status, additions, deletions: 0, binary } satisfies DiffFileSummary;
+      return {
+        path: filePath, status, additions, deletions: 0, binary,
+        worktreeStatus: '?', staged: false, partiallyStaged: false,
+      } satisfies DiffFileSummary;
     }
     const stat = stats.get(filePath) ?? { additions: 0, deletions: 0, binary: false };
-    return { path: filePath, status, ...stat } satisfies DiffFileSummary;
+    const indexStatus = porcelainColumnStatus(code[0]);
+    const worktreeStatus = porcelainColumnStatus(code[1]);
+    const staged = indexStatus !== undefined;
+    return {
+      path: filePath, status, ...stat,
+      ...(indexStatus ? { indexStatus } : {}),
+      ...(worktreeStatus ? { worktreeStatus } : {}),
+      staged,
+      partiallyStaged: staged && worktreeStatus !== undefined,
+    } satisfies DiffFileSummary;
   }));
   const summary: DiffSummary = { mode, files: files.filter((file) => file.path !== '') };
   if (baseBranch) summary.baseBranch = baseBranch;
   return summary;
 }
 
-export async function diffFile(repoPath: string, filePath: string, mode: DiffMode): Promise<FileDiff> {
+export async function diffFile(repoPath: string, filePath: string, mode: DiffMode, ignoreWhitespace = false): Promise<FileDiff> {
   if (!resolveRepoFile(repoPath, filePath)) throw new Error('path is outside the repository');
+  const whitespaceArgs = ignoreWhitespace ? ['--ignore-all-space'] : [];
 
   let output: { stdout: string; truncated: boolean };
   if (mode === 'branch') {
     const baseBranch = await resolveBaseBranch(repoPath);
     if (!baseBranch) return { diff: '', truncated: false };
     const mergeBase = await git(repoPath, ['merge-base', baseBranch, 'HEAD']);
-    output = await gitDiffOutput(repoPath, ['diff', '--no-renames', mergeBase, 'HEAD', '--', filePath]);
+    output = await gitDiffOutput(repoPath, ['diff', '--no-renames', ...whitespaceArgs, mergeBase, 'HEAD', '--', filePath]);
   } else {
-    const { stdout: porcelain } = await gitDiffOutput(repoPath, ['status', '--porcelain', '--', filePath]);
+    const { stdout: porcelain } = await gitDiffOutput(repoPath, ['status', '--porcelain', '--untracked-files=all', '--', filePath]);
     if (porcelain.startsWith('??')) {
-      output = await gitDiffOutput(repoPath, ['diff', '--no-index', '--', '/dev/null', filePath]);
+      output = await gitDiffOutput(repoPath, ['diff', '--no-index', ...whitespaceArgs, '--', '/dev/null', filePath]);
     } else {
       try {
-        output = await gitDiffOutput(repoPath, ['diff', 'HEAD', '--no-renames', '--', filePath]);
+        output = await gitDiffOutput(repoPath, ['diff', 'HEAD', '--no-renames', ...whitespaceArgs, '--', filePath]);
       } catch {
-        output = await gitDiffOutput(repoPath, ['diff', '--no-renames', '--', filePath]);
+        output = await gitDiffOutput(repoPath, ['diff', '--no-renames', ...whitespaceArgs, '--', filePath]);
       }
     }
   }

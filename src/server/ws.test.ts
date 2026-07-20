@@ -197,6 +197,30 @@ describe('REST routes', () => {
     expect(list.map((s: { id: string }) => s.id)).toContain(created.id);
   });
 
+  it('exposes a managed terminal tail without attaching another websocket', async () => {
+    const created = await launchViaRest();
+    backend.emitOutput(created.pid, 'build finished\r\n');
+    const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${created.id}/terminal-tail`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ data: 'build finished\r\n' });
+  });
+
+  it('returns structured launcher preflight checks', async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/api/launch/preflight`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'claude', cwd: '/definitely/missing/agentdeck', branch: 'feature' }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { ready: boolean; checks: { label: string; ok: boolean }[] };
+    expect(body.ready).toBe(false);
+    expect(body.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Working directory found', ok: false }),
+      expect.objectContaining({ label: 'Repository available', ok: false }),
+      expect.objectContaining({ label: 'Branch available', ok: false }),
+    ]));
+  });
+
   it('never returns or broadcasts private launch data', async () => {
     const client = await connect();
     const response = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
