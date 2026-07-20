@@ -55,6 +55,8 @@ export interface LaunchSpec {
   agent: AgentType;
   cwd: string;
   initialPrompt?: string;
+  /** Starting interaction mode, mapped to agent-specific CLI behavior. */
+  permissionMode?: 'default' | 'acceptEdits' | 'plan';
   name?: string;
   branch?: string;
   createWorktree?: boolean;
