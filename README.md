@@ -54,6 +54,7 @@ All screenshot data is fictional.
 - Focus a mapped Terminal.app, iTerm2, or VS Code integrated terminal from the workspace.
 - Send prompts or follow-up messages to supported managed and external sessions.
 - Track whether an agent is starting, working, waiting for input, idle, completed, or gone.
+- Keep active agents, repositories, replies, and approval prompts visible around the MacBook notch when the browser is hidden.
 - Watch staged, unstaged, and untracked changes land live, or compare the current branch with its base branch.
 - Review unified or split diffs, stage or unstage files, discard changes, and open files in your editor.
 - Commit staged changes locally or publish the current branch as a draft or ready GitHub pull request.
@@ -78,6 +79,7 @@ All screenshot data is fictional.
 | Git publishing | Commits only staged changes, pushes the current branch to `origin`, and creates draft or ready GitHub pull requests through the authenticated GitHub CLI. |
 | Terminal focus | Maps TTYs to Terminal.app, iTerm2, and connected VS Code terminals and can bring the exact terminal to the foreground. |
 | Agent status | Combines hook events, managed terminal output, process liveness, and sustained CPU activity using `hook > output > CPU` precedence. |
+| Notch companion | Morphs from a quiet top-edge status surface into a repo-grouped agent dashboard, sends macOS notifications while the browser is hidden, and falls back to a menu-bar panel on displays without a notch. |
 | Hooks | Claude Code hooks report prompts, tool usage, edits, notifications, starts, and stops. Codex notify reports completed turns. |
 | Messaging | Sends directly to managed PTYs and scriptable terminal tabs; queued Claude messages can be delivered through hooks on the next turn. |
 | Coordination | Uses `.agents/bus.jsonl` for claims, progress, blockers, messages, task dependencies, and completion events. |
@@ -88,7 +90,7 @@ All screenshot data is fictional.
 
 ## Requirements
 
-- macOS
+- macOS 13 or newer
 - Node.js 20 or newer
 - Git
 - Claude Code and/or Codex CLI installed and authenticated
@@ -158,6 +160,10 @@ agentdeck --help
 Open [http://127.0.0.1:4040](http://127.0.0.1:4040).
 
 The header should show `● live`. AgentDeck immediately scans for repositories and already-running agents, then refreshes external discovery every five seconds by default. The interface follows the current macOS appearance; use the appearance control in the top bar to choose **System**, **Light**, or **Dark**.
+
+The native AgentDeck companion launches with the server. On a notched MacBook display it is flush with the top screen edge around the camera housing; otherwise it uses a menu-bar pill and detached panel. Hover to inspect active agents, click the compact face to pin it open, or use **Open Session** to jump to the exact terminal. The first reply or approval prompt may trigger a macOS notification-permission request.
+
+To run only the browser UI, set `AGENTDECK_NOTCH=0` before starting AgentDeck.
 
 ### 7. Allow terminal focus when requested
 
@@ -377,8 +383,8 @@ agentdeck post \
   --files src/components/Dashboard.tsx,src/styles/dashboard.css \
   -m "Starting dashboard work"
 
-# Report progress
-agentdeck post --event progress --task WEB-42 -m "Table and filters complete"
+# Report progress (the percentage is optional and is never inferred)
+agentdeck post --event progress --task WEB-42 --progress 65 -m "Table and filters complete"
 
 # Report a blocker
 agentdeck post --event blocked --task WEB-42 --blockers API-7 -m "Waiting for schema"
@@ -402,6 +408,14 @@ AgentDeck infers the repository root from the current working directory. Events 
 | `unknown` | The process is alive but AgentDeck does not have a strong status signal. |
 
 Hover over a status chip to see whether the winning signal came from a hook, output heuristic, CPU heuristic, or process exit.
+
+The notch companion turns hook events into three user-facing attention reasons:
+
+- **Agent replied** — a Claude or Codex turn completed.
+- **Action required** — an approval or permission prompt is waiting.
+- **Response required** — the agent explicitly requested user input.
+
+A newer working signal clears the prior attention item. Only attention, working, and starting sessions appear in the expanded companion; inactive history remains available in the browser dashboard. When an agent does not report `--progress`, the companion uses an indeterminate activity bar instead of inventing a percentage.
 
 ## Conflict Warnings
 
@@ -496,6 +510,7 @@ Validate changes:
 
 ```bash
 npm test
+npm run test:notch
 npm run typecheck
 npm run build
 npm pack
