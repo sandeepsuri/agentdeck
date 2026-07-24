@@ -21,12 +21,14 @@
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && npm run build:vscode",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && npm run build:vscode && npm run build:notch",
     "build:vscode": "node scripts/build-vscode-extension.mjs",
+    "build:notch": "node scripts/build-notch.mjs",
     "start": "node bin/agentdeck.mjs",
     "prepack": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "test:notch": "xcrun swift test --package-path native/AgentDeckNotch --scratch-path .native-build",
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {

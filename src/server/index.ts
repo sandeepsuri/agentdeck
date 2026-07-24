@@ -9,6 +9,9 @@ import { SessionManager } from '../sessions/manager.js';
 import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
 import { attachWs, closeWs } from './ws.js';
+import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
+import { publicSession } from './security.js';
+import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -40,6 +43,7 @@ export async function startServer(): Promise<RunningServer> {
   });
   const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery });
   let wss: WebSocketServer | undefined;
+  let companion: RunningCompanion | undefined;
   let closing = false;
   const close = async () => {
     if (closing) return;
@@ -47,6 +51,7 @@ export async function startServer(): Promise<RunningServer> {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
     discovery.stop(); coordination.stop();
+    companion?.close();
     await manager.shutdown();
     if (wss) await closeWs(wss);
     await app.close();
@@ -57,7 +62,17 @@ export async function startServer(): Promise<RunningServer> {
   process.once('SIGTERM', onSignal);
   try {
     const address = await app.listen({ port, host: '127.0.0.1' });
-    wss = attachWs(app.server, manager, '/ws', vscode);
+    wss = attachWs(app.server, manager, '/ws', vscode, () => {
+      const sessions = manager.listSessions().map(publicSession);
+      const events = store.listEvents({ limit: 1000 });
+      const attention = deriveAttentionItems(sessions, events);
+      return {
+        sessions,
+        attention,
+        agents: deriveCompanionAgents(sessions, events, attention),
+      };
+    });
+    companion = launchNativeCompanion(port);
     discovery.start();
     void coordination.syncRepos(store.listRepos());
     if (!store.getSetting<boolean>('firstRunShown')) {
