@@ -21,6 +21,7 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
       status: 'idle',
       message: text(payload['last-assistant-message']),
       turnId: text(payload['turn-id']),
+      attention: 'reply',
     };
   }
 
@@ -28,7 +29,13 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
   const agent = `claude:${text(payload.session_id) ?? 'unknown'}`;
   if (event === 'SessionStart') return { ts, agent, repo: cwd, event: 'session_start', status: 'idle' };
   if (event === 'Notification') {
-    return { ts, agent, repo: cwd, event: 'status', status: 'waiting_input', message: text(payload.message) };
+    return {
+      ts, agent, repo: cwd, event: 'status', status: 'waiting_input',
+      message: text(payload.message),
+      attention: text(payload.notification_type) === 'permission_prompt'
+        ? 'action_required'
+        : 'response_required',
+    };
   }
   if (event === 'PreToolUse') return { ts, agent, repo: cwd, event: 'status', status: 'working' };
   if (event === 'PostToolUse' && (payload.tool_name === 'Edit' || payload.tool_name === 'Write')) {
@@ -43,6 +50,7 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
       ts, agent, repo: cwd, event: 'done', status: 'idle',
       message: text(payload.last_assistant_message), summary: text(payload.last_assistant_message),
       turnId: text(payload.prompt_id),
+      attention: 'reply',
     };
   }
   return null;

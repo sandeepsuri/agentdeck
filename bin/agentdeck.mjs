@@ -41,7 +41,7 @@ try {
       console.log(`[agentdeck] ${command === 'install-hooks' ? 'installed' : 'removed'} Codex notify: ${config}`);
     }
   } else if (command === '--help' || command === 'help') {
-    console.log('agentdeck [serve]\nagentdeck post --event <event> [--task ID] [--files a,b] [-m text]\nagentdeck install-hooks [repo|--user]\nagentdeck uninstall-hooks [repo|--user]');
+    console.log('agentdeck [serve]\nagentdeck post --event <event> [--task ID] [--progress 0-100] [--files a,b] [-m text]\nagentdeck install-hooks [repo|--user]\nagentdeck uninstall-hooks [repo|--user]');
   } else {
     throw new Error(`Unknown command: ${command}`);
   }
