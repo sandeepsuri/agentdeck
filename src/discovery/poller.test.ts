@@ -1,12 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Store } from '../store/index.js';
 import type { Session } from '../types.js';
-import { DiscoveryPoller } from './poller.js';
+import { DiscoveryPoller, isSpawnEagain } from './poller.js';
 import type { TerminalRegistry } from './terminals/index.js';
 
 const PS_HOT = '100 1 ttys001 S+ 4.2 Thu Jul 16 17:39:00 2026 claude';
 
 describe('DiscoveryPoller', () => {
+  it('recognizes only retryable process-spawn exhaustion errors', () => {
+    expect(isSpawnEagain(Object.assign(new Error('spawn ps EAGAIN'), { code: 'EAGAIN' }))).toBe(true);
+    expect(isSpawnEagain(new Error('spawn ps EAGAIN'))).toBe(true);
+    expect(isSpawnEagain(Object.assign(new Error('spawn ps ENOENT'), { code: 'ENOENT' }))).toBe(false);
+    expect(isSpawnEagain(new Error('ps exited 1'))).toBe(false);
+  });
+
   it('requires sustained CPU before working, preserves labels, and removes disappeared sessions', async () => {
     const store = new Store(':memory:');
     const updates: Session[] = [];

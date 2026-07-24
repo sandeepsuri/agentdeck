@@ -7,6 +7,7 @@ import type { TerminalRegistry } from './terminals/index.js';
 import { reduceStatus } from '../sessions/status.js';
 
 const execFileAsync = promisify(execFile);
+const SPAWN_RETRY_DELAYS_MS = [75, 250, 750];
 
 export type CommandRunner = (file: string, args: string[]) => Promise<string>;
 
@@ -27,12 +28,31 @@ export interface DiscoveryPollerOptions {
   terminals?: TerminalRegistry;
 }
 
+export function isSpawnEagain(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  return candidate.code === 'EAGAIN'
+    || (typeof candidate.message === 'string' && /\bspawn\b.*\bEAGAIN\b/i.test(candidate.message));
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function runCommand(file: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(file, args, {
-    encoding: 'utf8', timeout: 10_000,
-    env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
-  });
-  return stdout;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const { stdout } = await execFileAsync(file, args, {
+        encoding: 'utf8', timeout: 10_000,
+        env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+      });
+      return stdout;
+    } catch (error) {
+      const delay = SPAWN_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isSpawnEagain(error)) throw error;
+      await wait(delay);
+    }
+  }
 }
 
 async function resolveGitDefault(cwd: string): Promise<GitResolution> {
