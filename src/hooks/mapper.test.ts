@@ -11,17 +11,19 @@ const codex = fs.readFileSync(path.resolve(import.meta.dirname, 'fixtures/codex-
 describe('mapHookPayload', () => {
   it('maps real Claude notification, edit/write, and stop payloads', () => {
     const mapped = claude.map((payload) => mapHookPayload(payload)).filter(Boolean);
-    expect(mapped.find((entry) => entry?.status === 'waiting_input')).toMatchObject({ agent: expect.stringMatching(/^claude:/), event: 'status' });
+    expect(mapped.find((entry) => entry?.status === 'waiting_input')).toMatchObject({
+      agent: expect.stringMatching(/^claude:/), event: 'status', attention: 'action_required',
+    });
     expect(mapped.find((entry) => entry?.event === 'claim')).toMatchObject({ files: [expect.not.stringMatching(/^\//)] });
     expect(mapped.find((entry) => entry?.event === 'done')).toMatchObject({
-      status: 'idle', turnId: expect.any(String),
+      status: 'idle', turnId: expect.any(String), attention: 'reply',
     });
   });
 
   it('maps the real kebab-case Codex notification', () => {
     expect(mapHookPayload(codex[0])).toMatchObject({
       agent: expect.stringMatching(/^codex:/), event: 'message', status: 'idle', message: 'DONE',
-      turnId: expect.any(String),
+      turnId: expect.any(String), attention: 'reply',
     });
   });
 });

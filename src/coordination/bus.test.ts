@@ -26,6 +26,9 @@ describe('coordination bus', () => {
     expect(parseBusLines(JSON.stringify({ ...message, event: 'execute' }))).toEqual([]);
     expect(parseBusLines(JSON.stringify({ ...message, blockers: 'not-an-array' }))).toEqual([]);
     expect(parseBusLines(JSON.stringify({ ...message, status: 'root' }))).toEqual([]);
+    expect(parseBusLines(JSON.stringify({ ...message, progress: 101 }))).toEqual([]);
+    expect(parseBusLines(JSON.stringify({ ...message, progress: -1 }))).toEqual([]);
+    expect(parseBusLines(JSON.stringify({ ...message, progress: 48 }))).toEqual([{ ...message, progress: 48 }]);
   });
 
   it('tails newly appended records in order without replaying them', async () => {

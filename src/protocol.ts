@@ -1,6 +1,6 @@
 // WS frame protocol. Shared between the server (src/server/ws.ts) and the
 // UI (src/ui/components/Terminal.tsx).
-import type { AgentMessage, Session } from './types.js';
+import type { AgentMessage, CompanionSnapshot, Session } from './types.js';
 
 const MAX_ID_LENGTH = 200;
 const MAX_INPUT_LENGTH = 64 * 1024;
@@ -20,7 +20,8 @@ export type ClientFrame =
   | { t: 'detach' }
   | { t: 'vscode_register'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_terminals'; windowId: string; terminals: VsCodeTerminalFrame[] }
-  | { t: 'vscode_result'; requestId: string; ok: boolean; error?: string };
+  | { t: 'vscode_result'; requestId: string; ok: boolean; error?: string }
+  | { t: 'ui_presence'; visible: boolean };
 
 export type ServerFrame =
   | { t: 'replay'; data: string }
@@ -28,6 +29,8 @@ export type ServerFrame =
   | { t: 'session_update'; session: Session }
   | { t: 'session_removed'; sessionId: string }
   | { t: 'agent_event'; event: AgentMessage }
+  | { t: 'companion_snapshot'; snapshot: CompanionSnapshot }
+  | { t: 'ui_presence'; visible: boolean }
   | { t: 'vscode_action'; requestId: string; terminalId: string; action: 'send' | 'focus'; text?: string };
 
 function parseVsCodeTerminals(value: unknown): VsCodeTerminalFrame[] | null {
@@ -85,6 +88,8 @@ export function parseClientFrame(raw: string): ClientFrame | null {
         && (f.error === undefined || (typeof f.error === 'string' && f.error.length <= MAX_ERROR_LENGTH))
         ? { t: 'vscode_result', requestId: f.requestId, ok: f.ok, ...(typeof f.error === 'string' ? { error: f.error } : {}) }
         : null;
+    case 'ui_presence':
+      return typeof f.visible === 'boolean' ? { t: 'ui_presence', visible: f.visible } : null;
     default:
       return null;
   }

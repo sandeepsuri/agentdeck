@@ -11,6 +11,8 @@ export type SessionStatus =
   | 'exited'
   | 'unknown';
 export type StatusSource = 'hook' | 'output_heuristic' | 'cpu_heuristic' | 'process_gone';
+export type AttentionKind = 'reply' | 'action_required' | 'response_required';
+export type CompanionAgentStatus = 'action' | 'waiting' | 'reply' | 'working' | 'starting' | 'offline';
 
 export interface DiscoveryStatus {
   running: boolean;
@@ -112,6 +114,44 @@ export interface AgentMessage {
   sourcePids?: number[]; // hook process ancestry (external sessions)
   tty?: string;
   turnId?: string; // stable Claude prompt / Codex turn id for deduplication
+  /** Explicit user-facing attention reason supplied by a hook when available. */
+  attention?: AttentionKind;
+  /** Explicit, agent-reported completion percentage. Never inferred. */
+  progress?: number;
+}
+
+export interface AttentionItem {
+  id: string;
+  kind: AttentionKind;
+  sessionId: string;
+  agent: AgentType;
+  sessionName: string;
+  repo: string;
+  repoName: string;
+  occurredAt: string;
+  message?: string;
+  branch?: string;
+}
+
+export interface CompanionSnapshot {
+  sessions: Session[];
+  attention: AttentionItem[];
+  agents: CompanionAgent[];
+  uiVisible: boolean;
+}
+
+export interface CompanionAgent {
+  id: string;
+  agent: AgentType;
+  name: string;
+  repo: string;
+  repoName: string;
+  task: string;
+  branch?: string;
+  progress?: number;
+  status: CompanionAgentStatus;
+  updatedAt: string;
+  attentionId?: string;
 }
 
 export interface FileClaim {

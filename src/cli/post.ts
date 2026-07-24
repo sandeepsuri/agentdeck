@@ -26,11 +26,19 @@ export function parsePostArgs(args: string[], repo: string): AgentMessage {
   const files = valueAfter(args, '--files');
   const blockers = valueAfter(args, '--blockers');
   const status = valueAfter(args, '--status') as AgentMessage['status'] | undefined;
+  const progressValue = valueAfter(args, '--progress');
   if (task) message.task = task;
   if (text) message.message = text;
   if (files) message.files = files.split(',').map((file) => file.trim()).filter(Boolean);
   if (blockers) message.blockers = blockers.split(',').map((item) => item.trim()).filter(Boolean);
   if (status) message.status = status;
+  if (progressValue !== undefined) {
+    const progress = Number(progressValue);
+    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
+      throw new Error('--progress must be a number from 0 to 100');
+    }
+    message.progress = progress;
+  }
   return message;
 }
 

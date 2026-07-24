@@ -77,6 +77,8 @@ function isAgentMessage(value: unknown): value is AgentMessage {
     && optionalString(entry, 'sessionId', 500)
     && optionalString(entry, 'tty', 500)
     && optionalString(entry, 'turnId', 500)
+    && (entry.progress === undefined || (typeof entry.progress === 'number'
+      && Number.isFinite(entry.progress) && entry.progress >= 0 && entry.progress <= 100))
     && optionalStrings(entry, 'files')
     && optionalStrings(entry, 'dependsOn')
     && optionalStrings(entry, 'blockers')

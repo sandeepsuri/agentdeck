@@ -18,6 +18,7 @@ import { AutomationDeniedError, type TerminalRegistry } from '../discovery/termi
 import type { AgentType, LaunchSpec } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
+import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
 import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
@@ -192,6 +193,17 @@ export interface RouteContext {
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
   app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
+  app.get('/api/companion', async () => {
+    const sessions = manager.listSessions().map(publicSession);
+    const events = ctx.store?.listEvents({ limit: 1000 }) ?? [];
+    const attention = deriveAttentionItems(sessions, events);
+    return {
+      sessions,
+      attention,
+      agents: deriveCompanionAgents(sessions, events, attention),
+      uiVisible: false,
+    };
+  });
 
   app.get('/api/discovery/status', async () => ctx.discovery?.status() ?? {
     running: false, polling: false, scannedProcesses: 0, managedPids: 0,

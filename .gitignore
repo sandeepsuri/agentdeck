@@ -1,5 +1,9 @@
 node_modules/
 dist/
+.native-build/
+.build/
+.swiftpm/
+DerivedData/
 *.log
 .DS_Store
 docs/AGENTS-SNIPPET.md

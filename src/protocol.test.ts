@@ -30,4 +30,10 @@ describe('VS Code protocol frames', () => {
       t: 'vscode_result', requestId: 'request-1', ok: false, error: 'x'.repeat(4097),
     }))).toBeNull();
   });
+
+  it('accepts only boolean UI presence values', () => {
+    expect(parseClientFrame(JSON.stringify({ t: 'ui_presence', visible: true })))
+      .toEqual({ t: 'ui_presence', visible: true });
+    expect(parseClientFrame(JSON.stringify({ t: 'ui_presence', visible: 'yes' }))).toBeNull();
+  });
 });

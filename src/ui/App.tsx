@@ -13,6 +13,7 @@ import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
+import { parseInitialNavigation } from './navigation.js';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
   { value: 'system', label: 'System', glyph: '◐' },
@@ -40,6 +41,7 @@ function ThemeControl() {
 }
 
 export function App() {
+  const initialNavigation = useMemo(() => parseInitialNavigation(location.search), []);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [events, setEvents] = useState<AgentMessage[]>([]);
@@ -47,7 +49,7 @@ export function App() {
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
-  const [view, setView] = useState<WorkspaceView>('operations');
+  const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'operations');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showLaunch, setShowLaunch] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -57,6 +59,7 @@ export function App() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
   const [now, setNow] = useState(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
+  const requestedSessionIdRef = useRef(initialNavigation.sessionId);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
@@ -72,7 +75,21 @@ export function App() {
 
   const refreshSessions = useCallback(() => fetch('/api/sessions').then((response) => response.json()).then((body: Session[]) => {
     setSessions(body);
-    setSelectedId((current) => current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null);
+    const requested = requestedSessionIdRef.current;
+    if (requested) {
+      requestedSessionIdRef.current = undefined;
+      history.replaceState(null, '', location.pathname);
+      if (body.some((session) => session.id === requested)) {
+        setSelectedId(requested);
+      } else {
+        setView('operations');
+        setSelectedId(body[0]?.id ?? null);
+      }
+      return;
+    }
+    setSelectedId((current) => {
+      return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
+    });
   }).catch(() => setError('AgentDeck API is unreachable.')), []);
   const refreshRepos = useCallback(() => fetch('/api/repos').then((response) => response.json()).then(setRepos).catch(() => undefined), []);
   const refreshEvents = useCallback(() => fetch('/api/events?limit=300').then((response) => response.json()).then(setEvents).catch(() => undefined), []);
@@ -96,7 +113,14 @@ export function App() {
       if (disposed) return;
       socket = new WebSocket(`ws://${location.host}/ws`);
       wsRef.current = socket;
-      socket.addEventListener('open', () => { setWsReady(true); refreshSessions(); });
+      socket.addEventListener('open', () => {
+        setWsReady(true);
+        socket?.send(JSON.stringify({
+          t: 'ui_presence',
+          visible: document.visibilityState === 'visible' && document.hasFocus(),
+        }));
+        refreshSessions();
+      });
       socket.addEventListener('message', (message) => {
         const frame = JSON.parse(String(message.data)) as ServerFrame;
         if (frame.t === 'session_update') upsertSession(frame.session);
@@ -111,8 +135,26 @@ export function App() {
       });
       socket.addEventListener('close', () => { setWsReady(false); if (!disposed) retry = setTimeout(connect, 1000); });
     };
+    const presenceChanged = () => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+          t: 'ui_presence',
+          visible: document.visibilityState === 'visible' && document.hasFocus(),
+        }));
+      }
+    };
+    document.addEventListener('visibilitychange', presenceChanged);
+    window.addEventListener('focus', presenceChanged);
+    window.addEventListener('blur', presenceChanged);
     connect();
-    return () => { disposed = true; clearTimeout(retry); socket?.close(); };
+    return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', presenceChanged);
+      window.removeEventListener('focus', presenceChanged);
+      window.removeEventListener('blur', presenceChanged);
+      clearTimeout(retry);
+      socket?.close();
+    };
   }, [refreshClaims, refreshConflicts, refreshSessions, upsertSession]);
 
   useEffect(() => {
