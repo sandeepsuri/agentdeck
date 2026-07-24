@@ -124,11 +124,15 @@ beforeEach(async () => {
     run: vi.fn(async () => ''),
   });
   app = buildApp({
-    config: defaultConfig(), manager, vscode,
+    config: defaultConfig(), manager, store, vscode,
     terminals: new TerminalRegistry([vscodeAdapter]), installVsCode, discovery,
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
-  wss = attachWs(app.server, manager, '/ws', vscode);
+  wss = attachWs(app.server, manager, '/ws', vscode, () => ({
+    sessions: manager.listSessions(),
+    attention: [],
+    agents: [],
+  }));
   const addr = app.server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
   port = addr.port;
@@ -195,6 +199,15 @@ describe('REST routes', () => {
     expect(backend.spawnedSpecs[0]?.env?.AGENTDECK_SESSION_ID).toBe(created.id);
     const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
     expect(list.map((s: { id: string }) => s.id)).toContain(created.id);
+  });
+
+  it('exposes and broadcasts the native companion snapshot', async () => {
+    const client = await connect();
+    const initial = await client.waitFor('companion_snapshot');
+    expect(initial.snapshot).toMatchObject({ sessions: [], attention: [], agents: [], uiVisible: false });
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/companion`);
+    expect(await response.json()).toMatchObject({ sessions: [], attention: [], agents: [], uiVisible: false });
   });
 
   it('exposes a managed terminal tail without attaching another websocket', async () => {
@@ -549,7 +562,22 @@ describe('WS protocol', () => {
     c.ws.send('not json at all');
     c.send({ t: 'resize', cols: -5, rows: 0 });
     await new Promise((r) => setTimeout(r, 100));
-    expect(c.frames).toHaveLength(0); // no replay, no crash
+    expect(c.frames.filter((frame) => frame.t === 'replay')).toHaveLength(0);
     expect(c.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('broadcasts aggregate browser visibility to companion clients', async () => {
+    const browser = await connect();
+    const companion = await connect();
+    browser.frames = [];
+    companion.frames = [];
+    browser.send({ t: 'ui_presence', visible: true });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(companion.frames.filter((frame) => frame.t === 'ui_presence').at(-1))
+      .toEqual({ t: 'ui_presence', visible: true });
+    browser.close();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(companion.frames.filter((frame) => frame.t === 'ui_presence').at(-1))
+      .toEqual({ t: 'ui_presence', visible: false });
   });
 });

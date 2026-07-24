@@ -4,6 +4,7 @@ import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
+import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
 import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { publicSession } from './security.js';
@@ -15,6 +16,7 @@ export function attachWs(
   manager: SessionManager,
   path = '/ws',
   vscode?: VsCodeBridge,
+  companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
 ): WebSocketServer {
   // WebSocket upgrades bypass CORS: without this check any web page could
   // attach to a session, read its output, and inject keystrokes.
@@ -29,9 +31,25 @@ export function attachWs(
 
   // socket → sessionId it's viewing
   const viewing = new Map<WebSocket, string>();
+  const uiPresence = new Map<WebSocket, boolean>();
 
   const send = (ws: WebSocket, frame: ServerFrame) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  };
+  const isUiVisible = () => [...uiPresence.values()].some(Boolean);
+  const broadcastPresence = () => {
+    const visible = isUiVisible();
+    for (const ws of wss.clients) send(ws, { t: 'ui_presence', visible });
+  };
+  const broadcastCompanionSnapshot = () => {
+    if (!companionSnapshot) return;
+    const provided = companionSnapshot();
+    const snapshot = {
+      ...provided,
+      sessions: provided.sessions.map(publicSession),
+      uiVisible: isUiVisible(),
+    };
+    for (const ws of wss.clients) send(ws, { t: 'companion_snapshot', snapshot });
   };
 
   manager.on('output', (sessionId, data) => {
@@ -43,6 +61,7 @@ export function attachWs(
   // session_update goes to every socket — the session list is global state.
   manager.on('session_update', (session) => {
     for (const ws of wss.clients) send(ws, { t: 'session_update', session: publicSession(session) });
+    broadcastCompanionSnapshot();
   });
 
   manager.on('session_removed', (sessionId) => {
@@ -50,13 +69,27 @@ export function attachWs(
       if (sid === sessionId) viewing.delete(ws);
     }
     for (const ws of wss.clients) send(ws, { t: 'session_removed', sessionId });
+    broadcastCompanionSnapshot();
   });
 
   manager.on('agent_event', (event) => {
     for (const ws of wss.clients) send(ws, { t: 'agent_event', event });
+    broadcastCompanionSnapshot();
   });
 
   wss.on('connection', (ws) => {
+    if (companionSnapshot) {
+      const provided = companionSnapshot();
+      send(ws, { t: 'ui_presence', visible: isUiVisible() });
+      send(ws, {
+        t: 'companion_snapshot',
+        snapshot: {
+          ...provided,
+          sessions: provided.sessions.map(publicSession),
+          uiVisible: isUiVisible(),
+        },
+      });
+    }
     ws.on('message', (raw) => {
       const frame = parseClientFrame(String(raw));
       if (!frame) return;
@@ -91,10 +124,19 @@ export function attachWs(
         case 'vscode_result':
           vscode?.result(ws, frame.requestId, frame.ok, frame.error);
           break;
+        case 'ui_presence':
+          uiPresence.set(ws, frame.visible);
+          broadcastPresence();
+          broadcastCompanionSnapshot();
+          break;
       }
     });
     ws.on('close', () => {
       viewing.delete(ws);
+      if (uiPresence.delete(ws)) {
+        broadcastPresence();
+        broadcastCompanionSnapshot();
+      }
       vscode?.disconnect(ws);
     });
   });
