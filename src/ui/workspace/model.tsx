@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { Session, SessionStatus } from '../../types.js';
 
 export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals';
@@ -46,6 +47,27 @@ export function elapsedTime(startedAt: string, now = Date.now()): string {
   return hours > 0
     ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`
     : `${String(minutes).padStart(2, '0')}:${String(remaining).padStart(2, '0')}`;
+}
+
+/**
+ * Ticks once per `intervalMs` and returns the current timestamp, causing only
+ * the calling component to re-render. Use this instead of threading a `now`
+ * prop down from a shared ancestor — that would re-render the whole subtree
+ * every tick just to keep one clock or elapsed-time display current.
+ */
+export function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+/** Leaf component that renders a session's elapsed time and ticks itself. */
+export function ElapsedTime({ startedAt }: { startedAt: string }) {
+  const now = useNow(1000);
+  return <>{elapsedTime(startedAt, now)}</>;
 }
 
 export function StatusLamp({ status, pulse = false }: { status: SessionStatus; pulse?: boolean }) {

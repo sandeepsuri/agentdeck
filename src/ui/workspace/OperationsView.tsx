@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AgentMessage, Conflict, Repo, Session } from '../../types.js';
-import { SparkBars, StatusBadge, StatusLamp, elapsedTime, relativeTime, repoPathOf, sessionLabel } from './model.js';
+import { ElapsedTime, SparkBars, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
 interface DiffFileSummary {
   path: string;
@@ -88,7 +88,7 @@ function ExpandedOperation({ session, events, onOpenTerminal }: {
         </div>
         <div className="operation-gauges">
           <Metric label="Activity" value={relativeTime(session.lastActivityAt)} seed={4} />
-          <Metric label="Elapsed" value={elapsedTime(session.startedAt)} seed={6} />
+          <Metric label="Elapsed" value={<ElapsedTime startedAt={session.startedAt} />} seed={6} />
           <Metric label="Files" value={`+${additions} −${deletions}`} seed={8} />
         </div>
       </div>
@@ -103,7 +103,7 @@ function ExpandedOperation({ session, events, onOpenTerminal }: {
   );
 }
 
-function Metric({ label, value, seed }: { label: string; value: string; seed: number }) {
+function Metric({ label, value, seed }: { label: string; value: ReactNode; seed: number }) {
   return (
     <div className="metric">
       <span><small>{label}</small><b>{value}</b></span>
@@ -149,7 +149,7 @@ export function OperationsView({ sessions, repos, selected, events, conflicts, o
                 <StatusLamp pulse={session.status === 'working'} status={session.status} />
                 <strong>{sessionLabel(session)}</strong>
                 <span>{session.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} · PID {session.pid ?? '—'} · {session.tty ?? 'external'}</span>
-                <small>{elapsedTime(session.startedAt)}</small>
+                <small><ElapsedTime startedAt={session.startedAt} /></small>
                 <StatusBadge status={session.status} />
               </button>
             ))}
