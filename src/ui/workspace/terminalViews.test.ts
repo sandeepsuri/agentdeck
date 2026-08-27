@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '../../types.js';
-import { nextMountedTerminalIds, sameIds } from './terminalViews.js';
+import { nextMountedTerminalIds, sameIds, terminalViewKeys } from './terminalViews.js';
 
 const base = {
   cwd: '/repos/alpha',
@@ -70,5 +70,30 @@ describe('sameIds', () => {
 
   it('treats different order as different', () => {
     expect(sameIds(['a', 'b'], ['b', 'a'])).toBe(false);
+  });
+});
+
+describe('terminalViewKeys', () => {
+  it('derives a key per mounted id from its session startedAt', () => {
+    const sessions = [managed('a')];
+    expect(terminalViewKeys(['a'], sessions)).toEqual({ a: `a-${base.startedAt}` });
+  });
+
+  it('changes the key when a mounted session restarts (same id, new startedAt)', () => {
+    const restarted: Session = { ...managed('a'), startedAt: '2026-07-17T13:00:00.000Z' };
+    expect(terminalViewKeys(['a'], [restarted])).toEqual({ a: 'a-2026-07-17T13:00:00.000Z' });
+  });
+
+  it('keeps other mounted sessions keys unchanged when one restarts', () => {
+    const restartedA: Session = { ...managed('a'), startedAt: '2026-07-17T13:00:00.000Z' };
+    const sessions = [restartedA, managed('b')];
+    expect(terminalViewKeys(['a', 'b'], sessions)).toEqual({
+      a: 'a-2026-07-17T13:00:00.000Z',
+      b: `b-${base.startedAt}`,
+    });
+  });
+
+  it('falls back to the bare id when the session is not present', () => {
+    expect(terminalViewKeys(['a'], [])).toEqual({ a: 'a' });
   });
 });

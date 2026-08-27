@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
 import { Terminal } from '../components/Terminal.js';
 import { ElapsedTime, sessionLabel } from './model.js';
-import { nextMountedTerminalIds, sameIds } from './terminalViews.js';
+import { nextMountedTerminalIds, sameIds, terminalViewKeys } from './terminalViews.js';
 
 interface Props {
   session: Session | null;
@@ -38,6 +38,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
       return sameIds(current, next) ? current : next;
     });
   }, [sessions, selectableId]);
+  const terminalKeys = terminalViewKeys(mountedIds, sessions);
 
   const send = async (value = text) => {
     if (!session || !value.trim() || sending) return;
@@ -69,7 +70,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
           <div className="terminal-view-stack">
             {mountedIds.map((id) => (
               <div className={id === session.id ? 'terminal-view is-active' : 'terminal-view'} key={id}>
-                {ws && <Terminal sessionId={id} ws={ws} />}
+                {ws && <Terminal key={terminalKeys[id]} sessionId={id} ws={ws} />}
               </div>
             ))}
           </div>

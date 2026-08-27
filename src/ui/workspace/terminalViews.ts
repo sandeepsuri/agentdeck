@@ -41,3 +41,31 @@ export function nextMountedTerminalIds(
 export function sameIds(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
 }
+
+/**
+ * Derives a React `key` per mounted session id, combining `id` with the
+ * session's `startedAt`. `SessionManager.restart` keeps a session's `id` but
+ * assigns a fresh `startedAt` and a brand-new (empty) transcript, so the old
+ * mounted `<Terminal>` for that id is showing stale pre-restart scrollback
+ * and needs a clean unmount+remount to re-attach and replay the new
+ * transcript — it must NOT just keep receiving appended output. Keying the
+ * `<Terminal>` itself (not its wrapping `.terminal-view` slot, which must
+ * stay put so the CSS visibility toggle keeps working) on this value forces
+ * exactly that remount when `startedAt` changes, while leaving every other
+ * mounted session's view untouched.
+ *
+ * Falls back to the bare id if the session is momentarily missing from
+ * `sessions` (e.g. the render right before pruning catches up).
+ */
+export function terminalViewKeys(
+  ids: readonly string[],
+  sessions: readonly Session[],
+): Record<string, string> {
+  const startedAtById = new Map(sessions.map((session) => [session.id, session.startedAt]));
+  const keys: Record<string, string> = {};
+  for (const id of ids) {
+    const startedAt = startedAtById.get(id);
+    keys[id] = startedAt ? `${id}-${startedAt}` : id;
+  }
+  return keys;
+}
