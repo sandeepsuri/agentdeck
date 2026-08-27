@@ -1,6 +1,7 @@
 // PtyBackend: managed sessions as node-pty children. Dies with the app.
 import * as pty from 'node-pty';
 import type { LaunchSpec } from '../types.js';
+import { TERMINAL_COLS, TERMINAL_ROWS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
 import { resolveAgentExecutable } from './executable.js';
 
@@ -16,20 +17,14 @@ export function defaultCommandFor(spec: LaunchSpec): CommandSpec {
 
 export interface PtyBackendOptions {
   commandFor?: (spec: LaunchSpec) => CommandSpec;
-  cols?: number;
-  rows?: number;
 }
 
 export class PtyBackend implements SessionBackend {
   private procs = new Map<string, pty.IPty>();
   private commandFor: (spec: LaunchSpec) => CommandSpec;
-  private cols: number;
-  private rows: number;
 
   constructor(opts: PtyBackendOptions = {}) {
     this.commandFor = opts.commandFor ?? defaultCommandFor;
-    this.cols = opts.cols ?? 100;
-    this.rows = opts.rows ?? 30;
   }
 
   async spawn(spec: LaunchSpec): Promise<Handle> {
@@ -44,8 +39,8 @@ export class PtyBackend implements SessionBackend {
 
     const proc = pty.spawn(file, args, {
       name: 'xterm-256color',
-      cols: this.cols,
-      rows: this.rows,
+      cols: TERMINAL_COLS,
+      rows: TERMINAL_ROWS,
       cwd: spec.cwd,
       env,
     });
