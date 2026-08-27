@@ -120,13 +120,6 @@ export function attachWs(
           if (sid !== undefined && manager.isLive(sid)) manager.write(sid, frame.data);
           break;
         }
-        case 'resize': {
-          const sid = viewing.get(ws);
-          if (sid !== undefined && manager.isLive(sid)) {
-            manager.resize(sid, frame.cols, frame.rows);
-          }
-          break;
-        }
         case 'vscode_register':
           vscode?.register(ws, frame.windowId, frame.terminals);
           break;
