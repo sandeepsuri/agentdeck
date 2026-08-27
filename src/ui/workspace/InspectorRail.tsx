@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentMessage, Conflict, Session } from '../../types.js';
+import type { Model } from '../../sessions/model-catalog.js';
 import { ElapsedTime, SparkBars, StatusBadge, isEndedSession, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
 
 interface Props {
@@ -51,18 +52,38 @@ function MessageSelected({ session, onError }: { session: Session; onError: (mes
  * flight — that in-flight state is the "progress shown" acceptance
  * criterion; no streaming/websocket progress is needed for a one-shot
  * REST call.
+ *
+ * Ticket 12 extends this same component with a per-summary model
+ * override: a select fed by GET /api/models (the runtime-fetched,
+ * allowlist-filtered, cached catalog), defaulting to "Use default" — i.e.
+ * no `model` in the POST body, which lets SessionManager.summarize() fall
+ * back to the stored default (Settings) the way it already does when
+ * nothing overrides it. Picking a specific model here affects only this
+ * one wrap-up; it is never written back to the stored default.
  */
 function WrapUp({ session, onError }: { session: Session; onError: (message: string) => void }) {
   const [summary, setSummary] = useState<string | undefined>(undefined);
   const [loaded, setLoaded] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [failure, setFailure] = useState<string | undefined>(undefined);
+  const [models, setModels] = useState<Model[]>([]);
+  const [overrideModel, setOverrideModel] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/models')
+      .then((response) => response.json() as Promise<Model[]>)
+      .then((body) => { if (!cancelled) setModels(body); })
+      .catch(() => { /* the picker just won't offer an override; the default-model wrap-up still works */ });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
     setSummary(undefined);
     setFailure(undefined);
+    setOverrideModel('');
     fetch(`/api/sessions/${encodeURIComponent(session.id)}/summary`)
       .then(async (response) => {
         if (cancelled) return;
@@ -83,7 +104,8 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
     setFailure(undefined);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/summarize`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(overrideModel ? { model: overrideModel } : {}),
       });
       const body = await response.json() as { summary?: string; error?: string };
       if (!response.ok) {
@@ -103,6 +125,19 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
 
   return (
     <div className="rail-summary">
+      {models.length > 0 && (
+        <label className="rail-model-override">
+          <span>Model</span>
+          <select disabled={generating} onChange={(event) => setOverrideModel(event.target.value)} value={overrideModel}>
+            <option value="">Use default</option>
+            {models.map((model) => (
+              <option disabled={!model.available} key={model.id} title={model.unavailableReason} value={model.id}>
+                {model.displayName}{model.available ? '' : ' — unavailable'}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <button className="rail-action" disabled={generating} onClick={() => void wrapUp()} type="button">
         {generating ? 'Summarizing…' : summary ? 'Regenerate summary' : 'Wrap up'}
         <span>{generating ? '⟳' : '✎'}</span>

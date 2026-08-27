@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
-import { expandTilde } from '../config.js';
+import { expandTilde, saveConfig as saveConfigFile } from '../config.js';
+import { DEFAULT_MODEL_SETTING_KEY, type ModelCatalog } from '../sessions/model-catalog.js';
 import { checkoutBranch, scanRepos, git } from '../git/scan.js';
 import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
 import {
@@ -41,6 +42,8 @@ const MAX_EXTRA_ARG_LENGTH = 16 * 1024;
 const MAX_ENV_VARS = 100;
 const MAX_ENV_VALUE_LENGTH = 64 * 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_MODEL_ID_LENGTH = 200;
+const MAX_API_KEY_LENGTH = 4096;
 const execFileAsync = promisify(execFile);
 
 async function readBusTail(repoPath: string) {
@@ -188,6 +191,10 @@ export interface RouteContext {
   discovery?: DiscoveryPoller;
   installVsCode?: () => Promise<VsCodeInstallResult>;
   publish?: GitPublishService;
+  /** Ticket 12: the runtime-fetched, allowlist-filtered, cached model catalog. Undefined only in tests that don't exercise it — GET /api/models degrades to an empty list rather than erroring. */
+  modelCatalog?: ModelCatalog;
+  /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
+  saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -202,6 +209,58 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       attention,
       agents: deriveCompanionAgents(sessions, events, attention),
       uiVisible: false,
+    };
+  });
+
+  // Ticket 12: the summary model picker's data source. ModelCatalog itself
+  // owns the runtime fetch, allowlist filter, and cache; this route is a
+  // thin pass-through so a new provider never needs a route change.
+  app.get('/api/models', async () => ctx.modelCatalog ? ctx.modelCatalog.list() : []);
+
+  // Ticket 12 settings: the default summary model (store.setSetting, a
+  // plain app setting) and the OpenAI API key (config.json at 0600, never
+  // SQLite). GET never echoes the key — only whether one is configured.
+  app.get('/api/settings', async () => ({
+    defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
+    openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
+  }));
+
+  app.patch('/api/settings', async (req, reply) => {
+    if (typeof req.body !== 'object' || req.body === null) {
+      return reply.code(400).send({ error: 'body must be a JSON object' });
+    }
+    const { defaultModel, openaiApiKey } = req.body as { defaultModel?: unknown; openaiApiKey?: unknown };
+    if (defaultModel !== undefined) {
+      if (typeof defaultModel !== 'string' || defaultModel.length === 0 || defaultModel.length > MAX_MODEL_ID_LENGTH) {
+        return reply.code(400).send({ error: 'defaultModel must be a non-empty string' });
+      }
+      ctx.store?.setSetting(DEFAULT_MODEL_SETTING_KEY, defaultModel);
+    }
+    if (openaiApiKey !== undefined) {
+      if (openaiApiKey !== null && typeof openaiApiKey !== 'string') {
+        return reply.code(400).send({ error: 'openaiApiKey must be a string or null' });
+      }
+      if (typeof openaiApiKey === 'string' && openaiApiKey.length > MAX_API_KEY_LENGTH) {
+        return reply.code(400).send({ error: 'openaiApiKey is too long' });
+      }
+      // Empty string or null clears the key. Never logged, never included
+      // in this or any other response body — only the presence boolean is.
+      const trimmed = typeof openaiApiKey === 'string' ? openaiApiKey.trim() : '';
+      const value = trimmed.length > 0 ? trimmed : undefined;
+      ctx.config.openaiApiKey = value;
+      try {
+        (ctx.saveConfig ?? saveConfigFile)({ openaiApiKey: value });
+      } catch (error) {
+        return reply.code(400).send({ error: `Failed to save settings: ${error instanceof Error ? error.message : String(error)}` });
+      }
+      // A newly-configured (or cleared) key changes what OpenAI's model
+      // source can report — don't make the picker wait out the cache TTL.
+      ctx.modelCatalog?.invalidate();
+    }
+    return {
+      ok: true,
+      defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
+      openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
     };
   });
 

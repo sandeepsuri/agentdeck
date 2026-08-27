@@ -337,6 +337,73 @@ describe('SessionManager summarize (ticket 11)', () => {
     expect(store.getSession(s.id)?.summaryGeneratedAt).toBe(stampAfterFirst);
     expect(fs.readFileSync(path.join(sessionsDir, s.id, 'scrollback.txt'), 'utf8')).toBe(scrollbackBefore);
   });
+
+  // Ticket 12: a stored default model (store.setSetting, never the API
+  // key) is what "changing the default affects later wrap-ups" wires up.
+  // An explicit per-call opts.model always wins and is never persisted --
+  // that's the "per-summary override affects only that run" half.
+  describe('default model (ticket 12)', () => {
+    it('passes no model at all when no override and no stored default exist (ticket 11 behavior preserved)', async () => {
+      const summarizer = fakeSummarizer();
+      const { manager, store } = makeManager({ summarizer });
+      const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+      await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+      expect(store.getSetting('defaultSummaryModel')).toBeUndefined();
+
+      await manager.summarize(s.id);
+
+      expect(summarizer.summarize).toHaveBeenCalledWith(expect.stringContaining('x'), {});
+    });
+
+    it('falls back to the stored default model when no per-call override is given', async () => {
+      const summarizer = fakeSummarizer();
+      const { manager, store } = makeManager({ summarizer });
+      store.setSetting('defaultSummaryModel', 'openai:gpt-4o-mini');
+      const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+      await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+      await manager.summarize(s.id);
+
+      expect(summarizer.summarize).toHaveBeenCalledWith(expect.stringContaining('x'), { model: 'openai:gpt-4o-mini' });
+    });
+
+    it('a per-call override wins over the stored default', async () => {
+      const summarizer = fakeSummarizer();
+      const { manager, store } = makeManager({ summarizer });
+      store.setSetting('defaultSummaryModel', 'openai:gpt-4o-mini');
+      const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+      await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+      await manager.summarize(s.id, { model: 'claude-cli:sonnet' });
+
+      expect(summarizer.summarize).toHaveBeenCalledWith(expect.stringContaining('x'), { model: 'claude-cli:sonnet' });
+    });
+
+    it('an override is never written back to the stored default', async () => {
+      const summarizer = fakeSummarizer();
+      const { manager, store } = makeManager({ summarizer });
+      const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+      await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+      await manager.summarize(s.id, { model: 'claude-cli:sonnet' });
+
+      expect(store.getSetting('defaultSummaryModel')).toBeUndefined();
+    });
+
+    it('changing the stored default affects a later wrap-up without any per-call change', async () => {
+      const summarizer = fakeSummarizer();
+      const { manager, store } = makeManager({ summarizer });
+      const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+      await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+      await manager.summarize(s.id); // before any default is set
+      expect(summarizer.summarize).toHaveBeenLastCalledWith(expect.stringContaining('x'), {});
+
+      store.setSetting('defaultSummaryModel', 'claude-cli:sonnet');
+      await manager.summarize(s.id); // regenerate, no override
+      expect(summarizer.summarize).toHaveBeenLastCalledWith(expect.stringContaining('x'), { model: 'claude-cli:sonnet' });
+    });
+  });
 });
 
 describe('RingBuffer', () => {

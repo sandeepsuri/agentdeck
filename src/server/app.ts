@@ -8,6 +8,7 @@ import type { TerminalRegistry } from '../discovery/terminals/index.js';
 import type { CoordinationService } from '../coordination/service.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
+import type { ModelCatalog } from '../sessions/model-catalog.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 
 const CONTENT_SECURITY_POLICY = [
@@ -71,6 +72,7 @@ export interface AppContext {
   discovery?: DiscoveryPoller;
   installVsCode?: RouteContext['installVsCode'];
   publish?: RouteContext['publish'];
+  modelCatalog?: ModelCatalog;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -109,6 +111,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     discovery: ctx.discovery,
     installVsCode: ctx.installVsCode,
     publish: ctx.publish,
+    modelCatalog: ctx.modelCatalog,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
