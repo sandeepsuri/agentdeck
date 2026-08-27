@@ -1,11 +1,13 @@
-// SessionManager (T3): owns managed sessions — lifecycle, ring buffers,
-// initial-prompt injection, persistence, typed events.
+// SessionManager (T3): owns managed sessions — lifecycle, status derivation,
+// initial-prompt injection, persistence, typed events. Output bytes
+// themselves live in SessionTranscript (transcript.ts); this module holds
+// one per live session and asks it to append/snapshot, but doesn't buffer.
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import type { Store } from '../store/index.js';
 import type { AgentMessage, AgentType, LaunchSpec, Session, SessionStatus } from '../types.js';
 import type { Handle, SessionBackend } from './backend.js';
-import { RingBuffer } from './ringbuffer.js';
+import { SessionTranscript, type Unsubscribe } from './transcript.js';
 import { inferOutputStatus, reduceStatus, type StatusSignal } from './status.js';
 
 // Observed CLI behavior: readiness = the CLI's composer/prompt line
@@ -17,8 +19,14 @@ const READINESS: Record<AgentType, RegExp> = {
 };
 const TRUST_DIALOG = /trust this folder|Trusting the directory/i;
 
+// lastActivityAt is allowed to lag (nothing user-visible depends on finer
+// freshness); flushing it to sqlite at 4 Hz instead of once per PTY chunk is
+// most of the win from extracting SessionTranscript. Status changes are
+// still persisted immediately, from the same call site.
+const ACTIVITY_FLUSH_MS = 250;
+
 export interface SessionManagerOptions {
-  /** ring buffer capacity per session (bytes-ish; string length) */
+  /** SessionTranscript capacity per session (bytes-ish; string length) */
   bufferSize?: number;
   /** override readiness detection (tests use bash prompts) */
   readiness?: Partial<Record<AgentType, RegExp>>;
@@ -37,11 +45,14 @@ export interface SessionManagerEvents {
 
 interface Live {
   handle: Handle;
-  buffer: RingBuffer;
+  transcript: SessionTranscript;
+  unsubscribeOutput: Unsubscribe;
   promptTimer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
   promptPending?: string;
   exited: boolean;
+  /** epoch ms of the last lastActivityAt persist; throttles handleData's flush. */
+  lastActivityFlush: number;
 }
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
@@ -106,7 +117,18 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       env: { ...(spec.env ?? {}), AGENTDECK_SESSION_ID: session.id },
     });
     session.pid = handle.pid;
-    const live: Live = { handle, buffer: new RingBuffer(this.opts.bufferSize), exited: false };
+    const transcript = new SessionTranscript({ capacity: this.opts.bufferSize });
+    // Relay coalesced batches as the same 'output' event consumers already
+    // know, so ws.ts's per-viewer routing doesn't need to change: the
+    // coalescing now happens once here instead of once per raw PTY chunk.
+    const unsubscribeOutput = transcript.subscribe((data) => this.emit('output', session.id, data));
+    const live: Live = {
+      handle,
+      transcript,
+      unsubscribeOutput,
+      exited: false,
+      lastActivityFlush: Date.now(),
+    };
     this.live.set(session.id, live);
     this.persist(session);
 
@@ -123,10 +145,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const live = this.live.get(sessionId);
     const session = this.store.getSession(sessionId);
     if (!live || !session) return;
-    live.buffer.push(data);
+    // Output bytes go straight to the transcript; it owns buffering and
+    // batches the fan-out to viewers on its own timer. What's left here is
+    // status inference plus a throttled activity-time flush — no more
+    // synchronous persist() on every PTY chunk.
+    live.transcript.append(data);
     session.lastActivityAt = new Date().toISOString();
     const now = Date.now();
     const wasStarting = session.status === 'starting';
+    const originalStatus = session.status;
+    const originalStatusSource = session.statusSource;
 
     // `waiting_input` here means a trust dialog was detected below: keep
     // watching for readiness so the held prompt still fires once the user
@@ -153,8 +181,18 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       session.status = result.status;
       session.statusSource = result.statusSource;
     }
-    this.persist(session);
-    this.emit('output', sessionId, data);
+
+    // Status transitions are meaningful state changes, not per-chunk noise:
+    // persist immediately, same as before extraction. Otherwise, the write
+    // carries only a fresher lastActivityAt, which can lag — throttle it.
+    const statusChanged = session.status !== originalStatus || session.statusSource !== originalStatusSource;
+    if (statusChanged) {
+      this.persist(session);
+      live.lastActivityFlush = now;
+    } else if (now - live.lastActivityFlush >= ACTIVITY_FLUSH_MS) {
+      live.lastActivityFlush = now;
+      this.persist(session);
+    }
   }
 
   private flushPrompt(sessionId: string): void {
@@ -176,6 +214,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       live.exited = true;
       if (live.promptTimer) clearTimeout(live.promptTimer);
       if (live.killTimer) clearTimeout(live.killTimer);
+      live.unsubscribeOutput();
+      live.transcript.close();
       this.live.delete(sessionId);
     }
     // An exited session has nothing left to show or act on — drop the row
@@ -243,9 +283,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return this.store.getSession(sessionId) ?? session;
   }
 
-  /** Ring-buffer contents for replay-on-attach. */
+  /** Transcript contents for replay-on-attach. */
   getBuffer(sessionId: string): string {
-    return this.live.get(sessionId)?.buffer.snapshot() ?? '';
+    return this.live.get(sessionId)?.transcript.snapshot() ?? '';
   }
 
   getSession(sessionId: string): Session | undefined {
