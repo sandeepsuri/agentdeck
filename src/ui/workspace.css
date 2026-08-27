@@ -90,6 +90,13 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .session-row { position: relative; width: 100%; display: flex; min-height: 66px; margin-bottom: 2px; border: 1px solid transparent; border-radius: 7px; padding: 0; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
 .session-row:hover { background: var(--surface-hover); }
 .session-row.is-selected { border-color: var(--border-strong); background: var(--surface-selected); }
+/* Ticket 04: an ended session stays listed but must read as visually
+   distinct from a live one — dim the row and its title, and drop the
+   activity graph in favor of an explicit "Ended <time>" marker. */
+.session-row.is-ended { opacity: .58; }
+.session-row.is-ended:hover { opacity: .85; }
+.session-row.is-ended .session-row-title > span:first-child { color: var(--text-muted); font-weight: 500; }
+.session-row-ended { display: block; margin-top: 3px; color: var(--text-muted); font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
 .session-selection-rail { width: 3px; flex: none; margin: 6px 8px 6px 2px; border-radius: 2px; background: transparent; }
 .is-selected .session-selection-rail.status-working { background: var(--status-working); }
 .is-selected .session-selection-rail.status-waiting_input { background: var(--status-waiting); }

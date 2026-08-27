@@ -533,8 +533,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.post('/api/sessions/:id/stop', async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!manager.getSession(id)) return reply.code(404).send({ error: 'no such session' });
+    // Stopping only makes sense for a live process; an already-ended
+    // session has nothing left to stop (ticket 04: live-only actions are
+    // unavailable once ended).
+    if (!manager.isLive(id)) return reply.code(400).send({ error: 'session has already ended' });
     await manager.stop(id);
-    return { ok: true }; // the session row is removed on exit
+    return { ok: true }; // the row is kept, marked ended
   });
 
   app.post('/api/sessions/:id/restart', async (req, reply) => {

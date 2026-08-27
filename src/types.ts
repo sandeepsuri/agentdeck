@@ -41,6 +41,13 @@ export interface Session {
   lastActivityAt: string;
   status: SessionStatus;
   statusSource: StatusSource;
+  /**
+   * ISO-8601 timestamp set once, when a managed session's process exits
+   * (status becomes 'exited'). The row is kept rather than deleted so an
+   * ended session survives a server restart; this is the "time it ended"
+   * shown alongside it. Never set for a session that is still live.
+   */
+  endedAt?: string;
   // managed only
   backend?: 'pty' | 'tmux';
   tmuxTarget?: string;

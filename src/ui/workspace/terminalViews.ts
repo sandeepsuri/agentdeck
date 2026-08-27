@@ -3,11 +3,11 @@ import type { Session } from '../../types.js';
 /**
  * A managed session's terminal view (xterm instance + WS attach) is worth
  * keeping mounted only while the session itself is still live. `handleExit`
- * (src/sessions/manager.ts) deletes the session and emits `session_removed`
- * synchronously, so "still live" reduces to "still present, non-exited, in
- * the sessions list" — there is no separate wire moment where a session sits
- * in the list with status `exited`, but we check status too as a defensive
- * second signal.
+ * (src/sessions/manager.ts) keeps the session row and emits `session_update`
+ * with status `exited` instead of removing it (ticket 04: an ended session
+ * stays listed so it can be reopened later) — there is no live PTY behind
+ * it any more, so its terminal view still needs to unmount even though the
+ * session itself remains in the list.
  */
 function isLiveManaged(session: Session): boolean {
   return session.origin === 'managed' && session.status !== 'exited';

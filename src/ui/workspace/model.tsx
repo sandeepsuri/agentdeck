@@ -20,6 +20,18 @@ export const STATUS_LABELS: Record<SessionStatus, string> = {
   unknown: 'Unknown',
 };
 
+/**
+ * True for a managed session whose process has exited. It stays listed
+ * (ticket 04: ended sessions are kept, not deleted) but has no live PTY
+ * behind it, so live-only actions (stop, restart, sending input) are
+ * unavailable and it should read as visually distinct from a running one.
+ * "Ended" is a managed-session concept only — external sessions have no
+ * kept history and simply disappear once their process is gone.
+ */
+export function isEndedSession(session: Session): boolean {
+  return session.origin === 'managed' && session.status === 'exited';
+}
+
 export function sessionLabel(session: Session): string {
   return session.name ?? `${session.agent === 'claude' ? 'Claude' : 'Codex'} · ${session.cwd.split('/').pop() ?? session.cwd}`;
 }

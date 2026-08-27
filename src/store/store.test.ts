@@ -82,6 +82,22 @@ describe('sessions', () => {
     store.deleteSession(managedSession.id);
     expect(store.listSessions().map((s) => s.id)).toEqual([externalSession.id]);
   });
+
+  it('round-trips endedAt for an ended managed session (ticket 04)', () => {
+    const ended: Session = {
+      ...managedSession,
+      status: 'exited',
+      statusSource: 'process_gone',
+      endedAt: '2026-07-17T11:00:00.000Z',
+    };
+    store.upsertSession(ended);
+    expect(store.getSession(ended.id)).toEqual(ended);
+  });
+
+  it('omits endedAt for a session that has not ended', () => {
+    store.upsertSession(managedSession);
+    expect(store.getSession(managedSession.id)?.endedAt).toBeUndefined();
+  });
 });
 
 describe('tasks', () => {

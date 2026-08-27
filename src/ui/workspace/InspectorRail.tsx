@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { AgentMessage, Conflict, Session } from '../../types.js';
-import { ElapsedTime, SparkBars, StatusBadge, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
+import { ElapsedTime, SparkBars, StatusBadge, isEndedSession, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
 
 interface Props {
   view: WorkspaceView;
@@ -78,6 +78,9 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
             <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
             <Meta label="Directory" value={selected.cwd} />
             <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
+            {isEndedSession(selected) && selected.endedAt && (
+              <Meta label="Ended" value={new Date(selected.endedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} />
+            )}
             <div className="inspector-section-label inner">Runtime</div>
             <div className="runtime-rail-metric"><span>Activity · <ElapsedTime startedAt={selected.startedAt} /></span><SparkBars count={24} seed={7} /></div>
             <div className="runtime-rail-metric"><span>Session events · {events.filter((event) => event.sessionId === selected.id || event.repo === repoPathOf(selected)).length}</span><SparkBars count={24} seed={9} /></div>
@@ -90,8 +93,11 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
               }}><input autoFocus onChange={(event) => setName(event.target.value)} placeholder={sessionLabel(selected)} value={name} /><button type="submit">Save</button></form>
             ) : <button className="rail-action" onClick={() => { setName(selected.name ?? ''); setEditingName(true); }} type="button">Rename <span>✎</span></button>}
             {selected.origin === 'external' && <button className="rail-action" onClick={() => onAction(selected, 'focus')} type="button">Focus terminal <span>⌖</span></button>}
-            {selected.origin === 'managed' && <button className="rail-action" onClick={() => onAction(selected, 'restart')} type="button">Restart agent <span>↻</span></button>}
-            {selected.origin === 'managed' && <button className="rail-action is-danger" onClick={() => onAction(selected, 'stop')} type="button">Terminate session <span>■</span></button>}
+            {/* Restart and Terminate are live-only actions: an ended session
+                has no process to restart in place or stop (ticket 04). */}
+            {selected.origin === 'managed' && !isEndedSession(selected) && <button className="rail-action" onClick={() => onAction(selected, 'restart')} type="button">Restart agent <span>↻</span></button>}
+            {selected.origin === 'managed' && !isEndedSession(selected) && <button className="rail-action is-danger" onClick={() => onAction(selected, 'stop')} type="button">Terminate session <span>■</span></button>}
+            {isEndedSession(selected) && <div className="rail-empty">This session has ended.</div>}
           </>
         ) : <div className="rail-empty">Select a session to inspect its runtime.</div>}
       </aside>
@@ -133,7 +139,11 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
         {recentEvents.length === 0 && <div className="rail-empty">No bus events yet.</div>}
       </div>
       <button className="text-button" onClick={() => onView('signals')} type="button">View all signals ↗</button>
-      {selected && <MessageSelected onError={onError} session={selected} />}
+      {/* Sending input is a live-only action: an ended session has no
+          process left to receive it (ticket 04). */}
+      {selected && (isEndedSession(selected)
+        ? <div className="rail-empty">This session has ended — it can no longer receive messages.</div>
+        : <MessageSelected onError={onError} session={selected} />)}
     </aside>
   );
 }
