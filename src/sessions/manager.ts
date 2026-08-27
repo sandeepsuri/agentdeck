@@ -13,6 +13,7 @@ import type { Handle, SessionBackend } from './backend.js';
 import { readScrollback, SessionTranscript, type Unsubscribe } from './transcript.js';
 import { readSummary, writeSummary } from './summary.js';
 import { ClaudeCliSummarizer, type Summarizer, type SummarizeOptions } from './summarizer.js';
+import { DEFAULT_MODEL_SETTING_KEY } from './model-catalog.js';
 import { inferOutputStatus, reduceStatus, type StatusSignal } from './status.js';
 
 // Observed CLI behavior: readiness = the CLI's composer/prompt line
@@ -434,6 +435,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
    * touched, so a failure here leaves both the previous summary.md (if
    * any) and scrollback.txt completely intact — only a success replaces
    * the stored summary and its timestamp.
+   *
+   * Model resolution (ticket 12): an explicit `opts.model` always wins and
+   * is never persisted — a per-summary override affects only this one
+   * call. Omitted, it falls back to the stored default
+   * (store.getSetting(DEFAULT_MODEL_SETTING_KEY), set via
+   * PATCH /api/settings — never the API key, which never goes through the
+   * settings table). If no default has ever been set either, no `model`
+   * key is passed at all, preserving ticket 11's original zero-config
+   * behavior (ClaudeCliSummarizer sends no --model flag; the CLI uses its
+   * own current default).
    */
   async summarize(sessionId: string, opts: SummarizeOptions = {}): Promise<string> {
     const session = this.store.getSession(sessionId);
@@ -448,7 +459,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (scrollback === undefined) {
       throw new Error('no scrollback is available to summarize');
     }
-    const summary = await this.opts.summarizer.summarize(scrollback, opts);
+    const model = opts.model ?? this.store.getSetting<string>(DEFAULT_MODEL_SETTING_KEY);
+    const summary = await this.opts.summarizer.summarize(scrollback, model ? { model } : {});
     await writeSummary(this.opts.sessionsDir, sessionId, summary);
     session.summaryGeneratedAt = new Date().toISOString();
     this.persist(session);
