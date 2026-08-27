@@ -1,6 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Session } from '../../types.js';
-import { StatusBadge, StatusLamp, elapsedTime, sessionLabel } from './model.js';
+import type { ServerFrame } from '../../protocol.js';
+import { ElapsedTime, StatusBadge, StatusLamp, sessionLabel } from './model.js';
+
+// Cap the client-side accumulated tail so a long-lived session's incremental
+// tile_preview chunks don't grow this string forever. Chunks are kept whole
+// and trimmed from the front (same discipline as the server's RingBuffer,
+// src/sessions/ringbuffer.ts) rather than sliced by character count: an
+// arbitrary character-offset slice can land mid ANSI escape sequence,
+// stripping its leading ESC byte and leaving the rest (e.g. "38;2;153;...m")
+// visible as literal text that stripAnsi's regex can no longer recognize.
+const PREVIEW_TAIL_CAP = 8000;
+
+function appendPreviewChunk(chunks: string[], data: string): string[] {
+  const next = [...chunks, data];
+  let total = next.reduce((sum, chunk) => sum + chunk.length, 0);
+  while (total > PREVIEW_TAIL_CAP && next.length > 1) {
+    total -= next[0]!.length;
+    next.shift();
+  }
+  return next;
+}
 
 function stripAnsi(value: string): string {
   return value
@@ -9,21 +29,17 @@ function stripAnsi(value: string): string {
     .replace(/\r/g, '');
 }
 
-function TerminalPreview({ session }: { session: Session }) {
-  const [tail, setTail] = useState('');
-  useEffect(() => {
-    if (session.origin !== 'managed') return setTail('External terminal preview is available in its host application.');
-    let disposed = false;
-    const refresh = () => fetch(`/api/sessions/${encodeURIComponent(session.id)}/terminal-tail`)
-      .then((response) => response.ok ? response.json() : { data: '' })
-      .then((body: { data?: string }) => { if (!disposed) setTail(body.data ?? ''); })
-      .catch(() => undefined);
-    refresh();
-    const poll = setInterval(refresh, 1500);
-    return () => { disposed = true; clearInterval(poll); };
-  }, [session.id, session.origin]);
-
+function TerminalPreview({ session, tail }: { session: Session; tail: string }) {
   const lines = useMemo(() => stripAnsi(tail).split('\n').filter(Boolean).slice(-7), [tail]);
+
+  if (session.origin !== 'managed') {
+    return (
+      <div className="grid-terminal-preview">
+        <span className="preview-muted">External terminal preview is available in its host application.</span>
+      </div>
+    );
+  }
+
   return (
     <div className="grid-terminal-preview">
       {lines.length === 0 && <span className="preview-muted">Waiting for terminal output…</span>}
@@ -33,7 +49,28 @@ function TerminalPreview({ session }: { session: Session }) {
   );
 }
 
-export function GridView({ sessions, onOpen }: { sessions: Session[]; onOpen: (session: Session) => void }) {
+// Mission Control tiles no longer poll a per-tile REST endpoint (T8): a
+// single WebSocket listener here accumulates `tile_preview` frames pushed by
+// the server for every managed session, keyed by session id. `seed` frames
+// (sent once per connection) replace the local tail; incremental frames
+// append and are capped so the string can't grow unbounded.
+export function GridView({ sessions, onOpen, ws }: { sessions: Session[]; onOpen: (session: Session) => void; ws: WebSocket | null }) {
+  const [previews, setPreviews] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    if (!ws) return;
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(String(event.data)) as ServerFrame;
+      if (frame.t !== 'tile_preview') return;
+      setPreviews((current) => {
+        const chunks = frame.seed ? [] : current[frame.sessionId] ?? [];
+        return { ...current, [frame.sessionId]: appendPreviewChunk(chunks, frame.data) };
+      });
+    };
+    ws.addEventListener('message', onMessage);
+    return () => ws.removeEventListener('message', onMessage);
+  }, [ws]);
+
   return (
     <section className="workspace-scroll grid-view">
       <div className="view-heading">
@@ -52,11 +89,11 @@ export function GridView({ sessions, onOpen }: { sessions: Session[]; onOpen: (s
               <span><i /><i /><i /></span>
               <em>zsh — {session.agent}-worker · pid {session.pid ?? '—'}</em>
             </div>
-            <TerminalPreview session={session} />
+            <TerminalPreview session={session} tail={(previews[session.id] ?? []).join('')} />
             <footer>
               <span className="agent-tag">{session.agent === 'claude' ? 'Claude' : 'Codex'}</span>
               <span>{session.cwd.split('/').pop() ?? session.cwd}{session.branch ? ` / ${session.branch}` : ''}</span>
-              <span>{elapsedTime(session.startedAt)}</span>
+              <span><ElapsedTime startedAt={session.startedAt} /></span>
             </footer>
           </button>
         ))}
