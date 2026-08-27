@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Session } from '../../types.js';
-import { isEndedSession } from './model.js';
+import type { Repo, Session } from '../../types.js';
+import { isEndedSession, repoDisplayName } from './model.js';
 
 const base = {
   cwd: '/repos/alpha',
@@ -35,5 +35,17 @@ describe('isEndedSession', () => {
     // external sessions); external rows with a dead process disappear
     // entirely via DiscoveryPoller instead.
     expect(isEndedSession(external('exited'))).toBe(false);
+  });
+});
+
+describe('repoDisplayName', () => {
+  const repos: Repo[] = [{ id: '/repos/alpha', path: '/repos/alpha', name: 'alpha' }];
+
+  it('resolves the repo name by matching repoId against the known repos list', () => {
+    expect(repoDisplayName(managed('exited', { repoId: '/repos/alpha' }), repos)).toBe('alpha');
+  });
+
+  it('falls back to the cwd basename when no repo matches', () => {
+    expect(repoDisplayName(managed('exited', { repoId: '/repos/unknown', cwd: '/repos/unknown' }), repos)).toBe('unknown');
   });
 });

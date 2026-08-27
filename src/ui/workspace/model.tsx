@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import type { Session, SessionStatus } from '../../types.js';
+import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals';
+export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'operations', label: 'Operations' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'changes', label: 'Changes' },
   { id: 'grid', label: 'Grid' },
+  { id: 'history', label: 'History' },
 ];
 
 export const STATUS_LABELS: Record<SessionStatus, string> = {
@@ -38,6 +39,14 @@ export function sessionLabel(session: Session): string {
 
 export function repoPathOf(session: Session): string {
   return session.worktreePath ?? session.repoId ?? session.cwd;
+}
+
+/** Human-readable repository name for a session, resolved against the known repos list. */
+export function repoDisplayName(session: Session, repos: readonly Repo[]): string {
+  const path = repoPathOf(session);
+  return repos.find((repo) => repo.id === path || repo.path === path)?.name
+    ?? session.cwd.split('/').pop()
+    ?? session.cwd;
 }
 
 export function relativeTime(iso: string, now = Date.now()): string {
