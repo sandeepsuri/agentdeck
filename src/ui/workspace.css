@@ -181,7 +181,10 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .traffic-lights { display: flex; gap: 5px; }.traffic-lights i, .tile-chrome i { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
 .terminal-chrome strong { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px; }
 .terminal-chrome > span:last-child { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 9.5px; }.terminal-chrome em { color: var(--status-working); font-style: normal; }
-.terminal-body { flex: 1; min-height: 0; padding: 8px 4px 8px 10px; }
+.terminal-body { position: relative; flex: 1; min-height: 0; padding: 8px 4px 8px 10px; }
+.terminal-view-stack { position: absolute; inset: 8px 4px 8px 10px; pointer-events: none; }
+.terminal-view { position: absolute; inset: 0; display: none; }
+.terminal-view.is-active { display: flex; pointer-events: auto; }
 .terminal-loading { height: 100%; display: grid; place-items: center; color: var(--text-muted); }
 .external-terminal-overview { height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--text-muted); }.external-terminal-overview strong { color: var(--text-primary); }.external-terminal-glyph { font: 20px var(--font-mono); }
 .terminal-prompt-card { flex: none; margin: 0 14px 10px; padding: 11px 14px; border-left: 3px solid var(--status-waiting); background: var(--status-waiting-bg); border-radius: 0 5px 5px 0; }
