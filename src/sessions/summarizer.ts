@@ -4,13 +4,17 @@
 //
 //   Summarizer.summarize(scrollback, { model }): Promise<string>
 //
-// `claude -p` as a subprocess and a hypothetical OpenAI-over-HTTP adapter
-// are two genuinely different providers behind the same seam; this file
-// builds only the `claude -p` adapter (ticket 11's "single default model"
-// scope — a runtime-fetched model picker and other providers are ticket
-// 12, not built here). The interface hides provider selection, key
-// resolution, the prompt, and input truncation from callers.
+// `claude -p` as a subprocess and OpenAI over HTTP are two genuinely
+// different providers behind the same seam. Ticket 11 built only the
+// `claude -p` adapter; ticket 12 adds OpenAiSummarizer (a real HTTP
+// adapter) and RoutingSummarizer, which composes every configured adapter
+// behind this same single Summarizer interface so SessionManager and the
+// REST route never need to know which provider a chosen model id belongs
+// to (spec: "Provider selection sits behind one interface, so adding a
+// provider does not touch the summary flow"). The interface hides provider
+// selection, key resolution, the prompt, and input truncation from callers.
 import { execFile } from 'node:child_process';
+import { parseModelId, type ModelProvider } from './model-catalog.js';
 
 export interface SummarizeOptions {
   /**
@@ -110,5 +114,108 @@ export class ClaudeCliSummarizer implements Summarizer {
       // waiting for input it isn't going to receive.
       child.stdin?.end();
     });
+  }
+}
+
+export interface OpenAiSummarizerOptions {
+  /** Resolved at call time, not baked in at construction, so a key saved through Settings applies to the very next summarize() call without a server restart. */
+  getApiKey: () => string | undefined;
+  /** Injectable for tests — never call the real OpenAI endpoint from an automated test. */
+  fetchImpl?: typeof fetch;
+  baseUrl?: string;
+  timeoutMs?: number;
+}
+
+const OPENAI_DEFAULT_TIMEOUT_MS = 120_000;
+// Only used if this adapter is ever invoked with no model at all. In
+// practice RoutingSummarizer always supplies one for an "openai:..."
+// catalog selection; this is a defensive fallback for direct use, not the
+// model a user actually sees or picks (OpenAI is never the stored
+// zero-config default — see manager.ts and the spec's decision table).
+const OPENAI_FALLBACK_MODEL = 'gpt-4o-mini';
+
+/**
+ * OpenAI-over-HTTP adapter. A genuine runtime API call, metered against
+ * the configured API key (spec rationale: a ChatGPT subscription does not
+ * supply this key — separate products, separate billing). Node 24's
+ * global fetch is used directly rather than adding an SDK dependency, same
+ * choice already made for ModelCatalog's OpenAiModelSource.
+ */
+export class OpenAiSummarizer implements Summarizer {
+  constructor(private opts: OpenAiSummarizerOptions) {}
+
+  async summarize(scrollback: string, opts: SummarizeOptions = {}): Promise<string> {
+    const apiKey = this.opts.getApiKey();
+    if (!apiKey) {
+      throw new Error('OpenAI summarization requires an API key — configure one in Settings.');
+    }
+    const fetchImpl = this.opts.fetchImpl ?? fetch;
+    const base = this.opts.baseUrl ?? 'https://api.openai.com/v1';
+    const model = opts.model ?? OPENAI_FALLBACK_MODEL;
+    const prompt = `${PROMPT_PREAMBLE}\n${truncateScrollback(scrollback)}\n${PROMPT_TRAILER}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.opts.timeoutMs ?? OPENAI_DEFAULT_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetchImpl(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }] }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new Error(`OpenAI request failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`OpenAI summarization failed (${response.status}): ${detail.slice(0, 500) || response.statusText}`);
+    }
+    const body = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const summary = body.choices?.[0]?.message?.content?.trim();
+    if (!summary) throw new Error('OpenAI produced no summary content');
+    return summary;
+  }
+}
+
+export interface RoutingSummarizerOptions {
+  /** One adapter per provider this deployment actually supports. A provider with no adapter here throws a clear error when routed to, rather than silently falling back to another one. */
+  adapters: Partial<Record<ModelProvider, Summarizer>>;
+  /** Provider used when opts.model is entirely omitted (no override, no stored default resolved upstream — see SessionManager.summarize()). Default: 'claude-cli', matching ticket 11's zero-config behavior. */
+  defaultProvider?: ModelProvider;
+}
+
+/**
+ * Composes every configured provider adapter behind the single Summarizer
+ * seam, so SessionManager and the REST route stay provider-agnostic (spec:
+ * "Provider selection sits behind one interface, so adding a provider does
+ * not touch the summary flow"). This is the one Summarizer instance
+ * SessionManagerOptions.summarizer is constructed with in production
+ * (server/index.ts) — a per-call model id determines routing dynamically,
+ * so changing which provider a wrap-up uses never requires restarting the
+ * server or swapping the manager's summarizer.
+ *
+ * `opts.model`, when present, is a ModelCatalog-issued id of the form
+ * "<provider>:<model>" (model-catalog.ts) — the prefix selects the
+ * adapter, and the remainder is passed on unprefixed, exactly as that
+ * adapter itself expects (e.g. ClaudeCliSummarizer still just sees
+ * `{ model: 'opus' }`, never the qualified id).
+ */
+export class RoutingSummarizer implements Summarizer {
+  constructor(private opts: RoutingSummarizerOptions) {}
+
+  async summarize(scrollback: string, opts: SummarizeOptions = {}): Promise<string> {
+    if (!opts.model) {
+      return this.adapterFor(this.opts.defaultProvider ?? 'claude-cli').summarize(scrollback);
+    }
+    const { provider, modelId } = parseModelId(opts.model);
+    return this.adapterFor(provider).summarize(scrollback, { model: modelId });
+  }
+
+  private adapterFor(provider: ModelProvider): Summarizer {
+    const adapter = this.opts.adapters[provider];
+    if (!adapter) throw new Error(`no summarizer configured for provider "${provider}"`);
+    return adapter;
   }
 }
