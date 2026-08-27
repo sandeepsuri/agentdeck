@@ -56,6 +56,10 @@ export function attachWs(
     for (const [ws, sid] of viewing) {
       if (sid === sessionId) send(ws, { t: 'output', data });
     }
+    // Mission Control tiles are not "attached" viewers — push a lightweight
+    // preview chunk to every socket so grid tiles update live without each
+    // tile polling its own REST endpoint.
+    for (const ws of wss.clients) send(ws, { t: 'tile_preview', sessionId, data, seed: false });
   });
 
   // session_update goes to every socket — the session list is global state.
@@ -89,6 +93,14 @@ export function attachWs(
           uiVisible: isUiVisible(),
         },
       });
+    }
+    // Seed Mission Control tiles with whatever a managed session has already
+    // produced, so a freshly opened grid doesn't sit blank until the next
+    // output batch arrives.
+    for (const session of manager.listSessions()) {
+      if (session.origin === 'managed' && manager.isLive(session.id)) {
+        send(ws, { t: 'tile_preview', sessionId: session.id, data: manager.getBuffer(session.id), seed: true });
+      }
     }
     ws.on('message', (raw) => {
       const frame = parseClientFrame(String(raw));

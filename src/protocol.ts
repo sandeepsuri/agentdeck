@@ -31,7 +31,12 @@ export type ServerFrame =
   | { t: 'agent_event'; event: AgentMessage }
   | { t: 'companion_snapshot'; snapshot: CompanionSnapshot }
   | { t: 'ui_presence'; visible: boolean }
-  | { t: 'vscode_action'; requestId: string; terminalId: string; action: 'send' | 'focus'; text?: string };
+  | { t: 'vscode_action'; requestId: string; terminalId: string; action: 'send' | 'focus'; text?: string }
+  // Mission Control tile preview: pushed to every socket (not just an attached
+  // viewer) so grid tiles update without per-tile HTTP polling. `seed: true`
+  // is a full-buffer replace sent once on connect; `seed: false` is an
+  // incremental chunk to append client-side (see GridView.tsx).
+  | { t: 'tile_preview'; sessionId: string; data: string; seed: boolean };
 
 function parseVsCodeTerminals(value: unknown): VsCodeTerminalFrame[] | null {
   if (!Array.isArray(value) || value.length > 500) return null;

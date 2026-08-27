@@ -568,13 +568,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }).slice(-100);
   });
 
-  app.get('/api/sessions/:id/terminal-tail', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
-    return { data: session.origin === 'managed' ? manager.getBuffer(id) : '' };
-  });
-
   app.get('/api/sessions/:id/capabilities', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
