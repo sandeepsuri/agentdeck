@@ -12,7 +12,7 @@ import { OperationsView } from './workspace/OperationsView.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
-import { repoPathOf, sessionLabel, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
+import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
@@ -20,6 +20,13 @@ const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] 
   { value: 'light', label: 'Light', glyph: '☀' },
   { value: 'dark', label: 'Dark', glyph: '☾' },
 ];
+
+// Owns its own 1 Hz interval so the footer clock ticks without re-rendering
+// the rest of the app (see docs/specs: "Stop the global setNow re-render").
+function Clock() {
+  const now = useNow(1000);
+  return <span>{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>;
+}
 
 function ThemeControl() {
   const { preference, resolvedTheme, setPreference } = useTheme();
@@ -57,7 +64,6 @@ export function App() {
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
-  const [now, setNow] = useState(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
   const requestedSessionIdRef = useRef(initialNavigation.sessionId);
 
@@ -100,9 +106,8 @@ export function App() {
 
   useEffect(() => {
     refreshSessions(); refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
-    const clock = setInterval(() => setNow(Date.now()), 1000);
     const background = setInterval(() => { refreshRepos(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
-    return () => { clearInterval(clock); clearInterval(background); };
+    return () => { clearInterval(background); };
   }, [refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
@@ -260,7 +265,7 @@ export function App() {
         <span>▣ {selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
         {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
         <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>
-        <span>{new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        <Clock />
         <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
 

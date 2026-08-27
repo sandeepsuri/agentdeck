@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Session } from '../../types.js';
-import { StatusBadge, StatusLamp, elapsedTime, sessionLabel } from './model.js';
+import { ElapsedTime, StatusBadge, StatusLamp, sessionLabel } from './model.js';
 
 function stripAnsi(value: string): string {
   return value
@@ -56,7 +56,7 @@ export function GridView({ sessions, onOpen }: { sessions: Session[]; onOpen: (s
             <footer>
               <span className="agent-tag">{session.agent === 'claude' ? 'Claude' : 'Codex'}</span>
               <span>{session.cwd.split('/').pop() ?? session.cwd}{session.branch ? ` / ${session.branch}` : ''}</span>
-              <span>{elapsedTime(session.startedAt)}</span>
+              <span><ElapsedTime startedAt={session.startedAt} /></span>
             </footer>
           </button>
         ))}

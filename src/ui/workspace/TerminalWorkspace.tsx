@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
 import { Terminal } from '../components/Terminal.js';
-import { elapsedTime, sessionLabel } from './model.js';
+import { ElapsedTime, sessionLabel } from './model.js';
 
 interface Props {
   session: Session | null;
@@ -51,7 +51,7 @@ export function TerminalWorkspace({ session, ws, wsReady, onError, onFocusExtern
         <header className="terminal-chrome">
           <span className="traffic-lights"><i /><i /><i /></span>
           <strong>zsh — {sessionLabel(session).toLowerCase().replaceAll(' ', '-')}</strong>
-          <span>{session.origin === 'managed' ? 'PTY' : session.terminalApp ?? 'External'} · {session.pid ?? '—'} · <em>{elapsedTime(session.startedAt)}</em></span>
+          <span>{session.origin === 'managed' ? 'PTY' : session.terminalApp ?? 'External'} · {session.pid ?? '—'} · <em><ElapsedTime startedAt={session.startedAt} /></em></span>
         </header>
 
         <div className="terminal-body">

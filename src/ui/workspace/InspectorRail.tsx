@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { AgentMessage, Conflict, Session } from '../../types.js';
-import { SparkBars, StatusBadge, elapsedTime, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
+import { ElapsedTime, SparkBars, StatusBadge, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
 
 interface Props {
   view: WorkspaceView;
@@ -79,7 +79,7 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
             <Meta label="Directory" value={selected.cwd} />
             <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
             <div className="inspector-section-label inner">Runtime</div>
-            <div className="runtime-rail-metric"><span>Activity · {elapsedTime(selected.startedAt)}</span><SparkBars count={24} seed={7} /></div>
+            <div className="runtime-rail-metric"><span>Activity · <ElapsedTime startedAt={selected.startedAt} /></span><SparkBars count={24} seed={7} /></div>
             <div className="runtime-rail-metric"><span>Session events · {events.filter((event) => event.sessionId === selected.id || event.repo === repoPathOf(selected)).length}</span><SparkBars count={24} seed={9} /></div>
             <div className="inspector-section-label inner">Actions</div>
             {editingName ? (
