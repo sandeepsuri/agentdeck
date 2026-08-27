@@ -5,7 +5,13 @@ import type { AgentMessage, CompanionSnapshot, Session } from './types.js';
 const MAX_ID_LENGTH = 200;
 const MAX_INPUT_LENGTH = 64 * 1024;
 const MAX_ERROR_LENGTH = 4096;
-const MAX_TERMINAL_DIMENSION = 1000;
+
+// Managed session terminal size is pinned for the life of the session (see
+// docs/specs/session-persistence-and-remote-access.md, "Pinned 100×30 with
+// no viewer resize authority"). PtyBackend spawns at this size and the
+// client renders at this size; no viewer can change either.
+export const TERMINAL_COLS = 100;
+export const TERMINAL_ROWS = 30;
 
 export interface VsCodeTerminalFrame {
   id: string;
@@ -16,7 +22,6 @@ export interface VsCodeTerminalFrame {
 export type ClientFrame =
   | { t: 'attach'; sessionId: string }
   | { t: 'input'; data: string }
-  | { t: 'resize'; cols: number; rows: number }
   | { t: 'detach' }
   | { t: 'vscode_register'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_terminals'; windowId: string; terminals: VsCodeTerminalFrame[] }
@@ -70,13 +75,6 @@ export function parseClientFrame(raw: string): ClientFrame | null {
     case 'input':
       return typeof f.data === 'string' && f.data.length <= MAX_INPUT_LENGTH
         ? { t: 'input', data: f.data }
-        : null;
-    case 'resize':
-      return typeof f.cols === 'number' && typeof f.rows === 'number' &&
-        Number.isInteger(f.cols) && Number.isInteger(f.rows)
-        && f.cols > 0 && f.cols <= MAX_TERMINAL_DIMENSION
-        && f.rows > 0 && f.rows <= MAX_TERMINAL_DIMENSION
-        ? { t: 'resize', cols: f.cols, rows: f.rows }
         : null;
     case 'detach':
       return { t: 'detach' };

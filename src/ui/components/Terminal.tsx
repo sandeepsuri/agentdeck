@@ -1,9 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import type { ServerFrame, ClientFrame } from '../../protocol.js';
+import { TERMINAL_COLS, TERMINAL_ROWS, type ServerFrame, type ClientFrame } from '../../protocol.js';
 import { type ResolvedTheme, useTheme } from '../theme.js';
 
 interface Props {
@@ -62,8 +61,10 @@ const XTERM_THEMES: Record<ResolvedTheme, ITheme> = {
 
 /**
  * Live terminal for one managed session. Attaches over the shared WS,
- * replays the ring buffer, forwards keystrokes, and pushes resize frames
- * whenever the pane's size changes (fit addon + ResizeObserver).
+ * replays the ring buffer, and forwards keystrokes. The grid is pinned at
+ * TERMINAL_COLS×TERMINAL_ROWS — matching the PTY's fixed size — and never
+ * resized by the viewer; the host div centers it, so a pane larger than the
+ * grid shows empty margin instead of stretching the terminal to fill it.
  */
 export function Terminal({ ws, sessionId }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -79,20 +80,14 @@ export function Terminal({ ws, sessionId }: Props) {
       fontSize: 13,
       theme: XTERM_THEMES[resolvedTheme],
       scrollback: 5000,
+      cols: TERMINAL_COLS,
+      rows: TERMINAL_ROWS,
     });
     terminalRef.current = term;
-    const fit = new FitAddon();
-    term.loadAddon(fit);
     term.open(host);
-    fit.fit();
 
     const send = (frame: ClientFrame) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
-    };
-
-    const sendResize = () => {
-      fit.fit();
-      send({ t: 'resize', cols: term.cols, rows: term.rows });
     };
 
     const onMessage = (ev: MessageEvent) => {
@@ -106,19 +101,13 @@ export function Terminal({ ws, sessionId }: Props) {
     };
     ws.addEventListener('message', onMessage);
 
-    const attach = () => {
-      send({ t: 'attach', sessionId });
-      sendResize();
-    };
+    const attach = () => send({ t: 'attach', sessionId });
     if (ws.readyState === WebSocket.OPEN) attach();
     else ws.addEventListener('open', attach, { once: true });
 
     const dataDisposable = term.onData((data) => send({ t: 'input', data }));
-    const observer = new ResizeObserver(sendResize);
-    observer.observe(host);
 
     return () => {
-      observer.disconnect();
       dataDisposable.dispose();
       ws.removeEventListener('message', onMessage);
       ws.removeEventListener('open', attach);
@@ -132,5 +121,17 @@ export function Terminal({ ws, sessionId }: Props) {
     if (terminalRef.current) terminalRef.current.options.theme = XTERM_THEMES[resolvedTheme];
   }, [resolvedTheme]);
 
-  return <div ref={hostRef} style={{ width: '100%', height: '100%' }} />;
+  return (
+    <div
+      ref={hostRef}
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        overflow: 'auto',
+      }}
+    />
+  );
 }

@@ -528,16 +528,18 @@ describe('WS protocol', () => {
     expect(a.frames.filter((f) => f.t === 'output').map((f) => f.data)).toEqual(['live-data']);
   });
 
-  it('input and resize frames reach the backend', async () => {
+  it('input reaches the backend; a resize frame from a viewer never does', async () => {
     const { id } = await launchViaRest();
     const c = await connect();
     c.send({ t: 'attach', sessionId: id });
     await c.waitFor('replay');
     c.send({ t: 'input', data: 'ls\r' });
+    // Terminal size is pinned (Stage 2): a resize frame from a viewer must
+    // never reach backend.resize, no matter what the client sends.
     c.send({ t: 'resize', cols: 120, rows: 40 });
     await new Promise((r) => setTimeout(r, 50));
     expect(backend.written.get('1000')).toEqual(['ls\r']);
-    expect(backend.resized.get('1000')).toEqual([{ cols: 120, rows: 40 }]);
+    expect(backend.resized.get('1000')).toEqual([]);
   });
 
   it('broadcasts session_update to all sockets on status change', async () => {
