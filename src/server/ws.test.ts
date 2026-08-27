@@ -210,14 +210,6 @@ describe('REST routes', () => {
     expect(await response.json()).toMatchObject({ sessions: [], attention: [], agents: [], uiVisible: false });
   });
 
-  it('exposes a managed terminal tail without attaching another websocket', async () => {
-    const created = await launchViaRest();
-    backend.emitOutput(created.pid, 'build finished\r\n');
-    const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${created.id}/terminal-tail`);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ data: 'build finished\r\n' });
-  });
-
   it('returns structured launcher preflight checks', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/launch/preflight`, {
       method: 'POST',
@@ -564,6 +556,56 @@ describe('WS protocol', () => {
     await new Promise((r) => setTimeout(r, 100));
     expect(c.frames.filter((frame) => frame.t === 'replay')).toHaveLength(0);
     expect(c.ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it('pushes tile_preview to every socket, not just attached viewers', async () => {
+    const { id, pid } = await launchViaRest();
+    const [viewer, other] = [await connect(), await connect()];
+    viewer.send({ t: 'attach', sessionId: id });
+    await viewer.waitFor('replay');
+    // both sockets already received a (empty) seed tile_preview on connect;
+    // wait specifically for the live chunk pushed after emitOutput below.
+    const waitForData = async (client: Client, data: string) => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 3000) {
+        const hit = client.frames.find((f) => f.t === 'tile_preview' && f.data === data);
+        if (hit) return hit;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`no tile_preview with data ${data} within 3000ms`);
+    };
+
+    backend.emitOutput(pid, 'grid-tile-data');
+    await waitForData(viewer, 'grid-tile-data');
+    const otherPreview = await waitForData(other, 'grid-tile-data');
+    expect(otherPreview).toEqual({ t: 'tile_preview', sessionId: id, data: 'grid-tile-data', seed: false });
+  });
+
+  it('seeds a newly connected socket with each managed session\'s buffer', async () => {
+    const { id, pid } = await launchViaRest();
+    backend.emitOutput(pid, 'earlier tile output');
+    await new Promise((r) => setTimeout(r, 50));
+
+    const late = await connect();
+    const seed = await late.waitFor('tile_preview');
+    expect(seed).toEqual({ t: 'tile_preview', sessionId: id, data: 'earlier tile output', seed: true });
+  });
+
+  it('does not push tile_preview frames for external sessions', async () => {
+    const c = await connect();
+    store.upsertSession({
+      id: 'ext-grid-1',
+      origin: 'external',
+      agent: 'claude',
+      cwd: fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-ext-')),
+      startedAt: '2026-07-17T00:00:00.000Z',
+      lastActivityAt: '2026-07-17T00:00:00.000Z',
+      status: 'idle',
+      statusSource: 'cpu_heuristic',
+      terminalApp: 'unknown',
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(c.frames.filter((f) => f.t === 'tile_preview' && f.sessionId === 'ext-grid-1')).toHaveLength(0);
   });
 
   it('broadcasts aggregate browser visibility to companion clients', async () => {
