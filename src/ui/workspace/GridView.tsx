@@ -4,8 +4,23 @@ import type { ServerFrame } from '../../protocol.js';
 import { ElapsedTime, StatusBadge, StatusLamp, sessionLabel } from './model.js';
 
 // Cap the client-side accumulated tail so a long-lived session's incremental
-// tile_preview chunks don't grow this string forever.
+// tile_preview chunks don't grow this string forever. Chunks are kept whole
+// and trimmed from the front (same discipline as the server's RingBuffer,
+// src/sessions/ringbuffer.ts) rather than sliced by character count: an
+// arbitrary character-offset slice can land mid ANSI escape sequence,
+// stripping its leading ESC byte and leaving the rest (e.g. "38;2;153;...m")
+// visible as literal text that stripAnsi's regex can no longer recognize.
 const PREVIEW_TAIL_CAP = 8000;
+
+function appendPreviewChunk(chunks: string[], data: string): string[] {
+  const next = [...chunks, data];
+  let total = next.reduce((sum, chunk) => sum + chunk.length, 0);
+  while (total > PREVIEW_TAIL_CAP && next.length > 1) {
+    total -= next[0]!.length;
+    next.shift();
+  }
+  return next;
+}
 
 function stripAnsi(value: string): string {
   return value
@@ -40,7 +55,7 @@ function TerminalPreview({ session, tail }: { session: Session; tail: string }) 
 // (sent once per connection) replace the local tail; incremental frames
 // append and are capped so the string can't grow unbounded.
 export function GridView({ sessions, onOpen, ws }: { sessions: Session[]; onOpen: (session: Session) => void; ws: WebSocket | null }) {
-  const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [previews, setPreviews] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     if (!ws) return;
@@ -48,9 +63,8 @@ export function GridView({ sessions, onOpen, ws }: { sessions: Session[]; onOpen
       const frame = JSON.parse(String(event.data)) as ServerFrame;
       if (frame.t !== 'tile_preview') return;
       setPreviews((current) => {
-        const previous = frame.seed ? '' : current[frame.sessionId] ?? '';
-        const next = (previous + frame.data).slice(-PREVIEW_TAIL_CAP);
-        return { ...current, [frame.sessionId]: next };
+        const chunks = frame.seed ? [] : current[frame.sessionId] ?? [];
+        return { ...current, [frame.sessionId]: appendPreviewChunk(chunks, frame.data) };
       });
     };
     ws.addEventListener('message', onMessage);
@@ -75,7 +89,7 @@ export function GridView({ sessions, onOpen, ws }: { sessions: Session[]; onOpen
               <span><i /><i /><i /></span>
               <em>zsh — {session.agent}-worker · pid {session.pid ?? '—'}</em>
             </div>
-            <TerminalPreview session={session} tail={previews[session.id] ?? ''} />
+            <TerminalPreview session={session} tail={(previews[session.id] ?? []).join('')} />
             <footer>
               <span className="agent-tag">{session.agent === 'claude' ? 'Claude' : 'Codex'}</span>
               <span>{session.cwd.split('/').pop() ?? session.cwd}{session.branch ? ` / ${session.branch}` : ''}</span>
