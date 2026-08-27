@@ -15,3 +15,5 @@ docs/AGENTS-SNIPPET.md
 !.claude/skills/**
 spike/
 skills-lock.json
+docs/specs/
+docs/tickets/
