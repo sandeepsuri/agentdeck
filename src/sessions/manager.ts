@@ -233,7 +233,15 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const session = this.store.getSession(sessionId);
     if (session) {
       session.lastActivityAt = new Date().toISOString();
-      this.persist(session);
+      // Same throttle as handleData's output path (spec Stage 1 step 3):
+      // a keystroke isn't a meaningful state transition, so it shouldn't
+      // force a synchronous persist. lastActivityAt may lag up to
+      // ACTIVITY_FLUSH_MS; nothing user-visible depends on finer freshness.
+      const now = Date.now();
+      if (now - live.lastActivityFlush >= ACTIVITY_FLUSH_MS) {
+        live.lastActivityFlush = now;
+        this.persist(session);
+      }
     }
   }
 

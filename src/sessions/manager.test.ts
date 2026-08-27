@@ -1,5 +1,5 @@
 // T3 tests: SessionManager + PtyBackend against bash/cat — never the real CLIs.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LaunchSpec } from '../types.js';
 import { Store } from '../store/index.js';
 import { PtyBackend } from './pty.js';
@@ -67,6 +67,16 @@ describe('SessionManager + PtyBackend', () => {
     const s = await manager.launch(spec({}));
     manager.write(s.id, 'ping\r');
     await waitFor(() => manager.getBuffer(s.id).includes('ping'));
+  });
+
+  it('write() throttles lastActivityAt persistence instead of writing on every keystroke', async () => {
+    const { manager, store } = makeManager({}, 'cat');
+    const s = await manager.launch(spec({}));
+    const upsertSpy = vi.spyOn(store, 'upsertSession');
+    upsertSpy.mockClear();
+    for (let i = 0; i < 20; i++) manager.write(s.id, 'x');
+    // 20 rapid keystrokes must not each trigger a synchronous persist.
+    expect(upsertSpy.mock.calls.length).toBeLessThan(20);
   });
 
   it('injects initialPrompt only after readiness, and the child executes it', async () => {
