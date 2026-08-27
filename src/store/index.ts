@@ -24,6 +24,7 @@ interface SessionRow {
   status_source: string; backend: string | null; tmux_target: string | null;
   launch_spec: string | null; tty: string | null; terminal_app: string | null;
   terminal_ref: string | null; agent_session_id: string | null; ended_at: string | null;
+  summary_generated_at: string | null;
 }
 
 function rowToSession(r: SessionRow): Session {
@@ -53,6 +54,7 @@ function rowToSession(r: SessionRow): Session {
   if (terminalRef !== undefined) s.terminalRef = terminalRef;
   if (r.agent_session_id !== null) s.agentSessionId = r.agent_session_id;
   if (r.ended_at !== null) s.endedAt = r.ended_at;
+  if (r.summary_generated_at !== null) s.summaryGeneratedAt = r.summary_generated_at;
   return s;
 }
 
@@ -132,11 +134,11 @@ export class Store {
         `INSERT INTO sessions (id, origin, agent, name, task_id, repo_id, cwd, branch,
            worktree_path, pid, started_at, last_activity_at, status, status_source,
            backend, tmux_target, launch_spec, tty, terminal_app, terminal_ref,
-           agent_session_id, ended_at)
+           agent_session_id, ended_at, summary_generated_at)
          VALUES (@id, @origin, @agent, @name, @taskId, @repoId, @cwd, @branch,
            @worktreePath, @pid, @startedAt, @lastActivityAt, @status, @statusSource,
            @backend, @tmuxTarget, @launchSpec, @tty, @terminalApp, @terminalRef,
-           @agentSessionId, @endedAt)
+           @agentSessionId, @endedAt, @summaryGeneratedAt)
          ON CONFLICT(id) DO UPDATE SET
            origin=excluded.origin, agent=excluded.agent, name=excluded.name,
            task_id=excluded.task_id, repo_id=excluded.repo_id, cwd=excluded.cwd,
@@ -147,7 +149,8 @@ export class Store {
            tmux_target=excluded.tmux_target, launch_spec=excluded.launch_spec,
            tty=excluded.tty, terminal_app=excluded.terminal_app,
            terminal_ref=excluded.terminal_ref,
-           agent_session_id=excluded.agent_session_id, ended_at=excluded.ended_at`,
+           agent_session_id=excluded.agent_session_id, ended_at=excluded.ended_at,
+           summary_generated_at=excluded.summary_generated_at`,
       )
       .run({
         id: s.id,
@@ -172,6 +175,7 @@ export class Store {
         terminalRef: toJson(s.terminalRef),
         agentSessionId: s.agentSessionId ?? null,
         endedAt: s.endedAt ?? null,
+        summaryGeneratedAt: s.summaryGeneratedAt ?? null,
       });
   }
 

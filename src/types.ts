@@ -48,6 +48,15 @@ export interface Session {
    * shown alongside it. Never set for a session that is still live.
    */
   endedAt?: string;
+  /**
+   * ISO-8601 timestamp set when a wrap-up summary was last (re)generated
+   * for this session (ticket 11). Only ever set via the explicit
+   * POST /api/sessions/:id/summarize action — never automatically. The
+   * summary text itself is not stored here; it lives in
+   * sessions/<id>/summary.md (src/sessions/summary.ts), read back through
+   * GET /api/sessions/:id/summary.
+   */
+  summaryGeneratedAt?: string;
   // managed only
   backend?: 'pty' | 'tmux';
   tmuxTarget?: string;
