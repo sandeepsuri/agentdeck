@@ -7,6 +7,7 @@ import type { LaunchSpec } from '../types.js';
 import { Store } from '../store/index.js';
 import { PtyBackend } from './pty.js';
 import { RingBuffer } from './ringbuffer.js';
+import type { Summarizer } from './summarizer.js';
 import { SessionManager, type SessionManagerOptions } from './manager.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -235,6 +236,106 @@ describe('SessionManager + PtyBackend', () => {
       expect(fs.existsSync(path.join(sessionsDir, id, 'scrollback.txt'))).toBe(true);
       expect(fs.existsSync(path.join(sessionsDir, id, 'raw.log'))).toBe(false);
     }
+  });
+});
+
+// ticket 11: SessionManager.summarize() / readSummary(). A fake Summarizer
+// is injected throughout — the real `claude -p` subprocess adapter is never
+// invoked in tests (see summarizer.test.ts, which covers that adapter with
+// node:child_process mocked instead).
+describe('SessionManager summarize (ticket 11)', () => {
+  function fakeSummarizer(impl?: Summarizer['summarize']): Summarizer & { summarize: ReturnType<typeof vi.fn> } {
+    return { summarize: vi.fn(impl ?? (async () => 'a fake summary')) };
+  }
+
+  it('rejects summarizing a session that has not ended yet', async () => {
+    const summarizer = fakeSummarizer();
+    const { manager } = makeManager({ summarizer });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    await expect(manager.summarize(s.id)).rejects.toThrow(/not ended|has not ended/);
+    expect(summarizer.summarize).not.toHaveBeenCalled();
+  });
+
+  it('rejects summarizing an unknown session', async () => {
+    const { manager } = makeManager({ summarizer: fakeSummarizer() });
+    await expect(manager.summarize('no-such-id')).rejects.toThrow(/no such session/);
+  });
+
+  it('rejects summarizing an external session', async () => {
+    const summarizer = fakeSummarizer();
+    const { manager, store } = makeManager({ summarizer });
+    store.upsertSession({
+      id: 'ext-1', origin: 'external', agent: 'codex', cwd: '/tmp',
+      startedAt: '2026-08-27T09:00:00.000Z', lastActivityAt: '2026-08-27T09:00:00.000Z',
+      status: 'idle', statusSource: 'cpu_heuristic',
+    });
+    await expect(manager.summarize('ext-1')).rejects.toThrow(/managed/);
+    expect(summarizer.summarize).not.toHaveBeenCalled();
+  });
+
+  it('summarizes an ended session\'s scrollback, stores summary.md, and stamps summaryGeneratedAt', async () => {
+    const summarizer = fakeSummarizer(async (scrollback) => `Summary of: ${scrollback.trim()}`);
+    const { manager, store, sessionsDir } = makeManager({ summarizer });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo did-the-work'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+    await waitFor(() => fs.existsSync(path.join(sessionsDir, s.id, 'scrollback.txt')));
+
+    const result = await manager.summarize(s.id);
+    expect(result).toContain('did-the-work');
+    expect(summarizer.summarize).toHaveBeenCalledTimes(1);
+    const [scrollbackArg] = summarizer.summarize.mock.calls[0] as [string, unknown];
+    expect(scrollbackArg).toContain('did-the-work');
+
+    expect(fs.readFileSync(path.join(sessionsDir, s.id, 'summary.md'), 'utf8')).toBe(result);
+    expect(store.getSession(s.id)?.summaryGeneratedAt).toBeDefined();
+    expect(await manager.readSummary(s.id)).toBe(result);
+  });
+
+  it('readSummary() is undefined until a summary has been generated', async () => {
+    const { manager } = makeManager({ summarizer: fakeSummarizer() });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+    expect(await manager.readSummary(s.id)).toBeUndefined();
+  });
+
+  it('regenerating replaces the stored summary and its timestamp', async () => {
+    let call = 0;
+    const summarizer = fakeSummarizer(async () => (call++ === 0 ? 'first summary' : 'second summary'));
+    const { manager, store, sessionsDir } = makeManager({ summarizer });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+    const first = await manager.summarize(s.id);
+    const firstStamp = store.getSession(s.id)?.summaryGeneratedAt;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await manager.summarize(s.id);
+
+    expect(first).toBe('first summary');
+    expect(second).toBe('second summary');
+    expect(fs.readFileSync(path.join(sessionsDir, s.id, 'summary.md'), 'utf8')).toBe('second summary');
+    expect(store.getSession(s.id)?.summaryGeneratedAt).not.toBe(firstStamp);
+  });
+
+  it('a failed regeneration leaves the previous summary and the scrollback untouched', async () => {
+    let call = 0;
+    const summarizer = fakeSummarizer(async () => {
+      call++;
+      if (call === 1) return 'good summary';
+      throw new Error('claude -p failed: simulated failure');
+    });
+    const { manager, store, sessionsDir } = makeManager({ summarizer });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+    await manager.summarize(s.id);
+    const stampAfterFirst = store.getSession(s.id)?.summaryGeneratedAt;
+    const scrollbackBefore = fs.readFileSync(path.join(sessionsDir, s.id, 'scrollback.txt'), 'utf8');
+
+    await expect(manager.summarize(s.id)).rejects.toThrow(/simulated failure/);
+
+    expect(fs.readFileSync(path.join(sessionsDir, s.id, 'summary.md'), 'utf8')).toBe('good summary');
+    expect(store.getSession(s.id)?.summaryGeneratedAt).toBe(stampAfterFirst);
+    expect(fs.readFileSync(path.join(sessionsDir, s.id, 'scrollback.txt'), 'utf8')).toBe(scrollbackBefore);
   });
 });
 
