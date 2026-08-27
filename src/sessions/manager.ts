@@ -218,12 +218,24 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       live.transcript.close();
       this.live.delete(sessionId);
     }
-    // An exited session has nothing left to show or act on — drop the row
-    // entirely so it disappears from the dashboard.
-    if (this.store.getSession(sessionId)) this.store.deleteSession(sessionId);
+    // An ended session is the thing you reopen when you need to see what
+    // happened (spec: "Ended sessions | Stay in the session rail ~1h, then
+    // move to History") — keep the row, marked exited with the time it
+    // ended, instead of deleting it. session_update (not session_removed)
+    // tells viewers to keep showing it in its new, ended state.
+    const session = this.store.getSession(sessionId);
+    if (session) {
+      session.status = 'exited';
+      session.statusSource = 'process_gone';
+      session.endedAt = new Date().toISOString();
+      this.persist(session);
+    }
+    // The launch spec (which can carry prompts/env secrets) only exists to
+    // support restart of a still-meaningfully-live session; once ended,
+    // restart is a live-only affordance and should stop working, so it is
+    // not kept around for a process that is already gone.
     this.launchSpecs.delete(sessionId);
     this.hookSignals.delete(sessionId);
-    this.emit('session_removed', sessionId);
   }
 
   /** Write raw input (keystrokes) to a live session. */

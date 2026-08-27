@@ -324,20 +324,34 @@ describe('REST routes', () => {
     expect(res.status).toBe(400);
   });
 
-  it('stop removes the session and broadcasts session_removed', async () => {
+  it('stop ends the session in place (ticket 04: kept, not removed) and broadcasts session_update', async () => {
     const c = await connect();
     const { id } = await launchViaRest();
     const stopRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
     expect(await stopRes.json()).toEqual({ ok: true });
     expect(backend.killed.get('1000')).toEqual(['SIGTERM']);
 
-    const removedFrame = await c.waitFor('session_removed');
-    expect(removedFrame.sessionId).toBe(id);
-    const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
-    expect(list).toEqual([]);
+    // Launch itself already produced earlier session_update frames (status
+    // starting/working); wait specifically for the one reporting the end.
+    const isEndedUpdate = (f: ServerFrame): f is ServerFrame & { t: 'session_update' } =>
+      f.t === 'session_update' && f.session.id === id && f.session.status === 'exited';
+    const t0 = Date.now();
+    let updateFrame = c.frames.find(isEndedUpdate);
+    while (!updateFrame && Date.now() - t0 < 3000) {
+      await new Promise((r) => setTimeout(r, 10));
+      updateFrame = c.frames.find(isEndedUpdate);
+    }
+    if (!updateFrame) throw new Error('no exited session_update frame within 3000ms');
+    expect(updateFrame.session.endedAt).toBeDefined();
 
-    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
-    expect(missing.status).toBe(404);
+    // Still listed, now ended — this is what "kept, not removed" means.
+    const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id, status: 'exited' });
+
+    // Stopping again is a live-only action; the session has already ended.
+    const again = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    expect(again.status).toBe(400);
   });
 
   it('POST /api/sessions/:id/send types into managed sessions and queues for unscriptable claude', async () => {
