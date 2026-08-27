@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
 import { Terminal } from '../components/Terminal.js';
 import { ElapsedTime, sessionLabel } from './model.js';
+import { nextMountedTerminalIds, sameIds } from './terminalViews.js';
 
 interface Props {
   session: Session | null;
+  sessions: Session[];
   ws: WebSocket | null;
   wsReady: boolean;
   onError: (message: string) => void;
@@ -22,11 +24,20 @@ async function sendToSession(session: Session, text: string): Promise<{ delivere
   return body;
 }
 
-export function TerminalWorkspace({ session, ws, wsReady, onError, onFocusExternal }: Props) {
+export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal }: Props) {
   const [text, setText] = useState('');
   const [queue, setQueue] = useState<string[]>([]);
   const [sending, setSending] = useState(false);
+  const [mountedIds, setMountedIds] = useState<string[]>([]);
   useEffect(() => { setText(''); setQueue([]); }, [session?.id]);
+
+  const selectableId = session && session.origin === 'managed' && wsReady && ws ? session.id : null;
+  useEffect(() => {
+    setMountedIds((current) => {
+      const next = nextMountedTerminalIds(current, sessions, selectableId);
+      return sameIds(current, next) ? current : next;
+    });
+  }, [sessions, selectableId]);
 
   const send = async (value = text) => {
     if (!session || !value.trim() || sending) return;
@@ -55,10 +66,15 @@ export function TerminalWorkspace({ session, ws, wsReady, onError, onFocusExtern
         </header>
 
         <div className="terminal-body">
+          <div className="terminal-view-stack">
+            {mountedIds.map((id) => (
+              <div className={id === session.id ? 'terminal-view is-active' : 'terminal-view'} key={id}>
+                {ws && <Terminal sessionId={id} ws={ws} />}
+              </div>
+            ))}
+          </div>
           {session.origin === 'managed' ? (
-            wsReady && ws
-              ? <Terminal key={`${session.id}-${session.startedAt}`} sessionId={session.id} ws={ws} />
-              : <div className="terminal-loading">Terminal reconnecting…</div>
+            !mountedIds.includes(session.id) && <div className="terminal-loading">Terminal reconnecting…</div>
           ) : (
             <div className="external-terminal-overview">
               <span className="external-terminal-glyph">&gt;_</span>
