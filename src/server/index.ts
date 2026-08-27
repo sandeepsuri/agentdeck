@@ -8,6 +8,7 @@ import { PtyBackend } from '../sessions/pty.js';
 import { SessionManager } from '../sessions/manager.js';
 import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
+import { reconcileSessionsOnBoot } from './boot.js';
 import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
 import { publicSession } from './security.js';
@@ -19,13 +20,10 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
-  // Rows from a previous run are dead: managed sessions died with that
-  // server process, and anything already marked exited has no process either.
-  for (const session of store.listSessions()) {
-    if (session.origin === 'managed' || session.status === 'exited') {
-      store.deleteSession(session.id);
-    }
-  }
+  // No managed PTY survives a restart, but an ended session's row does
+  // (ticket 04) — mark still-live-looking managed rows exited rather than
+  // deleting anything. See reconcileSessionsOnBoot for the exact rules.
+  reconcileSessionsOnBoot(store);
   const manager = new SessionManager(new PtyBackend(), store);
   const vscode = new VsCodeBridge();
   const terminals = new TerminalRegistry([
