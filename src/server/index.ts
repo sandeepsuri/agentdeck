@@ -7,6 +7,8 @@ import { DiscoveryPoller } from '../discovery/poller.js';
 import { ITerm2Adapter, TerminalAppAdapter, TerminalRegistry, VsCodeAdapter, VsCodeBridge } from '../discovery/terminals/index.js';
 import { PtyBackend } from '../sessions/pty.js';
 import { SessionManager } from '../sessions/manager.js';
+import { ClaudeCliSummarizer, OpenAiSummarizer, RoutingSummarizer } from '../sessions/summarizer.js';
+import { ClaudeModelSource, ModelCatalog, OpenAiModelSource } from '../sessions/model-catalog.js';
 import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
 import { reconcileSessionsOnBoot } from './boot.js';
@@ -29,7 +31,28 @@ export async function startServer(): Promise<RunningServer> {
   // the exact rules. Must finish before any managed session can relaunch
   // and start writing into the same sessionsDir.
   await reconcileSessionsOnBoot(store, sessionsDir);
-  const manager = new SessionManager(new PtyBackend(), store, { sessionsDir });
+  // Read live off `config` (not a snapshot) so a key saved later through
+  // PATCH /api/settings (routes.ts mutates config.openaiApiKey in place)
+  // is picked up by the very next summarize()/models call, with no
+  // restart — same closure trick for both the catalog and the summarizer.
+  const getOpenAiApiKey = () => config.openaiApiKey;
+  const modelCatalog = new ModelCatalog([
+    new ClaudeModelSource(),
+    new OpenAiModelSource({ getApiKey: getOpenAiApiKey }),
+  ]);
+  const manager = new SessionManager(new PtyBackend(), store, {
+    sessionsDir,
+    // Ticket 12: one Summarizer, routing per-call by the model id's
+    // provider prefix — see RoutingSummarizer's doc comment. This is what
+    // lets the stored default or a per-run override choose between
+    // providers without swapping what SessionManager was constructed with.
+    summarizer: new RoutingSummarizer({
+      adapters: {
+        'claude-cli': new ClaudeCliSummarizer(),
+        openai: new OpenAiSummarizer({ getApiKey: getOpenAiApiKey }),
+      },
+    }),
+  });
   const vscode = new VsCodeBridge();
   const terminals = new TerminalRegistry([
     new TerminalAppAdapter(), new ITerm2Adapter(), new VsCodeAdapter(vscode),
@@ -44,7 +67,7 @@ export async function startServer(): Promise<RunningServer> {
     },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
-  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery });
+  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery, modelCatalog });
   let wss: WebSocketServer | undefined;
   let companion: RunningCompanion | undefined;
   let closing = false;
