@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { WebSocketServer } from 'ws';
 import { loadConfig } from '../config.js';
@@ -20,11 +21,15 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
+  const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than
-  // deleting anything. See reconcileSessionsOnBoot for the exact rules.
-  reconcileSessionsOnBoot(store);
-  const manager = new SessionManager(new PtyBackend(), store);
+  // deleting anything. Also compacts (ticket 09) any raw.log a hard kill
+  // left behind with no scrollback.txt. See reconcileSessionsOnBoot for
+  // the exact rules. Must finish before any managed session can relaunch
+  // and start writing into the same sessionsDir.
+  await reconcileSessionsOnBoot(store, sessionsDir);
+  const manager = new SessionManager(new PtyBackend(), store, { sessionsDir });
   const vscode = new VsCodeBridge();
   const terminals = new TerminalRegistry([
     new TerminalAppAdapter(), new ITerm2Adapter(), new VsCodeAdapter(vscode),

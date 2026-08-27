@@ -6,17 +6,28 @@ import { SessionTranscript, compactOrphanedRawLog, readScrollback } from './tran
 
 describe('SessionTranscript coalescing (in-memory, no disk assertions)', () => {
   let sessionsDir: string;
+  let created: SessionTranscript[];
   beforeEach(() => {
     vi.useFakeTimers();
     sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-transcript-'));
+    created = [];
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // flush() always spills to raw.log now (real fs, not controlled by the
+    // fake clock) — switch back to real timers before close()ing so any
+    // write still in flight (and ScrollbackRenderer's own internal timers)
+    // can actually settle, then let close() await it, before the tmpdir
+    // these tests share gets removed out from under it.
     vi.useRealTimers();
+    await Promise.all(created.map((t) => t.close()));
     fs.rmSync(sessionsDir, { recursive: true, force: true });
   });
 
-  const make = (over: Partial<ConstructorParameters<typeof SessionTranscript>[0]> = {}) =>
-    new SessionTranscript({ sessionId: 's1', sessionsDir, ...over });
+  const make = (over: Partial<ConstructorParameters<typeof SessionTranscript>[0]> = {}) => {
+    const t = new SessionTranscript({ sessionId: 's1', sessionsDir, ...over });
+    created.push(t);
+    return t;
+  };
 
   it('snapshot() replays everything appended, bounded by capacity like RingBuffer', () => {
     const t = make({ capacity: 10 });
