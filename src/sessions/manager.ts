@@ -4,10 +4,13 @@
 // one per live session and asks it to append/snapshot, but doesn't buffer.
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { defaultDataDir } from '../config.js';
 import type { Store } from '../store/index.js';
 import type { AgentMessage, AgentType, LaunchSpec, Session, SessionStatus } from '../types.js';
+import { TERMINAL_COLS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
-import { SessionTranscript, type Unsubscribe } from './transcript.js';
+import { readScrollback, SessionTranscript, type Unsubscribe } from './transcript.js';
 import { inferOutputStatus, reduceStatus, type StatusSignal } from './status.js';
 
 // Observed CLI behavior: readiness = the CLI's composer/prompt line
@@ -34,6 +37,10 @@ export interface SessionManagerOptions {
   promptFallbackMs?: number;
   /** SIGTERM → SIGKILL escalation delay */
   killGraceMs?: number;
+  /** Base dir for sessions/<id>/{raw.log,scrollback.txt}. Default: config.dataDir/sessions. */
+  sessionsDir?: string;
+  /** raw.log tail cap per session, bytes. Default: 5 MB (spec). Tests shrink this. */
+  maxRawBytes?: number;
 }
 
 export interface SessionManagerEvents {
@@ -76,6 +83,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       bufferSize: opts.bufferSize ?? 64 * 1024,
       promptFallbackMs: opts.promptFallbackMs ?? 20000,
       killGraceMs: opts.killGraceMs ?? 5000,
+      sessionsDir: opts.sessionsDir ?? path.join(defaultDataDir(), 'sessions'),
+      maxRawBytes: opts.maxRawBytes ?? 5 * 1024 * 1024,
       readiness: { ...READINESS, ...opts.readiness },
     };
   }
@@ -117,7 +126,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       env: { ...(spec.env ?? {}), AGENTDECK_SESSION_ID: session.id },
     });
     session.pid = handle.pid;
-    const transcript = new SessionTranscript({ capacity: this.opts.bufferSize });
+    const transcript = new SessionTranscript({
+      sessionId: session.id,
+      sessionsDir: this.opts.sessionsDir,
+      capacity: this.opts.bufferSize,
+      maxRawBytes: this.opts.maxRawBytes,
+      cols: TERMINAL_COLS,
+    });
     // Relay coalesced batches as the same 'output' event consumers already
     // know, so ws.ts's per-viewer routing doesn't need to change: the
     // coalescing now happens once here instead of once per raw PTY chunk.
@@ -208,15 +223,24 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }, 300);
   }
 
-  private handleExit(sessionId: string, _exitCode: number): void {
+  /**
+   * Runs on process exit (natural exit, stop(), or restart()'s internal
+   * stop()). Marks the row exited immediately, then compacts the
+   * transcript's output to scrollback (ticket 09: SessionTranscript.close()
+   * — headless replay, no model call) before removing the live entry, so
+   * `stop()`'s poll loop (and therefore SessionManager.shutdown()) does not
+   * resolve until compaction has actually finished. A session that ends
+   * while the server is shutting down must not end up unreadable; this is
+   * what makes that true, since server/index.ts's close() awaits
+   * manager.shutdown() before the process exits.
+   */
+  private async handleExit(sessionId: string, _exitCode: number): Promise<void> {
     const live = this.live.get(sessionId);
     if (live) {
       live.exited = true;
       if (live.promptTimer) clearTimeout(live.promptTimer);
       if (live.killTimer) clearTimeout(live.killTimer);
       live.unsubscribeOutput();
-      live.transcript.close();
-      this.live.delete(sessionId);
     }
     // An ended session is the thing you reopen when you need to see what
     // happened (spec: "Ended sessions | Stay in the session rail ~1h, then
@@ -236,6 +260,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     // not kept around for a process that is already gone.
     this.launchSpecs.delete(sessionId);
     this.hookSignals.delete(sessionId);
+    if (live) {
+      try {
+        await live.transcript.close();
+      } catch (error) {
+        // A compaction failure must not hang shutdown or leave the live
+        // entry stuck around; the boot-time reconciler retries any raw.log
+        // still left on disk the next time the server starts.
+        console.error(`[agentdeck] failed to compact scrollback for session ${sessionId}:`, error);
+      }
+      this.live.delete(sessionId);
+    }
   }
 
   /** Write raw input (keystrokes) to a live session. */
@@ -358,18 +393,31 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return session;
   }
 
+  /**
+   * False as soon as the process has exited, even during the brief window
+   * where handleExit is still compacting output and the live entry hasn't
+   * been removed yet — `live.exited` flips synchronously, before any
+   * `await`. isLive() reflects "has a process to talk to", not "internal
+   * bookkeeping still in flight".
+   */
   isLive(sessionId: string): boolean {
-    return this.live.has(sessionId);
+    const live = this.live.get(sessionId);
+    return live !== undefined && !live.exited;
   }
 
-  /** Stop every live session (server shutdown). */
+  /** Stored scrollback for an ended managed session; undefined if it hasn't been compacted (yet). */
+  async readScrollback(sessionId: string): Promise<string | undefined> {
+    return readScrollback(this.opts.sessionsDir, sessionId);
+  }
+
+  /** Stop every live session (server shutdown). Resolves only once every session's output is compacted. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.live.keys()].map((id) => this.stop(id)));
   }
 
   private requireLive(sessionId: string): Live {
     const live = this.live.get(sessionId);
-    if (!live) throw new Error(`session ${sessionId} has no live process`);
+    if (!live || live.exited) throw new Error(`session ${sessionId} has no live process`);
     return live;
   }
 

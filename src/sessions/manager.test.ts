@@ -1,5 +1,8 @@
 // T3 tests: SessionManager + PtyBackend against bash/cat — never the real CLIs.
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { LaunchSpec } from '../types.js';
 import { Store } from '../store/index.js';
 import { PtyBackend } from './pty.js';
@@ -17,12 +20,17 @@ function makeManager(opts: SessionManagerOptions = {}, file = 'bash') {
   const backend = new PtyBackend({
     commandFor: (spec: LaunchSpec) => ({ file, args: spec.extraArgs ?? [] }),
   });
-  const manager = new SessionManager(backend, store, opts);
+  // Every managed launch now spills output to sessionsDir/<id>/raw.log and
+  // compacts it on exit — point that at a throwaway tmpdir so tests never
+  // touch the real ~/.agentdeck.
+  const sessionsDir = opts.sessionsDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'adk-manager-sessions-'));
+  const manager = new SessionManager(backend, store, { ...opts, sessionsDir });
   cleanups.push(async () => {
     await manager.shutdown();
     store.close();
+    fs.rmSync(sessionsDir, { recursive: true, force: true });
   });
-  return { manager, store };
+  return { manager, store, sessionsDir };
 }
 
 function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
@@ -181,6 +189,52 @@ describe('SessionManager + PtyBackend', () => {
     const s = await manager.launch(spec({ extraArgs: ['-c', 'echo x'] }));
     await waitFor(() => manager.getSession(s.id)?.status === 'exited');
     await expect(manager.restart(s.id)).rejects.toThrow(/not restartable/);
+  });
+
+  it('compacts output to scrollback on exit and deletes the raw log (ticket 09)', async () => {
+    const { manager, sessionsDir } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo hello-from-session'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+    const rawLog = path.join(sessionsDir, s.id, 'raw.log');
+    const scrollback = path.join(sessionsDir, s.id, 'scrollback.txt');
+    await waitFor(() => fs.existsSync(scrollback));
+    expect(fs.existsSync(rawLog)).toBe(false); // raw deleted once converted
+    expect(fs.readFileSync(scrollback, 'utf8')).toContain('hello-from-session');
+  });
+
+  it('exposes an ended session\'s scrollback through readScrollback()', async () => {
+    const { manager, sessionsDir } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo readable-later'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+    await waitFor(() => fs.existsSync(path.join(sessionsDir, s.id, 'scrollback.txt')));
+    expect(await manager.readScrollback(s.id)).toContain('readable-later');
+  });
+
+  it('readScrollback() is undefined for a session that has not ended yet', async () => {
+    const { manager } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    expect(await manager.readScrollback(s.id)).toBeUndefined();
+  });
+
+  it('stop() does not resolve until compaction has finished (shutdown-safety)', async () => {
+    const { manager, sessionsDir } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    await manager.stop(s.id);
+    // stop() already resolved — compaction must be done, not still in flight.
+    expect(fs.existsSync(path.join(sessionsDir, s.id, 'scrollback.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(sessionsDir, s.id, 'raw.log'))).toBe(false);
+  });
+
+  it('shutdown() waits for every live session\'s compaction to finish before resolving', async () => {
+    const { manager, sessionsDir } = makeManager();
+    const a = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    const b = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    await manager.shutdown();
+    for (const id of [a.id, b.id]) {
+      expect(fs.existsSync(path.join(sessionsDir, id, 'scrollback.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(sessionsDir, id, 'raw.log'))).toBe(false);
+    }
   });
 });
 
