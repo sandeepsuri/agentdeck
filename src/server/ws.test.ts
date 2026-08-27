@@ -499,6 +499,38 @@ describe('loopback-only enforcement', () => {
 });
 
 describe('WS protocol', () => {
+  it('keeps replay, output, and input isolated when one viewer attaches multiple sessions', async () => {
+    const first = await launchViaRest();
+    const second = await launchViaRest();
+    backend.emitOutput(first.pid, 'first replay');
+    backend.emitOutput(second.pid, 'second replay');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const client = await connect();
+    client.frames = [];
+    client.send({ t: 'attach', sessionId: first.id });
+    client.send({ t: 'attach', sessionId: second.id });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(client.frames.filter((frame) => frame.t === 'replay')).toEqual([
+      { t: 'replay', sessionId: first.id, data: 'first replay' },
+      { t: 'replay', sessionId: second.id, data: 'second replay' },
+    ]);
+
+    backend.emitOutput(first.pid, 'first live');
+    backend.emitOutput(second.pid, 'second live');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(client.frames.filter((frame) => frame.t === 'output')).toEqual([
+      { t: 'output', sessionId: first.id, data: 'first live' },
+      { t: 'output', sessionId: second.id, data: 'second live' },
+    ]);
+
+    client.send({ t: 'input', sessionId: first.id, data: 'first input\r' });
+    client.send({ t: 'input', sessionId: second.id, data: 'second input\r' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(backend.written.get(String(first.pid))).toEqual(['first input\r']);
+    expect(backend.written.get(String(second.pid))).toEqual(['second input\r']);
+  });
+
   it('attach replays the ring buffer', async () => {
     const { id, pid } = await launchViaRest();
     backend.emitOutput(pid, 'earlier output\r\n');

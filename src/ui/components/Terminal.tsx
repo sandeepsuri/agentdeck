@@ -92,10 +92,10 @@ export function Terminal({ ws, sessionId }: Props) {
 
     const onMessage = (ev: MessageEvent) => {
       const frame = JSON.parse(String(ev.data)) as ServerFrame;
-      if (frame.t === 'replay') {
+      if (frame.t === 'replay' && frame.sessionId === sessionId) {
         term.reset();
         term.write(frame.data);
-      } else if (frame.t === 'output') {
+      } else if (frame.t === 'output' && frame.sessionId === sessionId) {
         term.write(frame.data);
       }
     };
@@ -105,13 +105,13 @@ export function Terminal({ ws, sessionId }: Props) {
     if (ws.readyState === WebSocket.OPEN) attach();
     else ws.addEventListener('open', attach, { once: true });
 
-    const dataDisposable = term.onData((data) => send({ t: 'input', data }));
+    const dataDisposable = term.onData((data) => send({ t: 'input', sessionId, data }));
 
     return () => {
       dataDisposable.dispose();
       ws.removeEventListener('message', onMessage);
       ws.removeEventListener('open', attach);
-      send({ t: 'detach' });
+      send({ t: 'detach', sessionId });
       term.dispose();
       if (terminalRef.current === term) terminalRef.current = null;
     };

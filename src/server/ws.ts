@@ -1,5 +1,6 @@
 // WebSocket terminal bridge (T4): wires SessionManager events to attached
-// sockets. Multiple viewers per session; a socket views one session at a time.
+// sockets. Multiple viewers per session; a socket may keep multiple sessions
+// attached, with every terminal frame scoped by session id.
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
@@ -29,8 +30,8 @@ export function attachWs(
       isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin, req.headers.host),
   });
 
-  // socket → sessionId it's viewing
-  const viewing = new Map<WebSocket, string>();
+  // socket → sessionIds it is viewing
+  const viewing = new Map<WebSocket, Set<string>>();
   const uiPresence = new Map<WebSocket, boolean>();
 
   const send = (ws: WebSocket, frame: ServerFrame) => {
@@ -53,8 +54,8 @@ export function attachWs(
   };
 
   manager.on('output', (sessionId, data) => {
-    for (const [ws, sid] of viewing) {
-      if (sid === sessionId) send(ws, { t: 'output', data });
+    for (const [ws, sessionIds] of viewing) {
+      if (sessionIds.has(sessionId)) send(ws, { t: 'output', sessionId, data });
     }
     // Mission Control tiles are not "attached" viewers — push a lightweight
     // preview chunk to every socket so grid tiles update live without each
@@ -69,8 +70,9 @@ export function attachWs(
   });
 
   manager.on('session_removed', (sessionId) => {
-    for (const [ws, sid] of viewing) {
-      if (sid === sessionId) viewing.delete(ws);
+    for (const [ws, sessionIds] of viewing) {
+      sessionIds.delete(sessionId);
+      if (sessionIds.size === 0) viewing.delete(ws);
     }
     for (const ws of wss.clients) send(ws, { t: 'session_removed', sessionId });
     broadcastCompanionSnapshot();
@@ -108,16 +110,29 @@ export function attachWs(
       switch (frame.t) {
         case 'attach': {
           if (!manager.getSession(frame.sessionId)) return;
-          viewing.set(ws, frame.sessionId);
-          send(ws, { t: 'replay', data: manager.getBuffer(frame.sessionId) });
+          const sessionIds = viewing.get(ws) ?? new Set<string>();
+          sessionIds.add(frame.sessionId);
+          viewing.set(ws, sessionIds);
+          send(ws, { t: 'replay', sessionId: frame.sessionId, data: manager.getBuffer(frame.sessionId) });
           break;
         }
-        case 'detach':
-          viewing.delete(ws);
+        case 'detach': {
+          if (frame.sessionId === undefined) {
+            viewing.delete(ws);
+          } else {
+            const sessionIds = viewing.get(ws);
+            sessionIds?.delete(frame.sessionId);
+            if (sessionIds?.size === 0) viewing.delete(ws);
+          }
           break;
+        }
         case 'input': {
-          const sid = viewing.get(ws);
-          if (sid !== undefined && manager.isLive(sid)) manager.write(sid, frame.data);
+          const sessionIds = viewing.get(ws);
+          const sessionId = frame.sessionId
+            ?? (sessionIds?.size === 1 ? [...sessionIds][0] : undefined);
+          if (sessionId !== undefined && sessionIds?.has(sessionId) && manager.isLive(sessionId)) {
+            manager.write(sessionId, frame.data);
+          }
           break;
         }
         case 'vscode_register':
