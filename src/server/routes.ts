@@ -565,6 +565,56 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return { sessionId: id, scrollback };
   });
 
+  // Ticket 11: wrap-up. Manual-only by design (spec: "Manual summary
+  // trigger only" — automatic summarization on exit would fire N summaries
+  // at once when the dev server stops, the exact case where a summary is
+  // least wanted). This route is the *only* caller of manager.summarize()
+  // in the whole server — it is never invoked from handleExit, shutdown(),
+  // or boot reconciliation.
+  app.post('/api/sessions/:id/summarize', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'summarization is only available for managed sessions' });
+    }
+    if (manager.isLive(id)) {
+      return reply.code(400).send({ error: 'session has not ended yet' });
+    }
+    const body = req.body as { model?: unknown } | null;
+    if (body?.model !== undefined && typeof body.model !== 'string') {
+      return reply.code(400).send({ error: 'model must be a string' });
+    }
+    try {
+      const summary = await manager.summarize(id, body?.model ? { model: body.model } : {});
+      return { sessionId: id, summary };
+    } catch (error) {
+      // Covers both validation-shaped failures (no scrollback yet) and
+      // subprocess failures (claude -p missing/erroring/timing out) — either
+      // way the scrollback and any previous summary are untouched (ticket
+      // 11: manager.summarize() only writes after the call succeeds), so
+      // reporting the failure here is safe and the session stays usable.
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Read path for the stored summary, deliberately mirroring the scrollback
+  // route's shape (dedicated GET endpoint, not folded into the session
+  // object) rather than adding a `summary` field to Session — same
+  // rationale as scrollback: the summary lives as a file
+  // (sessions/<id>/summary.md), not in the row.
+  app.get('/api/sessions/:id/summary', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'summary is only available for managed sessions' });
+    }
+    const summary = await manager.readSummary(id);
+    if (summary === undefined) return reply.code(404).send({ error: 'no summary has been generated for this session' });
+    return { sessionId: id, summary, summaryGeneratedAt: session.summaryGeneratedAt };
+  });
+
   app.post('/api/sessions/:id/restart', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
