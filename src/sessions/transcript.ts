@@ -189,11 +189,21 @@ export class SessionTranscript {
     this.spillToDisk();
   }
 
-  /** Best-effort live disk spill; a failure here must never crash the session. */
+  /**
+   * Best-effort live disk spill; a failure here must never crash the
+   * session. Chained onto `pendingWrite` rather than fired independently —
+   * two concurrent `fsp.writeFile` calls to the same path can complete out
+   * of order (each is its own open/write/close), which could leave
+   * raw.log holding a stale, smaller snapshot than the one already
+   * flushed. Chaining makes writes strictly sequential, so the file on
+   * disk always reflects the most recently queued snapshot once settled.
+   */
   private spillToDisk(): void {
     const data = this.diskTail.snapshot();
-    this.pendingWrite = fsp.writeFile(this.rawLog, data, 'utf8').catch((error: unknown) => {
-      console.error(`[agentdeck] failed to spill raw.log for session at ${this.dir}:`, error);
-    });
+    this.pendingWrite = this.pendingWrite
+      .then(() => fsp.writeFile(this.rawLog, data, 'utf8'))
+      .catch((error: unknown) => {
+        console.error(`[agentdeck] failed to spill raw.log for session at ${this.dir}:`, error);
+      });
   }
 }
