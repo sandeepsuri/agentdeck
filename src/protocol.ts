@@ -21,8 +21,8 @@ export interface VsCodeTerminalFrame {
 
 export type ClientFrame =
   | { t: 'attach'; sessionId: string }
-  | { t: 'input'; sessionId?: string; data: string }
-  | { t: 'detach'; sessionId?: string }
+  | { t: 'input'; sessionId: string; data: string }
+  | { t: 'detach'; sessionId: string }
   | { t: 'vscode_register'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_terminals'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_result'; requestId: string; ok: boolean; error?: string }
@@ -74,16 +74,13 @@ export function parseClientFrame(raw: string): ClientFrame | null {
         : null;
     case 'input':
       return typeof f.data === 'string' && f.data.length <= MAX_INPUT_LENGTH
-        && (f.sessionId === undefined
-          || (typeof f.sessionId === 'string' && f.sessionId.length <= MAX_ID_LENGTH))
-        ? { t: 'input', data: f.data, ...(typeof f.sessionId === 'string' ? { sessionId: f.sessionId } : {}) }
+        && typeof f.sessionId === 'string' && f.sessionId.length <= MAX_ID_LENGTH
+        ? { t: 'input', sessionId: f.sessionId, data: f.data }
         : null;
     case 'detach':
-      return f.sessionId === undefined
-        ? { t: 'detach' }
-        : typeof f.sessionId === 'string' && f.sessionId.length <= MAX_ID_LENGTH
-          ? { t: 'detach', sessionId: f.sessionId }
-          : null;
+      return typeof f.sessionId === 'string' && f.sessionId.length <= MAX_ID_LENGTH
+        ? { t: 'detach', sessionId: f.sessionId }
+        : null;
     case 'vscode_register':
     case 'vscode_terminals': {
       const terminals = parseVsCodeTerminals(f.terminals);

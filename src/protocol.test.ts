@@ -24,7 +24,9 @@ describe('VS Code protocol frames', () => {
       t: 'vscode_register', windowId: 'x'.repeat(201), terminals: [],
     }))).toBeNull();
     expect(parseClientFrame(JSON.stringify({ t: 'attach', sessionId: 'x'.repeat(201) }))).toBeNull();
-    expect(parseClientFrame(JSON.stringify({ t: 'input', data: 'x'.repeat(64 * 1024 + 1) }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'input', sessionId: 'session-1', data: 'x'.repeat(64 * 1024 + 1),
+    }))).toBeNull();
     expect(parseClientFrame(JSON.stringify({
       t: 'vscode_result', requestId: 'request-1', ok: false, error: 'x'.repeat(4097),
     }))).toBeNull();
@@ -34,6 +36,15 @@ describe('VS Code protocol frames', () => {
     expect(parseClientFrame(JSON.stringify({ t: 'ui_presence', visible: true })))
       .toEqual({ t: 'ui_presence', visible: true });
     expect(parseClientFrame(JSON.stringify({ t: 'ui_presence', visible: 'yes' }))).toBeNull();
+  });
+
+  it('requires terminal input and detach frames to identify their session', () => {
+    expect(parseClientFrame(JSON.stringify({ t: 'input', sessionId: 'session-1', data: 'ls\r' })))
+      .toEqual({ t: 'input', sessionId: 'session-1', data: 'ls\r' });
+    expect(parseClientFrame(JSON.stringify({ t: 'detach', sessionId: 'session-1' })))
+      .toEqual({ t: 'detach', sessionId: 'session-1' });
+    expect(parseClientFrame(JSON.stringify({ t: 'input', data: 'ls\r' }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({ t: 'detach' }))).toBeNull();
   });
 
   it('no longer recognizes resize frames — terminal size is pinned, not viewer-controlled', () => {

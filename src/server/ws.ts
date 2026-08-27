@@ -117,21 +117,15 @@ export function attachWs(
           break;
         }
         case 'detach': {
-          if (frame.sessionId === undefined) {
-            viewing.delete(ws);
-          } else {
-            const sessionIds = viewing.get(ws);
-            sessionIds?.delete(frame.sessionId);
-            if (sessionIds?.size === 0) viewing.delete(ws);
-          }
+          const sessionIds = viewing.get(ws);
+          sessionIds?.delete(frame.sessionId);
+          if (sessionIds?.size === 0) viewing.delete(ws);
           break;
         }
         case 'input': {
           const sessionIds = viewing.get(ws);
-          const sessionId = frame.sessionId
-            ?? (sessionIds?.size === 1 ? [...sessionIds][0] : undefined);
-          if (sessionId !== undefined && sessionIds?.has(sessionId) && manager.isLive(sessionId)) {
-            manager.write(sessionId, frame.data);
+          if (sessionIds?.has(frame.sessionId) && manager.isLive(frame.sessionId)) {
+            manager.write(frame.sessionId, frame.data);
           }
           break;
         }

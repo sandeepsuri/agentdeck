@@ -553,7 +553,7 @@ describe('WS protocol', () => {
     expect((await b.waitFor('output')).data).toBe('live-data');
     expect(unattached.frames.filter((f) => f.t === 'output')).toHaveLength(0);
 
-    a.send({ t: 'detach' });
+    a.send({ t: 'detach', sessionId: id });
     await new Promise((r) => setTimeout(r, 50));
     backend.emitOutput(pid, 'after-detach');
     expect((await b.waitFor('output', 1000)) /* b still gets it */).toBeTruthy();
@@ -565,7 +565,7 @@ describe('WS protocol', () => {
     const c = await connect();
     c.send({ t: 'attach', sessionId: id });
     await c.waitFor('replay');
-    c.send({ t: 'input', data: 'ls\r' });
+    c.send({ t: 'input', sessionId: id, data: 'ls\r' });
     // Terminal size is pinned (Stage 2): a resize frame from a viewer must
     // never reach backend.resize, no matter what the client sends.
     c.send({ t: 'resize', cols: 120, rows: 40 });
