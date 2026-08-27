@@ -100,6 +100,7 @@ class Client {
 let backend: FakeBackend;
 let store: Store;
 let manager: SessionManager;
+let sessionsDir: string;
 let app: ReturnType<typeof buildApp>;
 let wss: WebSocketServer;
 let port: number;
@@ -112,7 +113,11 @@ const clients: Client[] = [];
 beforeEach(async () => {
   backend = new FakeBackend();
   store = new Store(':memory:');
-  manager = new SessionManager(backend, store);
+  // POST /api/sessions launches through the real SessionManager below, and
+  // every launch now spills output to sessionsDir/<id>/raw.log — point that
+  // at a throwaway tmpdir so these tests never touch the real ~/.agentdeck.
+  sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-sessions-'));
+  manager = new SessionManager(backend, store, { sessionsDir });
   vscode = new VsCodeBridge();
   vscodeAdapter = new FakeVsCodeAdapter();
   installVsCode = vi.fn(async () => ({ installed: true as const, reloadRequired: true as const }));
@@ -142,7 +147,12 @@ afterEach(async () => {
   while (clients.length) clients.pop()?.close();
   await closeWs(wss);
   await app.close();
+  // Stop (and compact) any sessions still live from the test before wiping
+  // sessionsDir — otherwise a still-in-flight raw.log spill can race the
+  // directory removal below.
+  await manager.shutdown();
   store.close();
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
 });
 
 async function connect(): Promise<Client> {
