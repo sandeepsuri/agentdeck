@@ -11,6 +11,8 @@ import type { AgentMessage, AgentType, LaunchSpec, Session, SessionStatus } from
 import { TERMINAL_COLS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
 import { readScrollback, SessionTranscript, type Unsubscribe } from './transcript.js';
+import { readSummary, writeSummary } from './summary.js';
+import { ClaudeCliSummarizer, type Summarizer, type SummarizeOptions } from './summarizer.js';
 import { inferOutputStatus, reduceStatus, type StatusSignal } from './status.js';
 
 // Observed CLI behavior: readiness = the CLI's composer/prompt line
@@ -41,6 +43,14 @@ export interface SessionManagerOptions {
   sessionsDir?: string;
   /** raw.log tail cap per session, bytes. Default: 5 MB (spec). Tests shrink this. */
   maxRawBytes?: number;
+  /**
+   * Provider used by summarize() (ticket 11). Default: ClaudeCliSummarizer,
+   * a `claude -p` subprocess adapter. Tests must always override this with
+   * a fake — summarize() is the only thing that can invoke it, and it is
+   * only ever reached via the explicit POST /api/sessions/:id/summarize
+   * route, never automatically.
+   */
+  summarizer?: Summarizer;
 }
 
 export interface SessionManagerEvents {
@@ -85,6 +95,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       killGraceMs: opts.killGraceMs ?? 5000,
       sessionsDir: opts.sessionsDir ?? path.join(defaultDataDir(), 'sessions'),
       maxRawBytes: opts.maxRawBytes ?? 5 * 1024 * 1024,
+      summarizer: opts.summarizer ?? new ClaudeCliSummarizer(),
       readiness: { ...READINESS, ...opts.readiness },
     };
   }
@@ -408,6 +419,45 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /** Stored scrollback for an ended managed session; undefined if it hasn't been compacted (yet). */
   async readScrollback(sessionId: string): Promise<string | undefined> {
     return readScrollback(this.opts.sessionsDir, sessionId);
+  }
+
+  /**
+   * Generate (or regenerate) a wrap-up summary for an ended managed
+   * session, from its stored scrollback. Manual, explicit action only —
+   * this method is reached from exactly one place, the
+   * POST /api/sessions/:id/summarize route (ticket 11). It is never called
+   * from handleExit, shutdown(), boot reconciliation, or any timer/poll
+   * loop; grep the class for callers of `this.summarize(` before adding
+   * one anywhere else.
+   *
+   * The summarizer call happens before anything on disk or in the store is
+   * touched, so a failure here leaves both the previous summary.md (if
+   * any) and scrollback.txt completely intact — only a success replaces
+   * the stored summary and its timestamp.
+   */
+  async summarize(sessionId: string, opts: SummarizeOptions = {}): Promise<string> {
+    const session = this.store.getSession(sessionId);
+    if (!session) throw new Error(`no such session: ${sessionId}`);
+    if (session.origin !== 'managed') {
+      throw new Error('summarization is only available for managed sessions');
+    }
+    if (this.isLive(sessionId)) {
+      throw new Error('session has not ended yet');
+    }
+    const scrollback = await readScrollback(this.opts.sessionsDir, sessionId);
+    if (scrollback === undefined) {
+      throw new Error('no scrollback is available to summarize');
+    }
+    const summary = await this.opts.summarizer.summarize(scrollback, opts);
+    await writeSummary(this.opts.sessionsDir, sessionId, summary);
+    session.summaryGeneratedAt = new Date().toISOString();
+    this.persist(session);
+    return summary;
+  }
+
+  /** Stored wrap-up summary for a session; undefined if none has been generated (yet). */
+  async readSummary(sessionId: string): Promise<string | undefined> {
+    return readSummary(this.opts.sessionsDir, sessionId);
   }
 
   /** Stop every live session (server shutdown). Resolves only once every session's output is compacted. */
