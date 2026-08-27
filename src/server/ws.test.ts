@@ -364,6 +364,39 @@ describe('REST routes', () => {
     expect(again.status).toBe(400);
   });
 
+  it('ticket 09: an ended session is readable via GET .../scrollback, and it survives a fresh readScrollback() read (independent of the live manager)', async () => {
+    const { id, pid } = await launchViaRest();
+    backend.emitOutput(pid, 'agent output before exit\r\n');
+    await new Promise((r) => setTimeout(r, 30)); // let the coalescing timer spill it to raw.log
+
+    // POST /stop already awaits manager.stop(), which now awaits compaction
+    // (ticket 09) — by the time this resolves, scrollback.txt exists.
+    const stopRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    expect(stopRes.status).toBe(200);
+
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/scrollback`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { sessionId: string; scrollback: string };
+    expect(body.sessionId).toBe(id);
+    expect(body.scrollback).toContain('agent output before exit');
+
+    // Reading it back through a brand-new SessionTranscript helper call
+    // (not through the live `manager`) is the same thing a restarted server
+    // would do — scrollback survives independent of any in-memory state.
+    const { readScrollback } = await import('../sessions/transcript.js');
+    expect(await readScrollback(sessionsDir, id)).toContain('agent output before exit');
+  });
+
+  it('scrollback 404s for a session that has never been launched, and for a still-live one', async () => {
+    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/does-not-exist/scrollback`);
+    expect(missing.status).toBe(404);
+
+    const { id } = await launchViaRest();
+    const stillLive = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/scrollback`);
+    expect(stillLive.status).toBe(404);
+    expect((await stillLive.json()).error).toMatch(/still running/);
+  });
+
   it('POST /api/sessions/:id/send types into managed sessions and queues for unscriptable claude', async () => {
     const { id } = await launchViaRest();
     const send = (target: string, text: string) => fetch(`http://127.0.0.1:${port}/api/sessions/${target}/send`, {

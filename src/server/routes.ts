@@ -541,6 +541,30 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return { ok: true }; // the row is kept, marked ended
   });
 
+  // Ticket 09: reopening an ended managed session. There is no WS path for
+  // this — attach/replay only serve a live transcript snapshot, and an
+  // ended session has no live PTY behind it — so a REST read of the
+  // compacted scrollback.txt is the natural fit. History is managed-only
+  // per the spec's non-goals (external sessions have no PTY, so no stored
+  // bytes to read).
+  app.get('/api/sessions/:id/scrollback', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'scrollback is only available for managed sessions' });
+    }
+    const scrollback = await manager.readScrollback(id);
+    if (scrollback === undefined) {
+      return reply.code(404).send({
+        error: manager.isLive(id)
+          ? 'session is still running; scrollback is produced once it ends'
+          : 'no scrollback is available for this session',
+      });
+    }
+    return { sessionId: id, scrollback };
+  });
+
   app.post('/api/sessions/:id/restart', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
