@@ -13,6 +13,15 @@ export interface AgentDeckConfig {
   pollIntervalMs: number;
   /** Where app state lives (config.json, agentdeck.db). */
   dataDir: string;
+  /**
+   * OpenAI API key used by the summary model catalog/picker (ticket 12).
+   * Lives only in config.json at owner-only (0600) permissions, written via
+   * saveConfig() below. Never written to SQLite (Store has no column for
+   * it), never included in a REST response or WebSocket frame, and never
+   * logged. Undefined means "not configured" — OpenAI models then show as
+   * visible-but-disabled in the picker with a hint to configure one.
+   */
+  openaiApiKey?: string;
 }
 
 export function defaultDataDir(): string {
@@ -71,5 +80,41 @@ export function loadConfig(configPath?: string): AgentDeckConfig {
   if (typeof o.dataDir === 'string' && o.dataDir.length > 0) {
     cfg.dataDir = expandTilde(o.dataDir);
   }
+  if (typeof o.openaiApiKey === 'string' && o.openaiApiKey.length > 0) {
+    cfg.openaiApiKey = o.openaiApiKey;
+  }
   return cfg;
+}
+
+/**
+ * Write a partial patch into ~/.agentdeck/config.json (or `configPath` in
+ * tests), merged onto whatever raw JSON is already on disk. Unlike
+ * loadConfig()'s in-memory result, this never bakes computed defaults
+ * (dataDir, projectsDir, ...) into the file — only the keys actually
+ * present in `patch` are touched, and a key set to `undefined` is removed.
+ * This is currently the only write path into config.json; it exists for
+ * ticket 12's API key storage. Follows Store's constructor pattern
+ * (src/store/index.ts) for owner-only (0600) file permissions: create the
+ * file at 0600 before writing, and re-chmod even if it already existed
+ * with looser permissions.
+ */
+export function saveConfig(patch: Partial<AgentDeckConfig>, configPath?: string): void {
+  const file = configPath ?? path.join(defaultDataDir(), 'config.json');
+  let existing: Record<string, unknown> = {};
+  try {
+    const raw: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (typeof raw === 'object' && raw !== null) existing = raw as Record<string, unknown>;
+  } catch {
+    // missing or unparseable — start fresh, same permissive stance as loadConfig
+  }
+  const merged: Record<string, unknown> = { ...existing };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.closeSync(fs.openSync(file, 'a', 0o600));
+  fs.chmodSync(file, 0o600);
+  fs.writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
 }
