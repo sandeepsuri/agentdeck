@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
 import type { ServerFrame } from '../protocol.js';
 import { LaunchModal } from './components/LaunchModal.js';
+import { SettingsModal } from './components/SettingsModal.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
 import { type ThemePreference, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
 import { GridView } from './workspace/GridView.js';
+import { HistoryView } from './workspace/HistoryView.js';
+import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { OperationsView } from './workspace/OperationsView.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
@@ -59,6 +62,7 @@ export function App() {
   const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'operations');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showLaunch, setShowLaunch] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
@@ -66,10 +70,29 @@ export function App() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
   const wsRef = useRef<WebSocket | null>(null);
   const requestedSessionIdRef = useRef(initialNavigation.sessionId);
+  const historyWitnessRef = useRef(INITIAL_HISTORY_WITNESS_STATE);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
   const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
+
+  // Ticket 10: an ended managed session stays in the rail ~1h, then moves to
+  // History. `historyWitnessRef` is advanced synchronously during render
+  // (not from a useEffect) so a just-witnessed live->ended transition is
+  // recorded in the same render it's observed — an effect-based update
+  // would lag one render, letting the session flash into History before
+  // settling back into the rail. `advanceHistoryWitnessState` is idempotent
+  // for a stable `sessions` snapshot, so re-running it on every render
+  // (e.g. the ticking `historyNow` below) is safe. The tick is coarse
+  // (minutes, not the Stage-1 1 Hz global re-render this app removed) and
+  // lives here because the split needs the full `sessions` list, which App
+  // already owns.
+  historyWitnessRef.current = advanceHistoryWitnessState(historyWitnessRef.current, sessions, Date.now());
+  const historyNow = useNow(60_000);
+  const { rail: railSessions, history: historySessions } = useMemo(
+    () => splitSessionsForRail(sessions, historyNow, historyWitnessRef.current.witnessedEndedAtById),
+    [sessions, historyNow],
+  );
 
   const upsertSession = useCallback((session: Session) => setSessions((current) => {
     const index = current.findIndex((item) => item.id === session.id);
@@ -221,12 +244,13 @@ export function App() {
       <header className="app-topbar">
         <div className="app-brand"><span className="brand-mark"><i /></span><strong>AgentDeck</strong></div>
         <nav className="workspace-tabs" aria-label="Workspace views">
-          {WORKSPACE_VIEWS.map((item) => <button className={view === item.id ? 'is-active' : ''} key={item.id} onClick={() => setView(item.id)} type="button">{item.label}{item.id === 'changes' && changeCount > 0 && <span>{changeCount}</span>}</button>)}
+          {WORKSPACE_VIEWS.map((item) => <button className={view === item.id ? 'is-active' : ''} key={item.id} onClick={() => setView(item.id)} type="button">{item.label}{item.id === 'changes' && changeCount > 0 && <span>{changeCount}</span>}{item.id === 'history' && historySessions.length > 0 && <span>{historySessions.length}</span>}</button>)}
         </nav>
         <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Jump to session, file, or action…</strong><kbd>⌘K</kbd></button>
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
+          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — summary model default and API key" type="button">⚙</button>
           <button className="button compact-button" onClick={() => void installHooks()} type="button">Install hooks</button>
           <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button">Launch agent <kbd>⌘L</kbd></button>
         </div>
@@ -235,13 +259,14 @@ export function App() {
       {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
 
       <div className="app-body">
-        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selectedId={selectedId} sessions={sessions} />
+        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selectedId={selectedId} sessions={railSessions} />
         <main className="workspace-stage">
           <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}><OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} /></div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
           <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
+          <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView repos={repos} sessions={historySessions} /></div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`}>
           <button
@@ -271,6 +296,7 @@ export function App() {
 
       <CommandPalette onClose={() => setPaletteOpen(false)} onLaunch={() => setShowLaunch(true)} onSelectSession={(session) => { selectSession(session); setView('operations'); }} onView={setView} open={paletteOpen} repos={repos} sessions={sessions} />
       {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );
 }

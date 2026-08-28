@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
-import { expandTilde } from '../config.js';
+import { expandTilde, saveConfig as saveConfigFile } from '../config.js';
+import { DEFAULT_MODEL_SETTING_KEY, type ModelCatalog } from '../sessions/model-catalog.js';
 import { checkoutBranch, scanRepos, git } from '../git/scan.js';
 import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
 import {
@@ -41,6 +42,8 @@ const MAX_EXTRA_ARG_LENGTH = 16 * 1024;
 const MAX_ENV_VARS = 100;
 const MAX_ENV_VALUE_LENGTH = 64 * 1024;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_MODEL_ID_LENGTH = 200;
+const MAX_API_KEY_LENGTH = 4096;
 const execFileAsync = promisify(execFile);
 
 async function readBusTail(repoPath: string) {
@@ -188,6 +191,10 @@ export interface RouteContext {
   discovery?: DiscoveryPoller;
   installVsCode?: () => Promise<VsCodeInstallResult>;
   publish?: GitPublishService;
+  /** Ticket 12: the runtime-fetched, allowlist-filtered, cached model catalog. Undefined only in tests that don't exercise it — GET /api/models degrades to an empty list rather than erroring. */
+  modelCatalog?: ModelCatalog;
+  /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
+  saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -202,6 +209,58 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       attention,
       agents: deriveCompanionAgents(sessions, events, attention),
       uiVisible: false,
+    };
+  });
+
+  // Ticket 12: the summary model picker's data source. ModelCatalog itself
+  // owns the runtime fetch, allowlist filter, and cache; this route is a
+  // thin pass-through so a new provider never needs a route change.
+  app.get('/api/models', async () => ctx.modelCatalog ? ctx.modelCatalog.list() : []);
+
+  // Ticket 12 settings: the default summary model (store.setSetting, a
+  // plain app setting) and the OpenAI API key (config.json at 0600, never
+  // SQLite). GET never echoes the key — only whether one is configured.
+  app.get('/api/settings', async () => ({
+    defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
+    openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
+  }));
+
+  app.patch('/api/settings', async (req, reply) => {
+    if (typeof req.body !== 'object' || req.body === null) {
+      return reply.code(400).send({ error: 'body must be a JSON object' });
+    }
+    const { defaultModel, openaiApiKey } = req.body as { defaultModel?: unknown; openaiApiKey?: unknown };
+    if (defaultModel !== undefined) {
+      if (typeof defaultModel !== 'string' || defaultModel.length === 0 || defaultModel.length > MAX_MODEL_ID_LENGTH) {
+        return reply.code(400).send({ error: 'defaultModel must be a non-empty string' });
+      }
+      ctx.store?.setSetting(DEFAULT_MODEL_SETTING_KEY, defaultModel);
+    }
+    if (openaiApiKey !== undefined) {
+      if (openaiApiKey !== null && typeof openaiApiKey !== 'string') {
+        return reply.code(400).send({ error: 'openaiApiKey must be a string or null' });
+      }
+      if (typeof openaiApiKey === 'string' && openaiApiKey.length > MAX_API_KEY_LENGTH) {
+        return reply.code(400).send({ error: 'openaiApiKey is too long' });
+      }
+      // Empty string or null clears the key. Never logged, never included
+      // in this or any other response body — only the presence boolean is.
+      const trimmed = typeof openaiApiKey === 'string' ? openaiApiKey.trim() : '';
+      const value = trimmed.length > 0 ? trimmed : undefined;
+      ctx.config.openaiApiKey = value;
+      try {
+        (ctx.saveConfig ?? saveConfigFile)({ openaiApiKey: value });
+      } catch (error) {
+        return reply.code(400).send({ error: `Failed to save settings: ${error instanceof Error ? error.message : String(error)}` });
+      }
+      // A newly-configured (or cleared) key changes what OpenAI's model
+      // source can report — don't make the picker wait out the cache TTL.
+      ctx.modelCatalog?.invalidate();
+    }
+    return {
+      ok: true,
+      defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
+      openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
     };
   });
 
@@ -533,8 +592,86 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.post('/api/sessions/:id/stop', async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!manager.getSession(id)) return reply.code(404).send({ error: 'no such session' });
+    // Stopping only makes sense for a live process; an already-ended
+    // session has nothing left to stop (ticket 04: live-only actions are
+    // unavailable once ended).
+    if (!manager.isLive(id)) return reply.code(400).send({ error: 'session has already ended' });
     await manager.stop(id);
-    return { ok: true }; // the session row is removed on exit
+    return { ok: true }; // the row is kept, marked ended
+  });
+
+  // Ticket 09: reopening an ended managed session. There is no WS path for
+  // this — attach/replay only serve a live transcript snapshot, and an
+  // ended session has no live PTY behind it — so a REST read of the
+  // compacted scrollback.txt is the natural fit. History is managed-only
+  // per the spec's non-goals (external sessions have no PTY, so no stored
+  // bytes to read).
+  app.get('/api/sessions/:id/scrollback', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'scrollback is only available for managed sessions' });
+    }
+    const scrollback = await manager.readScrollback(id);
+    if (scrollback === undefined) {
+      return reply.code(404).send({
+        error: manager.isLive(id)
+          ? 'session is still running; scrollback is produced once it ends'
+          : 'no scrollback is available for this session',
+      });
+    }
+    return { sessionId: id, scrollback };
+  });
+
+  // Ticket 11: wrap-up. Manual-only by design (spec: "Manual summary
+  // trigger only" — automatic summarization on exit would fire N summaries
+  // at once when the dev server stops, the exact case where a summary is
+  // least wanted). This route is the *only* caller of manager.summarize()
+  // in the whole server — it is never invoked from handleExit, shutdown(),
+  // or boot reconciliation.
+  app.post('/api/sessions/:id/summarize', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'summarization is only available for managed sessions' });
+    }
+    if (manager.isLive(id)) {
+      return reply.code(400).send({ error: 'session has not ended yet' });
+    }
+    const body = req.body as { model?: unknown } | null;
+    if (body?.model !== undefined && typeof body.model !== 'string') {
+      return reply.code(400).send({ error: 'model must be a string' });
+    }
+    try {
+      const summary = await manager.summarize(id, body?.model ? { model: body.model } : {});
+      return { sessionId: id, summary };
+    } catch (error) {
+      // Covers both validation-shaped failures (no scrollback yet) and
+      // subprocess failures (claude -p missing/erroring/timing out) — either
+      // way the scrollback and any previous summary are untouched (ticket
+      // 11: manager.summarize() only writes after the call succeeds), so
+      // reporting the failure here is safe and the session stays usable.
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Read path for the stored summary, deliberately mirroring the scrollback
+  // route's shape (dedicated GET endpoint, not folded into the session
+  // object) rather than adding a `summary` field to Session — same
+  // rationale as scrollback: the summary lives as a file
+  // (sessions/<id>/summary.md), not in the row.
+  app.get('/api/sessions/:id/summary', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'summary is only available for managed sessions' });
+    }
+    const summary = await manager.readSummary(id);
+    if (summary === undefined) return reply.code(404).send({ error: 'no summary has been generated for this session' });
+    return { sessionId: id, summary, summaryGeneratedAt: session.summaryGeneratedAt };
   });
 
   app.post('/api/sessions/:id/restart', async (req, reply) => {

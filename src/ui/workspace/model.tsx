@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import type { Session, SessionStatus } from '../../types.js';
+import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals';
+export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'operations', label: 'Operations' },
   { id: 'terminal', label: 'Terminal' },
   { id: 'changes', label: 'Changes' },
   { id: 'grid', label: 'Grid' },
+  { id: 'history', label: 'History' },
 ];
 
 export const STATUS_LABELS: Record<SessionStatus, string> = {
@@ -20,12 +21,32 @@ export const STATUS_LABELS: Record<SessionStatus, string> = {
   unknown: 'Unknown',
 };
 
+/**
+ * True for a managed session whose process has exited. It stays listed
+ * (ticket 04: ended sessions are kept, not deleted) but has no live PTY
+ * behind it, so live-only actions (stop, restart, sending input) are
+ * unavailable and it should read as visually distinct from a running one.
+ * "Ended" is a managed-session concept only — external sessions have no
+ * kept history and simply disappear once their process is gone.
+ */
+export function isEndedSession(session: Session): boolean {
+  return session.origin === 'managed' && session.status === 'exited';
+}
+
 export function sessionLabel(session: Session): string {
   return session.name ?? `${session.agent === 'claude' ? 'Claude' : 'Codex'} · ${session.cwd.split('/').pop() ?? session.cwd}`;
 }
 
 export function repoPathOf(session: Session): string {
   return session.worktreePath ?? session.repoId ?? session.cwd;
+}
+
+/** Human-readable repository name for a session, resolved against the known repos list. */
+export function repoDisplayName(session: Session, repos: readonly Repo[]): string {
+  const path = repoPathOf(session);
+  return repos.find((repo) => repo.id === path || repo.path === path)?.name
+    ?? session.cwd.split('/').pop()
+    ?? session.cwd;
 }
 
 export function relativeTime(iso: string, now = Date.now()): string {

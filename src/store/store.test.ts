@@ -82,6 +82,47 @@ describe('sessions', () => {
     store.deleteSession(managedSession.id);
     expect(store.listSessions().map((s) => s.id)).toEqual([externalSession.id]);
   });
+
+  it('round-trips endedAt for an ended managed session (ticket 04)', () => {
+    const ended: Session = {
+      ...managedSession,
+      status: 'exited',
+      statusSource: 'process_gone',
+      endedAt: '2026-07-17T11:00:00.000Z',
+    };
+    store.upsertSession(ended);
+    expect(store.getSession(ended.id)).toEqual(ended);
+  });
+
+  it('omits endedAt for a session that has not ended', () => {
+    store.upsertSession(managedSession);
+    expect(store.getSession(managedSession.id)?.endedAt).toBeUndefined();
+  });
+
+  it('round-trips summaryGeneratedAt (ticket 11) — the summary text itself lives in a file, not this column', () => {
+    const summarized: Session = {
+      ...managedSession,
+      status: 'exited',
+      statusSource: 'process_gone',
+      endedAt: '2026-07-17T11:00:00.000Z',
+      summaryGeneratedAt: '2026-07-17T11:05:00.000Z',
+    };
+    store.upsertSession(summarized);
+    expect(store.getSession(summarized.id)).toEqual(summarized);
+  });
+
+  it('omits summaryGeneratedAt until a summary has been generated', () => {
+    store.upsertSession(managedSession);
+    expect(store.getSession(managedSession.id)?.summaryGeneratedAt).toBeUndefined();
+  });
+
+  it('regenerating a summary updates summaryGeneratedAt in place', () => {
+    const summarized: Session = { ...managedSession, summaryGeneratedAt: '2026-07-17T11:05:00.000Z' };
+    store.upsertSession(summarized);
+    store.upsertSession({ ...summarized, summaryGeneratedAt: '2026-07-17T12:00:00.000Z' });
+    expect(store.getSession(summarized.id)?.summaryGeneratedAt).toBe('2026-07-17T12:00:00.000Z');
+    expect(store.listSessions()).toHaveLength(1);
+  });
 });
 
 describe('tasks', () => {

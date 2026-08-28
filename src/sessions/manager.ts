@@ -4,10 +4,16 @@
 // one per live session and asks it to append/snapshot, but doesn't buffer.
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { defaultDataDir } from '../config.js';
 import type { Store } from '../store/index.js';
 import type { AgentMessage, AgentType, LaunchSpec, Session, SessionStatus } from '../types.js';
+import { TERMINAL_COLS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
-import { SessionTranscript, type Unsubscribe } from './transcript.js';
+import { readScrollback, SessionTranscript, type Unsubscribe } from './transcript.js';
+import { readSummary, writeSummary } from './summary.js';
+import { ClaudeCliSummarizer, type Summarizer, type SummarizeOptions } from './summarizer.js';
+import { DEFAULT_MODEL_SETTING_KEY } from './model-catalog.js';
 import { inferOutputStatus, reduceStatus, type StatusSignal } from './status.js';
 
 // Observed CLI behavior: readiness = the CLI's composer/prompt line
@@ -34,6 +40,18 @@ export interface SessionManagerOptions {
   promptFallbackMs?: number;
   /** SIGTERM → SIGKILL escalation delay */
   killGraceMs?: number;
+  /** Base dir for sessions/<id>/{raw.log,scrollback.txt}. Default: config.dataDir/sessions. */
+  sessionsDir?: string;
+  /** raw.log tail cap per session, bytes. Default: 5 MB (spec). Tests shrink this. */
+  maxRawBytes?: number;
+  /**
+   * Provider used by summarize() (ticket 11). Default: ClaudeCliSummarizer,
+   * a `claude -p` subprocess adapter. Tests must always override this with
+   * a fake — summarize() is the only thing that can invoke it, and it is
+   * only ever reached via the explicit POST /api/sessions/:id/summarize
+   * route, never automatically.
+   */
+  summarizer?: Summarizer;
 }
 
 export interface SessionManagerEvents {
@@ -47,6 +65,9 @@ interface Live {
   handle: Handle;
   transcript: SessionTranscript;
   unsubscribeOutput: Unsubscribe;
+  /** Resolves only after exit bookkeeping and scrollback compaction finish. */
+  exitDone: Promise<void>;
+  resolveExit: () => void;
   promptTimer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
   promptPending?: string;
@@ -76,6 +97,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       bufferSize: opts.bufferSize ?? 64 * 1024,
       promptFallbackMs: opts.promptFallbackMs ?? 20000,
       killGraceMs: opts.killGraceMs ?? 5000,
+      sessionsDir: opts.sessionsDir ?? path.join(defaultDataDir(), 'sessions'),
+      maxRawBytes: opts.maxRawBytes ?? 5 * 1024 * 1024,
+      summarizer: opts.summarizer ?? new ClaudeCliSummarizer(),
       readiness: { ...READINESS, ...opts.readiness },
     };
   }
@@ -117,15 +141,27 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       env: { ...(spec.env ?? {}), AGENTDECK_SESSION_ID: session.id },
     });
     session.pid = handle.pid;
-    const transcript = new SessionTranscript({ capacity: this.opts.bufferSize });
+    const transcript = new SessionTranscript({
+      sessionId: session.id,
+      sessionsDir: this.opts.sessionsDir,
+      capacity: this.opts.bufferSize,
+      maxRawBytes: this.opts.maxRawBytes,
+      cols: TERMINAL_COLS,
+    });
     // Relay coalesced batches as the same 'output' event consumers already
     // know, so ws.ts's per-viewer routing doesn't need to change: the
     // coalescing now happens once here instead of once per raw PTY chunk.
     const unsubscribeOutput = transcript.subscribe((data) => this.emit('output', session.id, data));
+    let resolveExit!: () => void;
+    const exitDone = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
     const live: Live = {
       handle,
       transcript,
       unsubscribeOutput,
+      exitDone,
+      resolveExit,
       exited: false,
       lastActivityFlush: Date.now(),
     };
@@ -208,22 +244,56 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }, 300);
   }
 
-  private handleExit(sessionId: string, _exitCode: number): void {
+  /**
+   * Runs on process exit (natural exit, stop(), or restart()'s internal
+   * stop()). Marks the row exited immediately, then compacts the
+   * transcript's output to scrollback (ticket 09: SessionTranscript.close()
+   * — headless replay, no model call) before removing the live entry, so
+   * `stop()`'s poll loop (and therefore SessionManager.shutdown()) does not
+   * resolve until compaction has actually finished. A session that ends
+   * while the server is shutting down must not end up unreadable; this is
+   * what makes that true, since server/index.ts's close() awaits
+   * manager.shutdown() before the process exits.
+   */
+  private async handleExit(sessionId: string, _exitCode: number): Promise<void> {
     const live = this.live.get(sessionId);
     if (live) {
       live.exited = true;
       if (live.promptTimer) clearTimeout(live.promptTimer);
       if (live.killTimer) clearTimeout(live.killTimer);
       live.unsubscribeOutput();
-      live.transcript.close();
-      this.live.delete(sessionId);
     }
-    // An exited session has nothing left to show or act on — drop the row
-    // entirely so it disappears from the dashboard.
-    if (this.store.getSession(sessionId)) this.store.deleteSession(sessionId);
+    // An ended session is the thing you reopen when you need to see what
+    // happened (spec: "Ended sessions | Stay in the session rail ~1h, then
+    // move to History") — keep the row, marked exited with the time it
+    // ended, instead of deleting it. session_update (not session_removed)
+    // tells viewers to keep showing it in its new, ended state.
+    const session = this.store.getSession(sessionId);
+    if (session) {
+      session.status = 'exited';
+      session.statusSource = 'process_gone';
+      session.endedAt = new Date().toISOString();
+      this.persist(session);
+    }
+    // The launch spec (which can carry prompts/env secrets) only exists to
+    // support restart of a still-meaningfully-live session; once ended,
+    // restart is a live-only affordance and should stop working, so it is
+    // not kept around for a process that is already gone.
     this.launchSpecs.delete(sessionId);
     this.hookSignals.delete(sessionId);
-    this.emit('session_removed', sessionId);
+    if (live) {
+      try {
+        await live.transcript.close();
+      } catch (error) {
+        // A compaction failure must not hang shutdown or leave the live
+        // entry stuck around; the boot-time reconciler retries any raw.log
+        // still left on disk the next time the server starts.
+        console.error(`[agentdeck] failed to compact scrollback for session ${sessionId}:`, error);
+      } finally {
+        this.live.delete(sessionId);
+        live.resolveExit();
+      }
+    }
   }
 
   /** Write raw input (keystrokes) to a live session. */
@@ -253,20 +323,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /** SIGTERM, escalating to SIGKILL after killGraceMs. Resolves when exited. */
   async stop(sessionId: string): Promise<void> {
     const live = this.live.get(sessionId);
-    if (!live || live.exited) return;
-    const exited = new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (!this.live.has(sessionId)) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 25);
-    });
+    if (!live) return;
+    if (live.exited) {
+      await live.exitDone;
+      return;
+    }
     await this.backend.kill(live.handle, 'SIGTERM');
     live.killTimer = setTimeout(() => {
       void this.backend.kill(live.handle, 'SIGKILL');
     }, this.opts.killGraceMs);
-    await exited;
+    await live.exitDone;
   }
 
   /** Stop (if live) and respawn from the in-memory launch spec. Same session id. */
@@ -346,18 +412,86 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return session;
   }
 
+  /**
+   * False as soon as the process has exited, even during the brief window
+   * where handleExit is still compacting output and the live entry hasn't
+   * been removed yet — `live.exited` flips synchronously, before any
+   * `await`. isLive() reflects "has a process to talk to", not "internal
+   * bookkeeping still in flight".
+   */
   isLive(sessionId: string): boolean {
-    return this.live.has(sessionId);
+    const live = this.live.get(sessionId);
+    return live !== undefined && !live.exited;
   }
 
-  /** Stop every live session (server shutdown). */
+  /** Stored scrollback for an ended managed session; undefined if it hasn't been compacted (yet). */
+  async readScrollback(sessionId: string): Promise<string | undefined> {
+    return readScrollback(this.opts.sessionsDir, sessionId);
+  }
+
+  /**
+   * Generate (or regenerate) a wrap-up summary for an ended managed
+   * session, from its stored scrollback. Manual, explicit action only —
+   * this method is reached from exactly one place, the
+   * POST /api/sessions/:id/summarize route (ticket 11). It is never called
+   * from handleExit, shutdown(), boot reconciliation, or any timer/poll
+   * loop; grep the class for callers of `this.summarize(` before adding
+   * one anywhere else.
+   *
+   * The summarizer call happens before anything on disk or in the store is
+   * touched, so a failure here leaves both the previous summary.md (if
+   * any) and scrollback.txt completely intact — only a success replaces
+   * the stored summary and its timestamp.
+   *
+   * Model resolution (ticket 12): an explicit `opts.model` always wins and
+   * is never persisted — a per-summary override affects only this one
+   * call. Omitted, it falls back to the stored default
+   * (store.getSetting(DEFAULT_MODEL_SETTING_KEY), set via
+   * PATCH /api/settings — never the API key, which never goes through the
+   * settings table). If no default has ever been set either, no `model`
+   * key is passed at all, preserving ticket 11's original zero-config
+   * behavior (ClaudeCliSummarizer sends no --model flag; the CLI uses its
+   * own current default).
+   */
+  async summarize(sessionId: string, opts: SummarizeOptions = {}): Promise<string> {
+    const session = this.store.getSession(sessionId);
+    if (!session) throw new Error(`no such session: ${sessionId}`);
+    if (session.origin !== 'managed') {
+      throw new Error('summarization is only available for managed sessions');
+    }
+    if (this.isLive(sessionId)) {
+      throw new Error('session has not ended yet');
+    }
+    // The exited row is published before transcript compaction completes so
+    // the UI can react promptly. If Wrap up is clicked during that brief
+    // window, wait for the scrollback instead of reporting that it is absent.
+    const exiting = this.live.get(sessionId);
+    if (exiting?.exited) await exiting.exitDone;
+    const scrollback = await readScrollback(this.opts.sessionsDir, sessionId);
+    if (scrollback === undefined) {
+      throw new Error('no scrollback is available to summarize');
+    }
+    const model = opts.model ?? this.store.getSetting<string>(DEFAULT_MODEL_SETTING_KEY);
+    const summary = await this.opts.summarizer.summarize(scrollback, model ? { model } : {});
+    await writeSummary(this.opts.sessionsDir, sessionId, summary);
+    session.summaryGeneratedAt = new Date().toISOString();
+    this.persist(session);
+    return summary;
+  }
+
+  /** Stored wrap-up summary for a session; undefined if none has been generated (yet). */
+  async readSummary(sessionId: string): Promise<string | undefined> {
+    return readSummary(this.opts.sessionsDir, sessionId);
+  }
+
+  /** Stop every live session (server shutdown). Resolves only once every session's output is compacted. */
   async shutdown(): Promise<void> {
     await Promise.all([...this.live.keys()].map((id) => this.stop(id)));
   }
 
   private requireLive(sessionId: string): Live {
     const live = this.live.get(sessionId);
-    if (!live) throw new Error(`session ${sessionId} has no live process`);
+    if (!live || live.exited) throw new Error(`session ${sessionId} has no live process`);
     return live;
   }
 

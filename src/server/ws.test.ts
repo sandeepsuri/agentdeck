@@ -100,6 +100,7 @@ class Client {
 let backend: FakeBackend;
 let store: Store;
 let manager: SessionManager;
+let sessionsDir: string;
 let app: ReturnType<typeof buildApp>;
 let wss: WebSocketServer;
 let port: number;
@@ -112,7 +113,11 @@ const clients: Client[] = [];
 beforeEach(async () => {
   backend = new FakeBackend();
   store = new Store(':memory:');
-  manager = new SessionManager(backend, store);
+  // POST /api/sessions launches through the real SessionManager below, and
+  // every launch now spills output to sessionsDir/<id>/raw.log — point that
+  // at a throwaway tmpdir so these tests never touch the real ~/.agentdeck.
+  sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-sessions-'));
+  manager = new SessionManager(backend, store, { sessionsDir });
   vscode = new VsCodeBridge();
   vscodeAdapter = new FakeVsCodeAdapter();
   installVsCode = vi.fn(async () => ({ installed: true as const, reloadRequired: true as const }));
@@ -142,7 +147,12 @@ afterEach(async () => {
   while (clients.length) clients.pop()?.close();
   await closeWs(wss);
   await app.close();
+  // Stop (and compact) any sessions still live from the test before wiping
+  // sessionsDir — otherwise a still-in-flight raw.log spill can race the
+  // directory removal below.
+  await manager.shutdown();
   store.close();
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
 });
 
 async function connect(): Promise<Client> {
@@ -324,20 +334,67 @@ describe('REST routes', () => {
     expect(res.status).toBe(400);
   });
 
-  it('stop removes the session and broadcasts session_removed', async () => {
+  it('stop ends the session in place (ticket 04: kept, not removed) and broadcasts session_update', async () => {
     const c = await connect();
     const { id } = await launchViaRest();
     const stopRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
     expect(await stopRes.json()).toEqual({ ok: true });
     expect(backend.killed.get('1000')).toEqual(['SIGTERM']);
 
-    const removedFrame = await c.waitFor('session_removed');
-    expect(removedFrame.sessionId).toBe(id);
-    const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
-    expect(list).toEqual([]);
+    // Launch itself already produced earlier session_update frames (status
+    // starting/working); wait specifically for the one reporting the end.
+    const isEndedUpdate = (f: ServerFrame): f is ServerFrame & { t: 'session_update' } =>
+      f.t === 'session_update' && f.session.id === id && f.session.status === 'exited';
+    const t0 = Date.now();
+    let updateFrame = c.frames.find(isEndedUpdate);
+    while (!updateFrame && Date.now() - t0 < 3000) {
+      await new Promise((r) => setTimeout(r, 10));
+      updateFrame = c.frames.find(isEndedUpdate);
+    }
+    if (!updateFrame) throw new Error('no exited session_update frame within 3000ms');
+    expect(updateFrame.session.endedAt).toBeDefined();
 
-    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    // Still listed, now ended — this is what "kept, not removed" means.
+    const list = await (await fetch(`http://127.0.0.1:${port}/api/sessions`)).json();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id, status: 'exited' });
+
+    // Stopping again is a live-only action; the session has already ended.
+    const again = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    expect(again.status).toBe(400);
+  });
+
+  it('ticket 09: an ended session is readable via GET .../scrollback, and it survives a fresh readScrollback() read (independent of the live manager)', async () => {
+    const { id, pid } = await launchViaRest();
+    backend.emitOutput(pid, 'agent output before exit\r\n');
+    await new Promise((r) => setTimeout(r, 30)); // let the coalescing timer spill it to raw.log
+
+    // POST /stop already awaits manager.stop(), which now awaits compaction
+    // (ticket 09) — by the time this resolves, scrollback.txt exists.
+    const stopRes = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/stop`, { method: 'POST' });
+    expect(stopRes.status).toBe(200);
+
+    const res = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/scrollback`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { sessionId: string; scrollback: string };
+    expect(body.sessionId).toBe(id);
+    expect(body.scrollback).toContain('agent output before exit');
+
+    // Reading it back through a brand-new SessionTranscript helper call
+    // (not through the live `manager`) is the same thing a restarted server
+    // would do — scrollback survives independent of any in-memory state.
+    const { readScrollback } = await import('../sessions/transcript.js');
+    expect(await readScrollback(sessionsDir, id)).toContain('agent output before exit');
+  });
+
+  it('scrollback 404s for a session that has never been launched, and for a still-live one', async () => {
+    const missing = await fetch(`http://127.0.0.1:${port}/api/sessions/does-not-exist/scrollback`);
     expect(missing.status).toBe(404);
+
+    const { id } = await launchViaRest();
+    const stillLive = await fetch(`http://127.0.0.1:${port}/api/sessions/${id}/scrollback`);
+    expect(stillLive.status).toBe(404);
+    expect((await stillLive.json()).error).toMatch(/still running/);
   });
 
   it('POST /api/sessions/:id/send types into managed sessions and queues for unscriptable claude', async () => {

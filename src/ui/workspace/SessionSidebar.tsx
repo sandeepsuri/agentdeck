@@ -1,5 +1,5 @@
 import type { DiscoveryStatus, Repo, Session } from '../../types.js';
-import { SparkBars, StatusBadge, sessionLabel } from './model.js';
+import { SparkBars, StatusBadge, isEndedSession, sessionLabel } from './model.js';
 
 interface Props {
   sessions: Session[];
@@ -17,8 +17,9 @@ function SessionRow({ session, index, selected, onSelect }: {
   selected: boolean;
   onSelect: () => void;
 }) {
+  const ended = isEndedSession(session);
   return (
-    <button className={`session-row${selected ? ' is-selected' : ''}`} onClick={onSelect} type="button">
+    <button className={`session-row${selected ? ' is-selected' : ''}${ended ? ' is-ended' : ''}`} onClick={onSelect} type="button">
       <span className={`session-selection-rail status-${session.status}`} />
       <span className="session-row-content">
         <span className="session-row-title">
@@ -29,7 +30,14 @@ function SessionRow({ session, index, selected, onSelect }: {
           {session.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} · {session.cwd.split('/').pop() ?? session.cwd}
           {session.branch ? ` / ${session.branch}` : ''}
         </span>
-        {session.origin === 'managed' && <SparkBars active={selected} count={20} seed={index + 1} />}
+        {/* A live-activity graph would be misleading for a dead process:
+            show it only while the session is actually running. */}
+        {session.origin === 'managed' && !ended && <SparkBars active={selected} count={20} seed={index + 1} />}
+        {ended && (
+          <span className="session-row-ended">
+            Ended {new Date(session.endedAt ?? session.lastActivityAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        )}
       </span>
       {session.origin === 'external' && <span className="external-arrow">↗</span>}
       <span className="session-key">{index < 9 ? index + 1 : ''}</span>
