@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
 import { Terminal } from '../components/Terminal.js';
-import { ElapsedTime, sessionLabel } from './model.js';
+import { ElapsedTime, isEndedSession, sessionLabel } from './model.js';
 import { nextMountedTerminalIds, sameIds, terminalViewKeys } from './terminalViews.js';
 
 interface Props {
@@ -56,6 +56,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
   if (!session) {
     return <div className="empty-workspace"><strong>Select a session</strong><span>The active terminal and agent controls will appear here.</span></div>;
   }
+  const canMessage = !isEndedSession(session);
 
   return (
     <section className="terminal-workspace">
@@ -86,7 +87,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
           )}
         </div>
 
-        {session.status === 'waiting_input' && (
+        {canMessage && session.status === 'waiting_input' && (
           <div className="terminal-prompt-card">
             <small>User input required</small>
             <strong>The agent is waiting for a response</strong>
@@ -99,7 +100,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
           </div>
         )}
 
-        {queue.length > 0 && (
+        {canMessage && queue.length > 0 && (
           <div className="message-queue">
             <div className="micro-heading">Queue · {queue.length}</div>
             {queue.map((item, index) => (
@@ -111,7 +112,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
           </div>
         )}
 
-        <footer className="terminal-composer">
+        {canMessage && <footer className="terminal-composer">
           <label>
             <span>Send to {session.origin === 'managed' ? 'PTY' : 'session'}</span>
             <input
@@ -131,7 +132,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
             setText('');
           }} type="button">Queue</button>
           <button className="button button-primary" disabled={!text.trim() || sending} onClick={() => void send()} type="button">{sending ? 'Sending…' : 'Send ⌘⏎'}</button>
-        </footer>
+        </footer>}
       </div>
     </section>
   );

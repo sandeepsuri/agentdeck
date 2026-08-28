@@ -7,6 +7,7 @@ import type { LaunchSpec } from '../types.js';
 import { Store } from '../store/index.js';
 import { PtyBackend } from './pty.js';
 import { RingBuffer } from './ringbuffer.js';
+import { SessionTranscript } from './transcript.js';
 import type { Summarizer } from './summarizer.js';
 import { SessionManager, type SessionManagerOptions } from './manager.js';
 
@@ -237,6 +238,33 @@ describe('SessionManager + PtyBackend', () => {
       expect(fs.existsSync(path.join(sessionsDir, id, 'raw.log'))).toBe(false);
     }
   });
+
+  it('shutdown() waits for compaction already in progress after a natural exit', async () => {
+    const originalClose = SessionTranscript.prototype.close;
+    let releaseCompaction!: () => void;
+    const compactionGate = new Promise<void>((resolve) => {
+      releaseCompaction = resolve;
+    });
+    const closeSpy = vi.spyOn(SessionTranscript.prototype, 'close').mockImplementationOnce(async function (this: SessionTranscript) {
+      await compactionGate;
+      return originalClose.call(this);
+    });
+    const { manager, sessionsDir } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo natural-exit'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+    let shutdownResolved = false;
+    const shuttingDown = manager.shutdown().then(() => {
+      shutdownResolved = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(shutdownResolved).toBe(false);
+
+    releaseCompaction();
+    await shuttingDown;
+    closeSpy.mockRestore();
+    expect(fs.existsSync(path.join(sessionsDir, s.id, 'scrollback.txt'))).toBe(true);
+  });
 });
 
 // ticket 11: SessionManager.summarize() / readSummary(). A fake Summarizer
@@ -289,6 +317,31 @@ describe('SessionManager summarize (ticket 11)', () => {
     expect(fs.readFileSync(path.join(sessionsDir, s.id, 'summary.md'), 'utf8')).toBe(result);
     expect(store.getSession(s.id)?.summaryGeneratedAt).toBeDefined();
     expect(await manager.readSummary(s.id)).toBe(result);
+  });
+
+  it('waits for in-flight scrollback compaction before summarizing an ended session', async () => {
+    const originalClose = SessionTranscript.prototype.close;
+    let releaseCompaction!: () => void;
+    const compactionGate = new Promise<void>((resolve) => {
+      releaseCompaction = resolve;
+    });
+    const closeSpy = vi.spyOn(SessionTranscript.prototype, 'close').mockImplementationOnce(async function (this: SessionTranscript) {
+      await compactionGate;
+      return originalClose.call(this);
+    });
+    const summarizer = fakeSummarizer();
+    const { manager } = makeManager({ summarizer });
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo wait-for-scrollback'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+
+    const summary = manager.summarize(s.id);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(summarizer.summarize).not.toHaveBeenCalled();
+
+    releaseCompaction();
+    await expect(summary).resolves.toBe('a fake summary');
+    closeSpy.mockRestore();
+    expect(summarizer.summarize).toHaveBeenCalledWith(expect.stringContaining('wait-for-scrollback'), {});
   });
 
   it('readSummary() is undefined until a summary has been generated', async () => {

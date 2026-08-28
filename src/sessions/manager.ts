@@ -65,6 +65,9 @@ interface Live {
   handle: Handle;
   transcript: SessionTranscript;
   unsubscribeOutput: Unsubscribe;
+  /** Resolves only after exit bookkeeping and scrollback compaction finish. */
+  exitDone: Promise<void>;
+  resolveExit: () => void;
   promptTimer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
   promptPending?: string;
@@ -149,10 +152,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     // know, so ws.ts's per-viewer routing doesn't need to change: the
     // coalescing now happens once here instead of once per raw PTY chunk.
     const unsubscribeOutput = transcript.subscribe((data) => this.emit('output', session.id, data));
+    let resolveExit!: () => void;
+    const exitDone = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
     const live: Live = {
       handle,
       transcript,
       unsubscribeOutput,
+      exitDone,
+      resolveExit,
       exited: false,
       lastActivityFlush: Date.now(),
     };
@@ -280,8 +289,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         // entry stuck around; the boot-time reconciler retries any raw.log
         // still left on disk the next time the server starts.
         console.error(`[agentdeck] failed to compact scrollback for session ${sessionId}:`, error);
+      } finally {
+        this.live.delete(sessionId);
+        live.resolveExit();
       }
-      this.live.delete(sessionId);
     }
   }
 
@@ -312,20 +323,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /** SIGTERM, escalating to SIGKILL after killGraceMs. Resolves when exited. */
   async stop(sessionId: string): Promise<void> {
     const live = this.live.get(sessionId);
-    if (!live || live.exited) return;
-    const exited = new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (!this.live.has(sessionId)) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 25);
-    });
+    if (!live) return;
+    if (live.exited) {
+      await live.exitDone;
+      return;
+    }
     await this.backend.kill(live.handle, 'SIGTERM');
     live.killTimer = setTimeout(() => {
       void this.backend.kill(live.handle, 'SIGKILL');
     }, this.opts.killGraceMs);
-    await exited;
+    await live.exitDone;
   }
 
   /** Stop (if live) and respawn from the in-memory launch spec. Same session id. */
@@ -455,6 +462,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (this.isLive(sessionId)) {
       throw new Error('session has not ended yet');
     }
+    // The exited row is published before transcript compaction completes so
+    // the UI can react promptly. If Wrap up is clicked during that brief
+    // window, wait for the scrollback instead of reporting that it is absent.
+    const exiting = this.live.get(sessionId);
+    if (exiting?.exited) await exiting.exitDone;
     const scrollback = await readScrollback(this.opts.sessionsDir, sessionId);
     if (scrollback === undefined) {
       throw new Error('no scrollback is available to summarize');
