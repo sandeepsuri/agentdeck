@@ -912,4 +912,130 @@ describe('remote (tailnet) WebSocket access', () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ delivered: 'typed' });
   });
+
+  // Ticket 13: the mobile reflow view. `attach` behaves completely
+  // differently depending on ConnectionTrust's classification of the
+  // socket — these tests exercise both branches against the same
+  // tailnet-token-configured server used above.
+  describe('ticket 13: live reflow view', () => {
+    async function launchViaRemoteRest(): Promise<{ id: string; pid: number }> {
+      const res = await fetch(`http://127.0.0.1:${remotePort}/api/sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(SPEC),
+      });
+      expect(res.status).toBe(201);
+      return res.json();
+    }
+    function connectLocal(): WebSocket {
+      return new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
+    }
+    function connectRemote(): WebSocket {
+      return new WebSocket(
+        `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+        { headers: { host: REMOTE_HOST } },
+      );
+    }
+    function collectFrames(ws: WebSocket): ServerFrame[] {
+      const frames: ServerFrame[] = [];
+      ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+      return frames;
+    }
+    function opened(ws: WebSocket): Promise<void> {
+      return new Promise((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+    }
+    async function waitForFrame<T extends ServerFrame['t']>(
+      frames: ServerFrame[], t: T, ms = 3000,
+    ): Promise<ServerFrame & { t: T }> {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        const hit = frames.find((f) => f.t === t);
+        if (hit) return hit as ServerFrame & { t: T };
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`no ${t} frame within ${ms}ms; got ${JSON.stringify(frames.map((f) => f.t))}`);
+    }
+
+    it('a local (loopback) connection still gets replay + raw output frames, byte-for-byte unchanged, even with a tailnet token configured', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const ws = connectLocal();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      const replay = await waitForFrame(frames, 'replay');
+      expect(replay).toEqual({ t: 'replay', sessionId: id, data: '' });
+
+      remoteBackend.emitOutput(pid, 'local sees raw bytes');
+      const output = await waitForFrame(frames, 'output');
+      expect(output).toEqual({ t: 'output', sessionId: id, data: 'local sees raw bytes' });
+      expect(frames.some((f) => f.t === 'reflow_text')).toBe(false);
+
+      ws.close();
+    });
+
+    it('a remote (token-authenticated) connection gets reflow_text frames instead of replay/output, and never raw output', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      remoteBackend.emitOutput(pid, 'agent output for the phone view\r\n');
+      await new Promise((r) => setTimeout(r, 30)); // let the coalescing timer land it in the transcript
+
+      const ws = connectRemote();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+
+      const reflow = await waitForFrame(frames, 'reflow_text');
+      expect(reflow.sessionId).toBe(id);
+      expect(reflow.text).toContain('agent output for the phone view');
+
+      remoteBackend.emitOutput(pid, 'more output, still no raw frame');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(frames.some((f) => f.t === 'replay')).toBe(false);
+      expect(frames.some((f) => f.t === 'output')).toBe(false);
+
+      ws.close();
+    });
+
+    it('detaching a remote viewer stops further reflow_text frames for that session', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const ws = connectRemote();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      await waitForFrame(frames, 'reflow_text');
+
+      ws.send(JSON.stringify({ t: 'detach', sessionId: id }));
+      await new Promise((r) => setTimeout(r, 50));
+      frames.length = 0;
+      remoteBackend.emitOutput(pid, 'more output after detach');
+      await new Promise((r) => setTimeout(r, 1300)); // longer than LiveReflow's ~1s tick
+      expect(frames.filter((f) => f.t === 'reflow_text')).toHaveLength(0);
+
+      ws.close();
+    }, 10_000);
+
+    it('closing a remote socket stops its own reflow subscription without disrupting another viewer on the same session', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const wsA = connectRemote();
+      const wsB = connectRemote();
+      const framesA = collectFrames(wsA);
+      const framesB = collectFrames(wsB);
+      await Promise.all([opened(wsA), opened(wsB)]);
+      wsA.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      wsB.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      await waitForFrame(framesA, 'reflow_text');
+      await waitForFrame(framesB, 'reflow_text');
+
+      wsA.close();
+      await new Promise((r) => setTimeout(r, 50));
+      framesB.length = 0;
+      remoteBackend.emitOutput(pid, 'still live for B');
+      await new Promise((r) => setTimeout(r, 1300)); // wait past the next shared tick
+      expect(framesB.some((f) => f.t === 'reflow_text')).toBe(true);
+
+      wsB.close();
+    }, 10_000);
+  });
 });

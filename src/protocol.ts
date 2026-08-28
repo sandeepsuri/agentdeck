@@ -51,7 +51,12 @@ export type ServerFrame =
   // viewer) so grid tiles update without per-tile HTTP polling. `seed: true`
   // is a full-buffer replace sent once on connect; `seed: false` is an
   // incremental chunk to append client-side (see GridView.tsx).
-  | { t: 'tile_preview'; sessionId: string; data: string; seed: boolean };
+  | { t: 'tile_preview'; sessionId: string; data: string; seed: boolean }
+  // Ticket 13: sent instead of 'replay'/'output' to a 'remote'-classified
+  // connection attached to a session — periodically re-rendered plain text
+  // (LiveReflow, src/sessions/live-reflow.ts), never raw PTY bytes. `text`
+  // is a full replace of the view, not an incremental chunk.
+  | { t: 'reflow_text'; sessionId: string; text: string };
 
 function parseVsCodeTerminals(value: unknown): VsCodeTerminalFrame[] | null {
   if (!Array.isArray(value) || value.length > 500) return null;

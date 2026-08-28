@@ -16,6 +16,7 @@ import { parseClientFrame, type ServerFrame } from '../protocol.js';
 import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
 import { isAllowedRemoteInput } from './remote-input.js';
+import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -103,9 +104,25 @@ export function attachWs(
   const viewing = new Map<WebSocket, Set<string>>();
   const uiPresence = new Map<WebSocket, boolean>();
 
+  // Ticket 13: one LiveReflow instance for the whole server, backed by the
+  // manager's live transcripts. socket → sessionId → unsubscribe tracks
+  // each remote viewer's subscription so 'detach' and the socket's 'close'
+  // handler (below) can tear it down without leaking a shared timer.
+  const liveReflow = new LiveReflow((sessionId) => manager.getTranscript(sessionId));
+  const reflowSubs = new Map<WebSocket, Map<string, Unsubscribe>>();
+
   const send = (ws: WebSocket, frame: ServerFrame) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
   };
+  // A missing trust entry is treated as NOT local (fail-safe, withholding
+  // raw PTY bytes) rather than defaulting to full desktop access — same
+  // fail-safe direction ticket 14 uses for capability checks on the
+  // 'input' path below. In practice every accepted connection has an entry
+  // (set at upgrade time, see connectionTrust above) since it's populated
+  // before the WebSocketServer's own 'connection' event fires, so this
+  // only matters if that invariant is ever broken by a future change.
+  // Denied connections never reach here at all (rejected at upgrade).
+  const isLocalSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.kind === 'local';
   const isUiVisible = () => [...uiPresence.values()].some(Boolean);
   const broadcastPresence = () => {
     const visible = isUiVisible();
@@ -123,13 +140,22 @@ export function attachWs(
   };
 
   manager.on('output', (sessionId, data) => {
+    // Raw PTY bytes are a desktop-grid concept: a remote (phone) socket
+    // must never receive them, regardless of what it's attached to — it
+    // only ever gets 'reflow_text' (see the 'attach' case below and
+    // LiveReflow). Ticket 05's ConnectionTrust decided this once; this is
+    // one of the four places that ask it (see connection-trust.ts).
     for (const [ws, sessionIds] of viewing) {
-      if (sessionIds.has(sessionId)) send(ws, { t: 'output', sessionId, data });
+      if (sessionIds.has(sessionId) && isLocalSocket(ws)) send(ws, { t: 'output', sessionId, data });
     }
     // Mission Control tiles are not "attached" viewers — push a lightweight
     // preview chunk to every socket so grid tiles update live without each
-    // tile polling its own REST endpoint.
-    for (const ws of wss.clients) send(ws, { t: 'tile_preview', sessionId, data, seed: false });
+    // tile polling its own REST endpoint. Local-only for the same reason:
+    // Mission Control is a desktop-grid concept a phone has no use for, and
+    // this carries raw bytes too.
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'tile_preview', sessionId, data, seed: false });
+    }
   });
 
   // session_update goes to every socket — the session list is global state.
@@ -167,10 +193,14 @@ export function attachWs(
     }
     // Seed Mission Control tiles with whatever a managed session has already
     // produced, so a freshly opened grid doesn't sit blank until the next
-    // output batch arrives.
-    for (const session of manager.listSessions()) {
-      if (session.origin === 'managed' && manager.isLive(session.id)) {
-        send(ws, { t: 'tile_preview', sessionId: session.id, data: manager.getBuffer(session.id), seed: true });
+    // output batch arrives. Local-only: this carries raw PTY bytes, and
+    // Mission Control tiles are a desktop-grid concept a phone has no use
+    // for (see the 'output' handler above for the same restriction).
+    if (isLocalSocket(ws)) {
+      for (const session of manager.listSessions()) {
+        if (session.origin === 'managed' && manager.isLive(session.id)) {
+          send(ws, { t: 'tile_preview', sessionId: session.id, data: manager.getBuffer(session.id), seed: true });
+        }
       }
     }
     ws.on('message', (raw) => {
@@ -182,13 +212,36 @@ export function attachWs(
           const sessionIds = viewing.get(ws) ?? new Set<string>();
           sessionIds.add(frame.sessionId);
           viewing.set(ws, sessionIds);
-          send(ws, { t: 'replay', sessionId: frame.sessionId, data: manager.getBuffer(frame.sessionId) });
+          if (isLocalSocket(ws)) {
+            // Desktop path, byte-for-byte unchanged from before ticket 13.
+            send(ws, { t: 'replay', sessionId: frame.sessionId, data: manager.getBuffer(frame.sessionId) });
+          } else {
+            // Remote (phone) viewer: no raw replay/output ever. LiveReflow
+            // owns the shared per-session timer; guard against a duplicate
+            // attach (no intervening detach) leaking a second subscription.
+            const subs = reflowSubs.get(ws) ?? new Map<string, Unsubscribe>();
+            if (!subs.has(frame.sessionId)) {
+              const sessionId = frame.sessionId;
+              const unsubscribe = liveReflow.attach(sessionId, (text) => {
+                send(ws, { t: 'reflow_text', sessionId, text });
+              });
+              subs.set(sessionId, unsubscribe);
+              reflowSubs.set(ws, subs);
+            }
+          }
           break;
         }
         case 'detach': {
           const sessionIds = viewing.get(ws);
           sessionIds?.delete(frame.sessionId);
           if (sessionIds?.size === 0) viewing.delete(ws);
+          const subs = reflowSubs.get(ws);
+          const unsubscribe = subs?.get(frame.sessionId);
+          if (subs && unsubscribe) {
+            unsubscribe();
+            subs.delete(frame.sessionId);
+            if (subs.size === 0) reflowSubs.delete(ws);
+          }
           break;
         }
         case 'input': {
@@ -224,6 +277,11 @@ export function attachWs(
     });
     ws.on('close', () => {
       viewing.delete(ws);
+      const subs = reflowSubs.get(ws);
+      if (subs) {
+        for (const unsubscribe of subs.values()) unsubscribe();
+        reflowSubs.delete(ws);
+      }
       if (uiPresence.delete(ws)) {
         broadcastPresence();
         broadcastCompanionSnapshot();

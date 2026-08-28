@@ -13,6 +13,7 @@ import { GridView } from './workspace/GridView.js';
 import { HistoryView } from './workspace/HistoryView.js';
 import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
+import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
@@ -81,6 +82,12 @@ export function App() {
   const [connectionGate, setConnectionGate] = useState<'ready' | 'needs-token' | 'denied'>('ready');
   const [tokenInput, setTokenInput] = useState('');
   const [tokenError, setTokenError] = useState<string | null>(null);
+  // Ticket 13: which workspace to render once the gate is 'ready'. Defaults
+  // to 'local' for the same reason connectionGate defaults to 'ready' — the
+  // ordinary desktop/loopback case must render its normal tree immediately,
+  // with zero extra delay, and only switch to the phone view once
+  // GET /api/connection actually reports 'remote'.
+  const [connectionKind, setConnectionKind] = useState<'local' | 'remote'>('local');
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
@@ -232,6 +239,7 @@ export function App() {
       .then((response) => response.json())
       .then((body: { kind: 'local' | 'remote' | 'denied'; capabilities: string[] }) => {
         if (cancelled) return;
+        if (body.kind === 'remote') setConnectionKind('remote');
         if (body.kind === 'denied') setConnectionGate('denied');
         else if (body.kind === 'remote' && body.capabilities.length === 0) setConnectionGate('needs-token');
         else setConnectionGate('ready');
@@ -246,6 +254,7 @@ export function App() {
     try {
       const body = await (await fetch('/api/connection')).json() as { kind: string; capabilities: string[] };
       if (body.kind === 'remote' && body.capabilities.length > 0) {
+        setConnectionKind('remote');
         setTokenError(null);
         setConnectionGate('ready');
       } else {
@@ -315,6 +324,20 @@ export function App() {
           <button type="submit">Continue</button>
           {tokenError && <p role="alert">{tokenError}</p>}
         </form>
+      </div>
+    );
+  }
+
+  // Ticket 13: a remote (phone) connection gets the reflowed mobile view
+  // instead of the desktop workspace tree below — no session sidebar,
+  // Mission Control grid, or inspector rail, none of which fit a phone
+  // screen or apply to a connection that never receives raw PTY bytes. The
+  // local/desktop path below this is otherwise completely untouched.
+  if (connectionKind === 'remote') {
+    return (
+      <div className="mobile-shell">
+        {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
+        <MobileWorkspace onError={setError} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
       </div>
     );
   }
