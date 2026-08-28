@@ -10,6 +10,12 @@ import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import type { ModelCatalog } from '../sessions/model-catalog.js';
 import { registerRoutes, type RouteContext } from './routes.js';
+import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
+
+// Re-exported for existing callers (ws.test.ts imports both from here); the
+// canonical implementations now live in connection-trust.ts so classify()
+// can use them without an app.ts <-> connection-trust.ts import cycle.
+export { isAllowedOrigin, isLoopbackHostHeader };
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -33,35 +39,6 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-/**
- * The server binds to 127.0.0.1, but browsers will happily send requests
- * here from any web page (DNS rebinding defeats same-origin for the REST
- * API; WebSocket upgrades skip CORS entirely). Only loopback Host/Origin
- * values are allowed; requests without an Origin (curl, CLI) are fine
- * because they already run as the local user.
- */
-export function isLoopbackHostHeader(host: string | undefined): boolean {
-  if (!host) return false;
-  const hostname = host.startsWith('[')
-    ? host.slice(1, host.indexOf(']'))
-    : host.split(':')[0] ?? '';
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
-}
-
-export function isAllowedOrigin(origin: string | undefined, requestHost?: string): boolean {
-  if (origin === undefined) return true; // non-browser client
-  try {
-    const parsed = new URL(origin);
-    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
-      || parsed.origin !== origin || !isLoopbackHostHeader(parsed.host)) return false;
-    if (requestHost === undefined) return true;
-    const requested = new URL(`${parsed.protocol}//${requestHost}`);
-    return parsed.hostname === requested.hostname && parsed.port === requested.port;
-  } catch {
-    return false;
-  }
-}
-
 export interface AppContext {
   config: AgentDeckConfig;
   manager?: SessionManager;
@@ -73,13 +50,29 @@ export interface AppContext {
   installVsCode?: RouteContext['installVsCode'];
   publish?: RouteContext['publish'];
   modelCatalog?: ModelCatalog;
+  /**
+   * The tailnet hostname/IP detected at startup (see server/tailscale.ts),
+   * or undefined when no Tailscale interface was found. Feeds classify()
+   * for the host allow-check, the origin check, the CSP connect-src, and
+   * (via routes.ts) GET /api/connection.
+   */
+  remoteHost?: string;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
   app.addHook('onRequest', async (req, reply) => {
-    const allowedHost = isLoopbackHostHeader(req.headers.host);
+    // ConnectionTrust decides once (host + origin + token); the REST host
+    // check, the CSP connect-src below, the WebSocket upgrade (ws.ts), and
+    // GET /api/connection (routes.ts) all defer to the same classify() call
+    // so a newly allowed host can't be added in one place and missed in
+    // another (see docs/specs, "ConnectionTrust").
+    const trust = classify(
+      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
+    );
+    const allowedHost = trust.kind !== 'denied';
     const connectPolicy = allowedHost ? `connect-src 'self' ws://${req.headers.host}` : "connect-src 'self'";
     reply.headers({
       'cache-control': 'no-store',
@@ -94,8 +87,15 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     if (!allowedHost) {
       return reply.code(403).send({ error: 'forbidden host' });
     }
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
-      return reply.code(403).send({ error: 'forbidden origin' });
+    // Remote-but-unauthenticated (no/invalid token) may still load the SPA
+    // shell and static assets — otherwise the phone could never load the
+    // page that prompts for a token — but every /api/* call requires the
+    // token, except /api/connection itself, which is how the client
+    // discovers "you're remote, please enter a token" in the first place.
+    const pathname = (req.url ?? '').split('?')[0] ?? '';
+    const requiresRemoteToken = pathname.startsWith('/api/') && pathname !== '/api/connection';
+    if (requiresRemoteToken && trust.kind === 'remote' && trust.capabilities.size === 0) {
+      return reply.code(403).send({ error: 'a valid tailnet token is required' });
     }
   });
 
@@ -112,6 +112,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     installVsCode: ctx.installVsCode,
     publish: ctx.publish,
     modelCatalog: ctx.modelCatalog,
+    remoteHost: ctx.remoteHost,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the

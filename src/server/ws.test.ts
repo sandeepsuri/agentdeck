@@ -12,7 +12,7 @@ import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
-import { attachWs, closeWs } from './ws.js';
+import { attachWs, closeWs, getConnectionTrust } from './ws.js';
 import type { ServerFrame } from '../protocol.js';
 import { TerminalRegistry, VsCodeBridge, type TerminalAdapter } from '../discovery/terminals/index.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
@@ -133,7 +133,7 @@ beforeEach(async () => {
     terminals: new TerminalRegistry([vscodeAdapter]), installVsCode, discovery,
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
-  wss = attachWs(app.server, manager, '/ws', vscode, () => ({
+  wss = attachWs([app.server], manager, '/ws', vscode, () => ({
     sessions: manager.listSessions(),
     attention: [],
     agents: [],
@@ -712,5 +712,111 @@ describe('WS protocol', () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(companion.frames.filter((frame) => frame.t === 'ui_presence').at(-1))
       .toEqual({ t: 'ui_presence', visible: false });
+  });
+});
+
+// ticket 05: a live WS client actually holding a connection, not just an
+// HTTP page load — this is the acceptance line "verified by a remote client
+// holding a live connection rather than only loading the page." A real
+// tailnet interface isn't available in this sandbox, so "remote" is
+// simulated by connecting to the loopback-bound test server while sending a
+// Host header equal to the configured tailnet hostname (`ws` forwards a
+// caller-supplied `Host` header as-is) — classify() only ever looks at the
+// Host header string, so this exercises the exact same code path a real
+// second bind would.
+describe('remote (tailnet) WebSocket access', () => {
+  const REMOTE_HOST = 'phone-test-host.tailnet-1234.ts.net';
+  const TOKEN = 'a-real-remote-access-token-0123456789';
+
+  let remoteStore: Store;
+  let remoteManager: SessionManager;
+  let remoteSessionsDir: string;
+  let remoteApp: ReturnType<typeof buildApp>;
+  let remoteWss: WebSocketServer;
+  let remotePort: number;
+
+  beforeEach(async () => {
+    remoteStore = new Store(':memory:');
+    remoteSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-remote-'));
+    remoteManager = new SessionManager(new FakeBackend(), remoteStore, { sessionsDir: remoteSessionsDir });
+    remoteApp = buildApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN },
+      manager: remoteManager,
+      store: remoteStore,
+      remoteHost: REMOTE_HOST,
+    });
+    await remoteApp.listen({ port: 0, host: '127.0.0.1' });
+    remoteWss = attachWs(
+      [remoteApp.server], remoteManager, '/ws', undefined, undefined,
+      { remoteHost: REMOTE_HOST, token: TOKEN },
+    );
+    const addr = remoteApp.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    remotePort = addr.port;
+  });
+
+  afterEach(async () => {
+    await closeWs(remoteWss);
+    await remoteApp.close();
+    await remoteManager.shutdown();
+    remoteStore.close();
+    fs.rmSync(remoteSessionsDir, { recursive: true, force: true });
+  });
+
+  it('accepts a loopback connection with no token at all', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    expect(getConnectionTrust(ws as unknown as import('ws').WebSocket)).toBeUndefined(); // this is the client-side socket, not the server's
+    ws.close();
+  });
+
+  it('refuses a tailnet-host upgrade with no token', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws`, { headers: { host: REMOTE_HOST } });
+    const rejected = await new Promise<boolean>((resolve) => {
+      ws.once('error', () => resolve(true));
+      ws.once('open', () => resolve(false));
+    });
+    ws.terminate();
+    expect(rejected).toBe(true);
+  });
+
+  it('refuses a tailnet-host upgrade with the wrong token', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws?token=wrong-token`, { headers: { host: REMOTE_HOST } });
+    const rejected = await new Promise<boolean>((resolve) => {
+      ws.once('error', () => resolve(true));
+      ws.once('open', () => resolve(false));
+    });
+    ws.terminate();
+    expect(rejected).toBe(true);
+  });
+
+  it('accepts a tailnet-host upgrade with the correct token, and the resulting classification is retrievable server-side', async () => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    // A live connection, not just a successful handshake: round-trip an
+    // actual protocol frame over it.
+    const framesReceived: unknown[] = [];
+    ws.on('message', (raw) => framesReceived.push(JSON.parse(String(raw))));
+    ws.send(JSON.stringify({ t: 'attach', sessionId: 'does-not-exist' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    let serverSocket: import('ws').WebSocket | undefined;
+    for (const client of remoteWss.clients) serverSocket = client;
+    expect(serverSocket).toBeDefined();
+    const trust = getConnectionTrust(serverSocket!);
+    expect(trust).toEqual({ kind: 'remote', capabilities: new Set(['view', 'compose', 'control-keys']) });
+    expect(trust?.capabilities.has('raw-write')).toBe(false);
+
+    ws.close();
   });
 });

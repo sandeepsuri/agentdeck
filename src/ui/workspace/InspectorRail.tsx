@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentMessage, Conflict, Session } from '../../types.js';
 import type { Model } from '../../sessions/model-catalog.js';
+import { apiFetch } from '../apiFetch.js';
 import { ElapsedTime, SparkBars, StatusBadge, isEndedSession, repoPathOf, sessionLabel, type WorkspaceView } from './model.js';
 
 interface Props {
@@ -25,7 +26,7 @@ function MessageSelected({ session, onError }: { session: Session; onError: (mes
     if (!text.trim() || busy) return;
     setBusy(true);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: text.trim() }),
       });
       const body = await response.json() as { error?: string };
@@ -71,7 +72,7 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/models')
+    apiFetch('/api/models')
       .then((response) => response.json() as Promise<Model[]>)
       .then((body) => { if (!cancelled) setModels(body); })
       .catch(() => { /* the picker just won't offer an override; the default-model wrap-up still works */ });
@@ -84,7 +85,7 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
     setSummary(undefined);
     setFailure(undefined);
     setOverrideModel('');
-    fetch(`/api/sessions/${encodeURIComponent(session.id)}/summary`)
+    apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/summary`)
       .then(async (response) => {
         if (cancelled) return;
         // A 404 here just means no summary has been generated yet — not an
@@ -103,7 +104,7 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
     setGenerating(true);
     setFailure(undefined);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/summarize`, {
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/summarize`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify(overrideModel ? { model: overrideModel } : {}),
       });

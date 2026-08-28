@@ -1,34 +1,102 @@
 // WebSocket terminal bridge (T4): wires SessionManager events to attached
 // sockets. Multiple viewers per session; a socket may keep multiple sessions
 // attached, with every terminal frame scoped by session id.
+//
+// Ticket 05: the loopback bind and (when Tailscale is detected) a second
+// bind on the tailnet interface both need this WS endpoint. `attachWs` now
+// takes an array of underlying http.Servers and builds one `noServer: true`
+// WebSocketServer, manually listening for 'upgrade' on each one so both
+// share identical accept logic (see server/index.ts's dual bind).
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
-import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
+import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
+// Per-socket classification, set once at accept time (before the
+// WebSocketServer's own 'connection' event fires) so ticket 14's raw-write
+// enforcement — and anything else that needs to know what a connection may
+// do — can look it up without re-deriving it from the (by-then-consumed)
+// upgrade request.
+const connectionTrust = new WeakMap<WebSocket, TrustResult>();
+
+export function getConnectionTrust(ws: WebSocket): TrustResult | undefined {
+  return connectionTrust.get(ws);
+}
+
+function rejectUpgrade(socket: NodeJS.WritableStream & { destroy: () => void }): void {
+  const body = 'Unauthorized';
+  try {
+    (socket as unknown as { write: (chunk: string) => void }).write(
+      `HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+  } finally {
+    socket.destroy();
+  }
+}
+
 export function attachWs(
-  server: HttpServer,
+  servers: HttpServer[],
   manager: SessionManager,
   path = '/ws',
   vscode?: VsCodeBridge,
   companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
+  trust: { remoteHost?: string; token?: string } = {},
 ): WebSocketServer {
-  // WebSocket upgrades bypass CORS: without this check any web page could
-  // attach to a session, read its output, and inject keystrokes.
+  // noServer: true because there are now potentially two underlying
+  // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
+  // below to the same WebSocketServer instance, running the same
+  // ConnectionTrust check before ever calling handleUpgrade.
   const wss = new WebSocketServer({
-    server,
+    noServer: true,
     path,
     maxPayload: MAX_WS_PAYLOAD_BYTES,
     perMessageDeflate: false,
-    verifyClient: ({ origin, req }: { origin?: string; req: { headers: { host?: string } } }) =>
-      isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin, req.headers.host),
   });
+
+  for (const server of servers) {
+    server.on('upgrade', (req, socket, head) => {
+      let pathname: string;
+      let token: string | undefined;
+      try {
+        const url = new URL(req.url ?? '', 'http://placeholder');
+        pathname = url.pathname;
+        token = url.searchParams.get(TOKEN_QUERY_PARAM) ?? undefined;
+      } catch {
+        socket.destroy();
+        return;
+      }
+      if (pathname !== path) {
+        socket.destroy();
+        return;
+      }
+      // WebSocket upgrades bypass CORS: without this check any web page
+      // could attach to a session, read its output, and inject keystrokes.
+      // Same ConnectionTrust.classify() the REST onRequest hook and CSP use
+      // (see app.ts) — a new allowed host can't be added there and missed
+      // here. Browsers cannot set custom headers on a WS upgrade, so the
+      // token travels as a query param (TOKEN_QUERY_PARAM) rather than a
+      // header.
+      const result = classify(
+        { host: req.headers.host, origin: req.headers.origin, token },
+        trust,
+      );
+      const allowed = result.kind === 'local' || (result.kind === 'remote' && result.capabilities.size > 0);
+      if (!allowed) {
+        rejectUpgrade(socket);
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        connectionTrust.set(ws, result);
+        wss.emit('connection', ws, req);
+      });
+    });
+  }
 
   // socket → sessionIds it is viewing
   const viewing = new Map<WebSocket, Set<string>>();

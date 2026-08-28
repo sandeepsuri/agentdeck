@@ -28,6 +28,7 @@ import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordi
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import { publicSession } from './security.js';
+import { classify, TOKEN_HEADER } from './connection-trust.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
@@ -195,10 +196,27 @@ export interface RouteContext {
   modelCatalog?: ModelCatalog;
   /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
+  /** Ticket 05: the detected Tailscale hostname/IP, feeding classify() for GET /api/connection. Undefined when no tailnet interface was found. */
+  remoteHost?: string;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
+
+  // Ticket 05: how the client discovers "you're remote, please enter a
+  // token" in the first place. Deliberately exempt from the token gate in
+  // app.ts's onRequest hook (see the comment there) — it never returns
+  // anything sensitive, only the classification a phone needs to decide
+  // whether to show the token-entry screen.
+  app.get('/api/connection', async (req) => {
+    const token = req.headers[TOKEN_HEADER] as string | undefined;
+    const trust = classify(
+      { host: req.headers.host, origin: req.headers.origin, token },
+      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
+    );
+    return { kind: trust.kind, capabilities: [...trust.capabilities] };
+  });
+
   app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
   app.get('/api/companion', async () => {
     const sessions = manager.listSessions().map(publicSession);

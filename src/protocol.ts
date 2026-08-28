@@ -13,6 +13,16 @@ const MAX_ERROR_LENGTH = 4096;
 export const TERMINAL_COLS = 100;
 export const TERMINAL_ROWS = 30;
 
+// Ticket 05: the tailnet access token's transport. Browsers cannot set
+// custom headers on a WebSocket upgrade request, so the token travels as a
+// query param there; REST requests carry it as a header instead. These live
+// here (rather than in server/connection-trust.ts, which imports
+// node:crypto) so the UI bundle can import them without pulling
+// server-only code into the client — same reasoning as TERMINAL_COLS above.
+// connection-trust.ts re-exports both for server-side callers.
+export const TOKEN_QUERY_PARAM = 'token';
+export const TOKEN_HEADER = 'x-agentdeck-token';
+
 export interface VsCodeTerminalFrame {
   id: string;
   name: string;

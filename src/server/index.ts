@@ -1,7 +1,9 @@
+import crypto from 'node:crypto';
+import http, { type Server as HttpServer } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { WebSocketServer } from 'ws';
-import { loadConfig } from '../config.js';
+import { loadConfig, saveConfig } from '../config.js';
 import { CoordinationService } from '../coordination/service.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
 import { ITerm2Adapter, TerminalAppAdapter, TerminalRegistry, VsCodeAdapter, VsCodeBridge } from '../discovery/terminals/index.js';
@@ -12,6 +14,7 @@ import { ClaudeModelSource, ModelCatalog, OpenAiModelSource } from '../sessions/
 import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
 import { reconcileSessionsOnBoot } from './boot.js';
+import { detectTailscaleInterface } from './tailscale.js';
 import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
 import { publicSession } from './security.js';
@@ -32,6 +35,25 @@ export async function startServer(): Promise<RunningServer> {
   // the exact rules. Must finish before any managed session can relaunch
   // and start writing into the same sessionsDir.
   await reconcileSessionsOnBoot(store, sessionsDir);
+  // Ticket 05: detect a Tailscale interface (undefined on any failure —
+  // binary missing, not logged in, timeout — degrading to loopback-only,
+  // never blocking startup). Prefer the MagicDNS hostname when available
+  // since it's what a phone will most naturally be pointed at; the raw IP
+  // is the fallback both for classify()'s host match and for the actual
+  // second bind below (binding requires a concrete address either way).
+  const tailscale = await detectTailscaleInterface();
+  const remoteHost = tailscale?.hostname ?? tailscale?.ip;
+  // Second factor for remote access: generated once, ever, on first run
+  // with no configured token, then persisted at 0600 (config.ts, same
+  // pattern as openaiApiKey) and never regenerated afterward. It is never
+  // returned by any REST/WS response — the one-time console.log below (and
+  // reading ~/.agentdeck/config.json directly) are the only ways to see it.
+  let generatedToken: string | undefined;
+  if (!config.tailscaleToken) {
+    generatedToken = crypto.randomBytes(24).toString('base64url');
+    saveConfig({ tailscaleToken: generatedToken });
+    config.tailscaleToken = generatedToken;
+  }
   // Read live off `config` (not a snapshot) so a key saved later through
   // PATCH /api/settings (routes.ts mutates config.openaiApiKey in place)
   // is picked up by the very next summarize()/models call, with no
@@ -83,8 +105,9 @@ export async function startServer(): Promise<RunningServer> {
     },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
-  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery, modelCatalog });
+  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, remoteHost });
   let wss: WebSocketServer | undefined;
+  let tailnetServer: HttpServer | undefined;
   let companion: RunningCompanion | undefined;
   let closing = false;
   const close = async () => {
@@ -97,6 +120,7 @@ export async function startServer(): Promise<RunningServer> {
     wakeLock.release();
     await manager.shutdown();
     if (wss) await closeWs(wss);
+    if (tailnetServer) await new Promise<void>((resolve) => tailnetServer!.close(() => resolve()));
     await app.close();
     store.close();
   };
@@ -104,8 +128,36 @@ export async function startServer(): Promise<RunningServer> {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
+    // Loopback bind stays exactly as before — never 0.0.0.0.
     const address = await app.listen({ port, host: '127.0.0.1' });
-    wss = attachWs(app.server, manager, '/ws', vscode, () => {
+    const servers: HttpServer[] = [app.server];
+
+    // Second bind, only when a tailnet interface was found: a raw
+    // http.Server on the concrete tailnet IP (can't bind a DNS hostname),
+    // reusing Fastify's own request listener so both binds share identical
+    // routing/CSP/auth — never a second, divergently-configured app.
+    if (tailscale) {
+      const requestListener = app.server.listeners('request')[0] as
+        ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void) | undefined;
+      if (requestListener) {
+        try {
+          tailnetServer = http.createServer(requestListener);
+          await new Promise<void>((resolve, reject) => {
+            tailnetServer!.once('error', reject);
+            tailnetServer!.listen(port, tailscale.ip, () => resolve());
+          });
+          servers.push(tailnetServer);
+        } catch (error) {
+          // A failed second bind (e.g. the interface vanished, or the port
+          // is already taken on that address) must degrade to
+          // loopback-only, not crash a server that otherwise started fine.
+          console.error('[agentdeck] failed to bind the Tailscale interface; continuing on loopback only', error);
+          tailnetServer = undefined;
+        }
+      }
+    }
+
+    wss = attachWs(servers, manager, '/ws', vscode, () => {
       const sessions = manager.listSessions().map(publicSession);
       const events = store.listEvents({ limit: 1000 });
       const attention = deriveAttentionItems(sessions, events);
@@ -114,13 +166,20 @@ export async function startServer(): Promise<RunningServer> {
         attention,
         agents: deriveCompanionAgents(sessions, events, attention),
       };
-    });
+    }, { remoteHost, token: config.tailscaleToken });
+
     companion = launchNativeCompanion(port);
     discovery.start();
     void coordination.syncRepos(store.listRepos());
     if (!store.getSetting<boolean>('firstRunShown')) {
       console.log('[agentdeck] First run: macOS may request Automation access when focusing terminal tabs. You can continue if denied and enable it later in System Settings → Privacy & Security → Automation.');
       store.setSetting('firstRunShown', true);
+    }
+    if (generatedToken) {
+      console.log(`[agentdeck] generated a tailnet access token: ${generatedToken}`);
+      console.log(remoteHost
+        ? `[agentdeck] Tailscale detected at ${remoteHost} — open http://${remoteHost}:${port} on another device on the same tailnet and enter this token once.`
+        : '[agentdeck] No Tailscale interface detected; remote access is unavailable until Tailscale is running on this machine.');
     }
     console.log(`[agentdeck] listening on ${address}`);
     return { address, close };

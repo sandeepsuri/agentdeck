@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { apiFetch } from '../apiFetch.js';
 
 type DiffMode = 'uncommitted' | 'branch';
 
@@ -49,7 +50,7 @@ function FileDiffView({ repoPath, file, mode }: { repoPath: string; file: DiffFi
   useEffect(() => {
     let cancelled = false;
     const query = new URLSearchParams({ repo: repoPath, path: file.path, mode });
-    fetch(`/api/repos/diff/file?${query}`)
+    apiFetch(`/api/repos/diff/file?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('fetch failed')))
       .then((body: FileDiff) => { if (!cancelled) { setFileDiff(body); setFailed(false); } })
       .catch(() => { if (!cancelled) setFailed(true); });
@@ -79,7 +80,7 @@ export function DiffPanel({ repoPath, onCount }: { repoPath: string; onCount?: (
 
   const refresh = useCallback(() => {
     const query = new URLSearchParams({ repo: repoPath, mode });
-    fetch(`/api/repos/diff?${query}`)
+    apiFetch(`/api/repos/diff?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('fetch failed')))
       .then((body: DiffSummary) => { setSummary(body); setError(null); })
       .catch(() => setError('Could not load changes for this repository.'));

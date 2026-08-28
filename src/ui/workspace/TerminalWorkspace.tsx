@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
+import { apiFetch } from '../apiFetch.js';
 import { Terminal } from '../components/Terminal.js';
 import { ElapsedTime, isEndedSession, sessionLabel } from './model.js';
 import { nextMountedTerminalIds, sameIds, terminalViewKeys } from './terminalViews.js';
@@ -14,7 +15,7 @@ interface Props {
 }
 
 async function sendToSession(session: Session, text: string): Promise<{ delivered?: string; error?: string }> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
+  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ text }),
