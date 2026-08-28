@@ -16,6 +16,7 @@ import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
+import { WakeLock } from './wake-lock.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -53,6 +54,21 @@ export async function startServer(): Promise<RunningServer> {
       },
     }),
   });
+  // Holds a `caffeinate` assertion while any managed session is live
+  // (spec Stage 4 step 5). Wired directly on `manager`, independent of
+  // ws.ts/attachWs, so this keeps working with zero WebSocket clients
+  // connected. Same live-session predicate as
+  // ui/workspace/model.tsx's isEndedSession, negated.
+  const wakeLock = new WakeLock();
+  const recomputeWakeLock = () => {
+    const liveManagedCount = manager.listSessions()
+      .filter((session) => session.origin === 'managed' && session.status !== 'exited')
+      .length;
+    wakeLock.update(liveManagedCount);
+  };
+  manager.on('session_update', recomputeWakeLock);
+  manager.on('session_removed', recomputeWakeLock);
+
   const vscode = new VsCodeBridge();
   const terminals = new TerminalRegistry([
     new TerminalAppAdapter(), new ITerm2Adapter(), new VsCodeAdapter(vscode),
@@ -78,6 +94,7 @@ export async function startServer(): Promise<RunningServer> {
     process.off('SIGTERM', onSignal);
     discovery.stop(); coordination.stop();
     companion?.close();
+    wakeLock.release();
     await manager.shutdown();
     if (wss) await closeWs(wss);
     await app.close();
