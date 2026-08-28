@@ -362,6 +362,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return this.live.get(sessionId)?.transcript.snapshot() ?? '';
   }
 
+  /**
+   * The live SessionTranscript for a session, if it's currently live —
+   * undefined once the session has exited (its `live` entry is deleted
+   * after handleExit compacts). Ticket 13's LiveReflow uses this (rather
+   * than depending on SessionManager directly) to periodically re-render a
+   * phone-viewed session's transcript; see src/sessions/live-reflow.ts.
+   */
+  getTranscript(sessionId: string): SessionTranscript | undefined {
+    return this.live.get(sessionId)?.transcript;
+  }
+
   getSession(sessionId: string): Session | undefined {
     return this.store.getSession(sessionId);
   }
