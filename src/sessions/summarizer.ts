@@ -14,7 +14,7 @@
 // provider does not touch the summary flow"). The interface hides provider
 // selection, key resolution, the prompt, and input truncation from callers.
 import { execFile } from 'node:child_process';
-import { parseModelId, type ModelProvider } from './model-catalog.js';
+import { parseModelId, type ModelProvider, type OpenAiClientOptions } from './model-catalog.js';
 
 export interface SummarizeOptions {
   /**
@@ -117,12 +117,7 @@ export class ClaudeCliSummarizer implements Summarizer {
   }
 }
 
-export interface OpenAiSummarizerOptions {
-  /** Resolved at call time, not baked in at construction, so a key saved through Settings applies to the very next summarize() call without a server restart. */
-  getApiKey: () => string | undefined;
-  /** Injectable for tests — never call the real OpenAI endpoint from an automated test. */
-  fetchImpl?: typeof fetch;
-  baseUrl?: string;
+export interface OpenAiSummarizerOptions extends OpenAiClientOptions {
   timeoutMs?: number;
 }
 

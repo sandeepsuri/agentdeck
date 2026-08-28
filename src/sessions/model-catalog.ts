@@ -112,13 +112,21 @@ function isAllowedOpenAiModel(id: string): boolean {
     && !OPENAI_DENY_SUBSTRINGS.some((needle) => id.includes(needle));
 }
 
-export interface OpenAiModelSourceOptions {
+/**
+ * Shared shape for reaching OpenAI's HTTP API — used by both
+ * OpenAiModelSource (this file) and OpenAiSummarizer (summarizer.ts), two
+ * independent callers of the same provider that were duplicating this
+ * triple verbatim.
+ */
+export interface OpenAiClientOptions {
   /** Resolved at call time (not baked in at construction), so a key configured later through Settings is picked up without a server restart. */
   getApiKey: () => string | undefined;
   /** Injectable for tests — never call the real OpenAI endpoint from an automated test. */
   fetchImpl?: typeof fetch;
   baseUrl?: string;
 }
+
+export type OpenAiModelSourceOptions = OpenAiClientOptions;
 
 /**
  * Genuine runtime fetch against OpenAI's public Models endpoint
