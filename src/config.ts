@@ -22,6 +22,16 @@ export interface AgentDeckConfig {
    * visible-but-disabled in the picker with a hint to configure one.
    */
   openaiApiKey?: string;
+  /**
+   * Second-factor token gating tailnet (remote) access (ticket 05). Same
+   * storage contract as openaiApiKey above: config.json only, 0600, never
+   * SQLite, never logged. Unlike openaiApiKey it is also never returned by
+   * any REST/WS response — not even a presence boolean — since it's the
+   * whole authentication story for remote access; see server/index.ts's
+   * startServer() for the one-time console.log on first generation, which
+   * is the only place this value is ever surfaced outside this file.
+   */
+  tailscaleToken?: string;
 }
 
 export function defaultDataDir(): string {
@@ -82,6 +92,9 @@ export function loadConfig(configPath?: string): AgentDeckConfig {
   }
   if (typeof o.openaiApiKey === 'string' && o.openaiApiKey.length > 0) {
     cfg.openaiApiKey = o.openaiApiKey;
+  }
+  if (typeof o.tailscaleToken === 'string' && o.tailscaleToken.length > 0) {
+    cfg.tailscaleToken = o.tailscaleToken;
   }
   return cfg;
 }

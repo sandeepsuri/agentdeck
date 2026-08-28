@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { WebSocketServer } from 'ws';
@@ -16,6 +17,9 @@ import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
+import { WakeLock } from './wake-lock.js';
+import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
+import { coordinateManagedWakeLock } from './managed-wake-lock.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -31,6 +35,18 @@ export async function startServer(): Promise<RunningServer> {
   // the exact rules. Must finish before any managed session can relaunch
   // and start writing into the same sessionsDir.
   await reconcileSessionsOnBoot(store, sessionsDir);
+  // Ticket 05: detect a Tailscale interface (undefined on any failure —
+  // binary missing, not logged in, timeout — degrading to loopback-only,
+  // never blocking startup). Prefer the MagicDNS hostname when available
+  // since it's what a phone will most naturally be pointed at; the raw IP
+  // is the fallback both for classify()'s host match and for the actual
+  // second bind below (binding requires a concrete address either way).
+  const remoteAccess = await configureRemoteAccess(config);
+  // Second factor for remote access: generated once, ever, on first run
+  // with no configured token, then persisted at 0600 (config.ts, same
+  // pattern as openaiApiKey) and never regenerated afterward. It is never
+  // returned by any REST/WS response — the one-time console.log below (and
+  // reading ~/.agentdeck/config.json directly) are the only ways to see it.
   // Read live off `config` (not a snapshot) so a key saved later through
   // PATCH /api/settings (routes.ts mutates config.openaiApiKey in place)
   // is picked up by the very next summarize()/models call, with no
@@ -53,6 +69,13 @@ export async function startServer(): Promise<RunningServer> {
       },
     }),
   });
+  // Holds a `caffeinate` assertion while any managed session is live
+  // (spec Stage 4 step 5). Wired directly on `manager`, independent of
+  // ws.ts/attachWs, so this keeps working with zero WebSocket clients
+  // connected. Same live-session predicate as
+  // ui/workspace/model.tsx's isEndedSession, negated.
+  const releaseWakeLock = coordinateManagedWakeLock(manager, new WakeLock());
+
   const vscode = new VsCodeBridge();
   const terminals = new TerminalRegistry([
     new TerminalAppAdapter(), new ITerm2Adapter(), new VsCodeAdapter(vscode),
@@ -67,8 +90,12 @@ export async function startServer(): Promise<RunningServer> {
     },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
-  const app = buildApp({ config, manager, store, terminals, coordination, vscode, discovery, modelCatalog });
+  const app = buildApp({
+    config, manager, store, terminals, coordination, vscode, discovery, modelCatalog,
+    remoteHosts: remoteAccess.hosts,
+  });
   let wss: WebSocketServer | undefined;
+  let tailnetServer: HttpServer | undefined;
   let companion: RunningCompanion | undefined;
   let closing = false;
   const close = async () => {
@@ -78,8 +105,10 @@ export async function startServer(): Promise<RunningServer> {
     process.off('SIGTERM', onSignal);
     discovery.stop(); coordination.stop();
     companion?.close();
+    releaseWakeLock();
     await manager.shutdown();
     if (wss) await closeWs(wss);
+    if (tailnetServer) await new Promise<void>((resolve) => tailnetServer!.close(() => resolve()));
     await app.close();
     store.close();
   };
@@ -87,8 +116,14 @@ export async function startServer(): Promise<RunningServer> {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
+    // Loopback bind stays exactly as before — never 0.0.0.0.
     const address = await app.listen({ port, host: '127.0.0.1' });
-    wss = attachWs(app.server, manager, '/ws', vscode, () => {
+    const servers: HttpServer[] = [app.server];
+
+    tailnetServer = await listenOnTailnet(app.server, port, remoteAccess.tailscale);
+    if (tailnetServer) servers.push(tailnetServer);
+
+    wss = attachWs(servers, manager, '/ws', vscode, () => {
       const sessions = manager.listSessions().map(publicSession);
       const events = store.listEvents({ limit: 1000 });
       const attention = deriveAttentionItems(sessions, events);
@@ -97,13 +132,22 @@ export async function startServer(): Promise<RunningServer> {
         attention,
         agents: deriveCompanionAgents(sessions, events, attention),
       };
-    });
+    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken });
+
     companion = launchNativeCompanion(port);
     discovery.start();
     void coordination.syncRepos(store.listRepos());
     if (!store.getSetting<boolean>('firstRunShown')) {
       console.log('[agentdeck] First run: macOS may request Automation access when focusing terminal tabs. You can continue if denied and enable it later in System Settings → Privacy & Security → Automation.');
       store.setSetting('firstRunShown', true);
+    }
+    if (remoteAccess.generatedToken) {
+      console.log(`[agentdeck] generated a tailnet access token: ${remoteAccess.generatedToken}`);
+      const publicPort = process.env.AGENTDECK_DEV ? config.port : port;
+      const preferredRemoteHost = remoteAccess.tailscale?.hostname ?? remoteAccess.tailscale?.ip;
+      console.log(preferredRemoteHost
+        ? `[agentdeck] Tailscale detected at ${preferredRemoteHost} — open http://${preferredRemoteHost}:${publicPort} on another device on the same tailnet and enter this token once.`
+        : '[agentdeck] No Tailscale interface detected; remote access is unavailable until Tailscale is running on this machine.');
     }
     console.log(`[agentdeck] listening on ${address}`);
     return { address, close };

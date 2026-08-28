@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Repo, Session } from '../../types.js';
+import { apiFetch } from '../apiFetch.js';
 import { repoDisplayName, sessionLabel } from './model.js';
 
 interface Props {
@@ -25,7 +26,7 @@ function HistoryScrollback({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     let disposed = false;
     setState({ loading: true, scrollback: null, error: null });
-    fetch(`/api/sessions/${encodeURIComponent(sessionId)}/scrollback`)
+    apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/scrollback`)
       .then(async (response) => {
         const body = await response.json() as { scrollback?: string; error?: string };
         if (disposed) return;

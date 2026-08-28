@@ -10,6 +10,12 @@ import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import type { ModelCatalog } from '../sessions/model-catalog.js';
 import { registerRoutes, type RouteContext } from './routes.js';
+import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
+
+// Re-exported for existing callers (ws.test.ts imports both from here); the
+// canonical implementations now live in connection-trust.ts so classify()
+// can use them without an app.ts <-> connection-trust.ts import cycle.
+export { isAllowedOrigin, isLoopbackHostHeader };
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -23,6 +29,36 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
 ].join('; ');
 
+/**
+ * Code-review finding: an authenticated remote connection had the exact
+ * same REST surface as local — launching sessions, discarding uncommitted
+ * git changes, installing hooks, PATCHing settings (including the OpenAI
+ * key), publish/PR, stop/restart — because the onRequest hook below only
+ * ever checked "is this connection authenticated at all", never "is this
+ * specific route part of what a remote connection is for". The spec's
+ * Decisions table is explicit about the intended surface: "Mobile
+ * capability | Reflowed text view, free-text composer, fixed control-key
+ * buttons" — nothing about session launch or app configuration. A valid
+ * tailnet token authenticates a connection; it does not grant it the same
+ * administrative capability as sitting at the machine.
+ *
+ * This is an explicit allowlist (not a denylist) of exactly the /api/*
+ * routes the mobile UI (tickets 13/14) actually calls — GET /api/sessions
+ * (MobileWorkspace's session list/picker) and POST .../send (the
+ * composer) — plus the always-safe, non-sensitive health check. Everything
+ * else under /api/* is local-only by default; a new route added later
+ * doesn't need to remember to exclude remote, it has to be deliberately
+ * added here to include it. GET /api/connection is handled separately
+ * above this check (it must work pre-authentication) and WS traffic isn't
+ * an /api/* path at all — ws.ts enforces its own capability checks
+ * (raw-write on 'input', local-only for raw output/replay/tile_preview).
+ */
+function isRemoteAllowedRoute(method: string, pathname: string): boolean {
+  if (method === 'GET' && (pathname === '/api/health' || pathname === '/api/sessions')) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/send$/.test(pathname)) return true;
+  return false;
+}
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -32,35 +68,6 @@ const MIME: Record<string, string> = {
   '.map': 'application/json',
   '.woff2': 'font/woff2',
 };
-
-/**
- * The server binds to 127.0.0.1, but browsers will happily send requests
- * here from any web page (DNS rebinding defeats same-origin for the REST
- * API; WebSocket upgrades skip CORS entirely). Only loopback Host/Origin
- * values are allowed; requests without an Origin (curl, CLI) are fine
- * because they already run as the local user.
- */
-export function isLoopbackHostHeader(host: string | undefined): boolean {
-  if (!host) return false;
-  const hostname = host.startsWith('[')
-    ? host.slice(1, host.indexOf(']'))
-    : host.split(':')[0] ?? '';
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
-}
-
-export function isAllowedOrigin(origin: string | undefined, requestHost?: string): boolean {
-  if (origin === undefined) return true; // non-browser client
-  try {
-    const parsed = new URL(origin);
-    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
-      || parsed.origin !== origin || !isLoopbackHostHeader(parsed.host)) return false;
-    if (requestHost === undefined) return true;
-    const requested = new URL(`${parsed.protocol}//${requestHost}`);
-    return parsed.hostname === requested.hostname && parsed.port === requested.port;
-  } catch {
-    return false;
-  }
-}
 
 export interface AppContext {
   config: AgentDeckConfig;
@@ -73,13 +80,29 @@ export interface AppContext {
   installVsCode?: RouteContext['installVsCode'];
   publish?: RouteContext['publish'];
   modelCatalog?: ModelCatalog;
+  /**
+   * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
+   * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
+   * for the host allow-check, the origin check, the CSP connect-src, and
+   * (via routes.ts) GET /api/connection.
+   */
+  remoteHosts?: readonly string[];
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
   app.addHook('onRequest', async (req, reply) => {
-    const allowedHost = isLoopbackHostHeader(req.headers.host);
+    // ConnectionTrust decides once (host + origin + token); the REST host
+    // check, the CSP connect-src below, the WebSocket upgrade (ws.ts), and
+    // GET /api/connection (routes.ts) all defer to the same classify() call
+    // so a newly allowed host can't be added in one place and missed in
+    // another (see docs/specs, "ConnectionTrust").
+    const trust = classify(
+      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+      { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+    );
+    const allowedHost = trust.kind !== 'denied';
     const connectPolicy = allowedHost ? `connect-src 'self' ws://${req.headers.host}` : "connect-src 'self'";
     reply.headers({
       'cache-control': 'no-store',
@@ -94,8 +117,24 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     if (!allowedHost) {
       return reply.code(403).send({ error: 'forbidden host' });
     }
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
-      return reply.code(403).send({ error: 'forbidden origin' });
+    // Remote-but-unauthenticated (no/invalid token) may still load the SPA
+    // shell and static assets — otherwise the phone could never load the
+    // page that prompts for a token — but every /api/* call requires the
+    // token, except /api/connection itself, which is how the client
+    // discovers "you're remote, please enter a token" in the first place.
+    const pathname = (req.url ?? '').split('?')[0] ?? '';
+    const isApiRoute = pathname.startsWith('/api/');
+    const requiresRemoteToken = isApiRoute && pathname !== '/api/connection';
+    if (requiresRemoteToken && trust.kind === 'remote' && trust.capabilities.size === 0) {
+      return reply.code(403).send({ error: 'a valid tailnet token is required' });
+    }
+    // A remote connection is scoped to exactly what the mobile experience
+    // needs, not the full local REST surface — see isRemoteAllowedRoute's
+    // comment above. Only reached once a remote connection is already
+    // authenticated (the check above already rejected an empty-capability
+    // remote request), so this narrows further rather than duplicating it.
+    if (requiresRemoteToken && trust.kind === 'remote' && !isRemoteAllowedRoute(req.method, pathname)) {
+      return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
     }
   });
 
@@ -112,6 +151,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     installVsCode: ctx.installVsCode,
     publish: ctx.publish,
     modelCatalog: ctx.modelCatalog,
+    remoteHosts: ctx.remoteHosts,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the

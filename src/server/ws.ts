@@ -1,42 +1,131 @@
 // WebSocket terminal bridge (T4): wires SessionManager events to attached
 // sockets. Multiple viewers per session; a socket may keep multiple sessions
 // attached, with every terminal frame scoped by session id.
+//
+// Ticket 05: the loopback bind and (when Tailscale is detected) a second
+// bind on the tailnet interface both need this WS endpoint. `attachWs` now
+// takes an array of underlying http.Servers and builds one `noServer: true`
+// WebSocketServer, manually listening for 'upgrade' on each one so both
+// share identical accept logic (see server/index.ts's dual bind).
 import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
-import { isAllowedOrigin, isLoopbackHostHeader } from './app.js';
+import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
+import { isAllowedRemoteInput } from './remote-input.js';
+import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
+// Per-socket classification, set once at accept time (before the
+// WebSocketServer's own 'connection' event fires) so ticket 14's raw-write
+// enforcement — and anything else that needs to know what a connection may
+// do — can look it up without re-deriving it from the (by-then-consumed)
+// upgrade request.
+const connectionTrust = new WeakMap<WebSocket, TrustResult>();
+
+export function getConnectionTrust(ws: WebSocket): TrustResult | undefined {
+  return connectionTrust.get(ws);
+}
+
+function rejectUpgrade(socket: NodeJS.WritableStream & { destroy: () => void }): void {
+  const body = 'Unauthorized';
+  try {
+    (socket as unknown as { write: (chunk: string) => void }).write(
+      `HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    );
+  } finally {
+    socket.destroy();
+  }
+}
+
 export function attachWs(
-  server: HttpServer,
+  servers: HttpServer[],
   manager: SessionManager,
   path = '/ws',
   vscode?: VsCodeBridge,
   companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
+  trust: { remoteHosts?: readonly string[]; token?: string } = {},
 ): WebSocketServer {
-  // WebSocket upgrades bypass CORS: without this check any web page could
-  // attach to a session, read its output, and inject keystrokes.
+  // noServer: true because there are now potentially two underlying
+  // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
+  // below to the same WebSocketServer instance, running the same
+  // ConnectionTrust check before ever calling handleUpgrade.
   const wss = new WebSocketServer({
-    server,
+    noServer: true,
     path,
     maxPayload: MAX_WS_PAYLOAD_BYTES,
     perMessageDeflate: false,
-    verifyClient: ({ origin, req }: { origin?: string; req: { headers: { host?: string } } }) =>
-      isLoopbackHostHeader(req.headers.host) && isAllowedOrigin(origin, req.headers.host),
   });
+
+  for (const server of servers) {
+    server.on('upgrade', (req, socket, head) => {
+      let pathname: string;
+      let token: string | undefined;
+      try {
+        const url = new URL(req.url ?? '', 'http://placeholder');
+        pathname = url.pathname;
+        token = url.searchParams.get(TOKEN_QUERY_PARAM) ?? undefined;
+      } catch {
+        socket.destroy();
+        return;
+      }
+      if (pathname !== path) {
+        socket.destroy();
+        return;
+      }
+      // WebSocket upgrades bypass CORS: without this check any web page
+      // could attach to a session, read its output, and inject keystrokes.
+      // Same ConnectionTrust.classify() the REST onRequest hook and CSP use
+      // (see app.ts) — a new allowed host can't be added there and missed
+      // here. Browsers cannot set custom headers on a WS upgrade, so the
+      // token travels as a query param (TOKEN_QUERY_PARAM) rather than a
+      // header.
+      const result = classify(
+        { host: req.headers.host, origin: req.headers.origin, token },
+        trust,
+      );
+      const allowed = result.kind === 'local' || (result.kind === 'remote' && result.capabilities.size > 0);
+      if (!allowed) {
+        rejectUpgrade(socket);
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        connectionTrust.set(ws, result);
+        wss.emit('connection', ws, req);
+      });
+    });
+  }
 
   // socket → sessionIds it is viewing
   const viewing = new Map<WebSocket, Set<string>>();
   const uiPresence = new Map<WebSocket, boolean>();
+  const managedSessionIds = new Set(
+    manager.listSessions().filter((session) => session.origin === 'managed').map((session) => session.id),
+  );
+
+  // Ticket 13: one LiveReflow instance for the whole server, backed by the
+  // manager's live transcripts. socket → sessionId → unsubscribe tracks
+  // each remote viewer's subscription so 'detach' and the socket's 'close'
+  // handler (below) can tear it down without leaking a shared timer.
+  const liveReflow = new LiveReflow((sessionId) => manager.getTranscript(sessionId));
+  const reflowSubs = new Map<WebSocket, Map<string, Unsubscribe>>();
 
   const send = (ws: WebSocket, frame: ServerFrame) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
   };
+  // A missing trust entry is treated as NOT local (fail-safe, withholding
+  // raw PTY bytes) rather than defaulting to full desktop access — same
+  // fail-safe direction ticket 14 uses for capability checks on the
+  // 'input' path below. In practice every accepted connection has an entry
+  // (set at upgrade time, see connectionTrust above) since it's populated
+  // before the WebSocketServer's own 'connection' event fires, so this
+  // only matters if that invariant is ever broken by a future change.
+  // Denied connections never reach here at all (rejected at upgrade).
+  const isLocalSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.kind === 'local';
   const isUiVisible = () => [...uiPresence.values()].some(Boolean);
   const broadcastPresence = () => {
     const visible = isUiVisible();
@@ -50,22 +139,38 @@ export function attachWs(
       sessions: provided.sessions.map(publicSession),
       uiVisible: isUiVisible(),
     };
-    for (const ws of wss.clients) send(ws, { t: 'companion_snapshot', snapshot });
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'companion_snapshot', snapshot });
+    }
   };
 
   manager.on('output', (sessionId, data) => {
+    // Raw PTY bytes are a desktop-grid concept: a remote (phone) socket
+    // must never receive them, regardless of what it's attached to — it
+    // only ever gets 'reflow_text' (see the 'attach' case below and
+    // LiveReflow). Ticket 05's ConnectionTrust decided this once; this is
+    // one of the four places that ask it (see connection-trust.ts).
     for (const [ws, sessionIds] of viewing) {
-      if (sessionIds.has(sessionId)) send(ws, { t: 'output', sessionId, data });
+      if (sessionIds.has(sessionId) && isLocalSocket(ws)) send(ws, { t: 'output', sessionId, data });
     }
     // Mission Control tiles are not "attached" viewers — push a lightweight
     // preview chunk to every socket so grid tiles update live without each
-    // tile polling its own REST endpoint.
-    for (const ws of wss.clients) send(ws, { t: 'tile_preview', sessionId, data, seed: false });
+    // tile polling its own REST endpoint. Local-only for the same reason:
+    // Mission Control is a desktop-grid concept a phone has no use for, and
+    // this carries raw bytes too.
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'tile_preview', sessionId, data, seed: false });
+    }
   });
 
-  // session_update goes to every socket — the session list is global state.
+  // Local sockets see the global list; remote sockets see managed sessions only.
   manager.on('session_update', (session) => {
-    for (const ws of wss.clients) send(ws, { t: 'session_update', session: publicSession(session) });
+    if (session.origin === 'managed') managedSessionIds.add(session.id);
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws) || session.origin === 'managed') {
+        send(ws, { t: 'session_update', session: publicSession(session) });
+      }
+    }
     broadcastCompanionSnapshot();
   });
 
@@ -74,17 +179,22 @@ export function attachWs(
       sessionIds.delete(sessionId);
       if (sessionIds.size === 0) viewing.delete(ws);
     }
-    for (const ws of wss.clients) send(ws, { t: 'session_removed', sessionId });
+    const wasManaged = managedSessionIds.delete(sessionId);
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws) || wasManaged) send(ws, { t: 'session_removed', sessionId });
+    }
     broadcastCompanionSnapshot();
   });
 
   manager.on('agent_event', (event) => {
-    for (const ws of wss.clients) send(ws, { t: 'agent_event', event });
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'agent_event', event });
+    }
     broadcastCompanionSnapshot();
   });
 
   wss.on('connection', (ws) => {
-    if (companionSnapshot) {
+    if (companionSnapshot && isLocalSocket(ws)) {
       const provided = companionSnapshot();
       send(ws, { t: 'ui_presence', visible: isUiVisible() });
       send(ws, {
@@ -98,10 +208,14 @@ export function attachWs(
     }
     // Seed Mission Control tiles with whatever a managed session has already
     // produced, so a freshly opened grid doesn't sit blank until the next
-    // output batch arrives.
-    for (const session of manager.listSessions()) {
-      if (session.origin === 'managed' && manager.isLive(session.id)) {
-        send(ws, { t: 'tile_preview', sessionId: session.id, data: manager.getBuffer(session.id), seed: true });
+    // output batch arrives. Local-only: this carries raw PTY bytes, and
+    // Mission Control tiles are a desktop-grid concept a phone has no use
+    // for (see the 'output' handler above for the same restriction).
+    if (isLocalSocket(ws)) {
+      for (const session of manager.listSessions()) {
+        if (session.origin === 'managed' && manager.isLive(session.id)) {
+          send(ws, { t: 'tile_preview', sessionId: session.id, data: manager.getBuffer(session.id), seed: true });
+        }
       }
     }
     ws.on('message', (raw) => {
@@ -109,23 +223,55 @@ export function attachWs(
       if (!frame) return;
       switch (frame.t) {
         case 'attach': {
-          if (!manager.getSession(frame.sessionId)) return;
+          const session = manager.getSession(frame.sessionId);
+          if (!session || (!isLocalSocket(ws) && session.origin !== 'managed')) return;
           const sessionIds = viewing.get(ws) ?? new Set<string>();
           sessionIds.add(frame.sessionId);
           viewing.set(ws, sessionIds);
-          send(ws, { t: 'replay', sessionId: frame.sessionId, data: manager.getBuffer(frame.sessionId) });
+          if (isLocalSocket(ws)) {
+            // Desktop path, byte-for-byte unchanged from before ticket 13.
+            send(ws, { t: 'replay', sessionId: frame.sessionId, data: manager.getBuffer(frame.sessionId) });
+          } else {
+            // Remote (phone) viewer: no raw replay/output ever. LiveReflow
+            // owns the shared per-session timer; guard against a duplicate
+            // attach (no intervening detach) leaking a second subscription.
+            const subs = reflowSubs.get(ws) ?? new Map<string, Unsubscribe>();
+            if (!subs.has(frame.sessionId)) {
+              const sessionId = frame.sessionId;
+              const unsubscribe = liveReflow.attach(sessionId, (text) => {
+                send(ws, { t: 'reflow_text', sessionId, text });
+              });
+              subs.set(sessionId, unsubscribe);
+              reflowSubs.set(ws, subs);
+            }
+          }
           break;
         }
         case 'detach': {
           const sessionIds = viewing.get(ws);
           sessionIds?.delete(frame.sessionId);
           if (sessionIds?.size === 0) viewing.delete(ws);
+          const subs = reflowSubs.get(ws);
+          const unsubscribe = subs?.get(frame.sessionId);
+          if (subs && unsubscribe) {
+            unsubscribe();
+            subs.delete(frame.sessionId);
+            if (subs.size === 0) reflowSubs.delete(ws);
+          }
           break;
         }
         case 'input': {
           const sessionIds = viewing.get(ws);
           if (sessionIds?.has(frame.sessionId) && manager.isLive(frame.sessionId)) {
-            manager.write(frame.sessionId, frame.data);
+            // Ticket 14: a connection without 'raw-write' (remote, or —
+            // fail safe — one whose trust result is missing entirely) may
+            // only pass through the fixed control-key set. Refusal is a
+            // silent no-op, the same shape as the existing viewing/isLive
+            // checks above, not an error frame back to the client.
+            const hasRawWrite = getConnectionTrust(ws)?.capabilities.has('raw-write') ?? false;
+            if (hasRawWrite || isAllowedRemoteInput(frame.data)) {
+              manager.write(frame.sessionId, frame.data);
+            }
           }
           break;
         }
@@ -147,6 +293,11 @@ export function attachWs(
     });
     ws.on('close', () => {
       viewing.delete(ws);
+      const subs = reflowSubs.get(ws);
+      if (subs) {
+        for (const unsubscribe of subs.values()) unsubscribe();
+        reflowSubs.delete(ws);
+      }
       if (uiPresence.delete(ws)) {
         broadcastPresence();
         broadcastCompanionSnapshot();

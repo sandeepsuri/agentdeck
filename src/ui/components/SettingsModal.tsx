@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Model } from '../../sessions/model-catalog.js';
+import { apiFetch } from '../apiFetch.js';
 
 interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; error?: string }
 
@@ -23,8 +24,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      fetch('/api/models').then((response) => response.json() as Promise<Model[]>),
-      fetch('/api/settings').then((response) => response.json() as Promise<SettingsBody>),
+      apiFetch('/api/models').then((response) => response.json() as Promise<Model[]>),
+      apiFetch('/api/settings').then((response) => response.json() as Promise<SettingsBody>),
     ]).then(([modelList, settings]) => {
       if (cancelled) return;
       setModels(modelList);
@@ -46,7 +47,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setError(null);
     setSaved(false);
     try {
-      const response = await fetch('/api/settings', {
+      const response = await apiFetch('/api/settings', {
         method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
       });
       const result = await response.json() as SettingsBody;

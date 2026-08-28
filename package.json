@@ -20,7 +20,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "tsx scripts/dev.ts",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && npm run build:vscode && npm run build:notch",
     "build:vscode": "node scripts/build-vscode-extension.mjs",
     "build:notch": "node scripts/build-notch.mjs",
@@ -50,6 +50,7 @@
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
     "esbuild": "^0.28.1",
+    "jsdom": "^29.1.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",

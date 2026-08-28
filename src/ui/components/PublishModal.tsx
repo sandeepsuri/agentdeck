@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { apiFetch } from '../apiFetch.js';
 
 export type PublishMode = 'commit' | 'pr';
 
@@ -47,7 +48,7 @@ interface CompletedSteps {
 }
 
 async function requestJson<T>(url: string, body?: object): Promise<T> {
-  const response = await fetch(url, body ? {
+  const response = await apiFetch(url, body ? {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   } : undefined);
   const value = await response.json() as T & { error?: string };

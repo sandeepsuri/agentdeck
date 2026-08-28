@@ -1,5 +1,5 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
@@ -28,6 +28,8 @@ import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordi
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import { publicSession } from './security.js';
+import { classify, TOKEN_HEADER } from './connection-trust.js';
+import { containsDisallowedControlBytes } from './remote-input.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
@@ -195,11 +197,37 @@ export interface RouteContext {
   modelCatalog?: ModelCatalog;
   /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
+  /** Ticket 05: the detected Tailscale hostname and IP, feeding classify() for GET /api/connection. Empty/undefined when no tailnet interface was found. */
+  remoteHosts?: readonly string[];
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
-  app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
+  const requestTrust = (req: FastifyRequest) => classify(
+    {
+      host: req.headers.host,
+      origin: req.headers.origin,
+      token: req.headers[TOKEN_HEADER] as string | undefined,
+    },
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+  );
+
+  // Ticket 05: how the client discovers "you're remote, please enter a
+  // token" in the first place. Deliberately exempt from the token gate in
+  // app.ts's onRequest hook (see the comment there) — it never returns
+  // anything sensitive, only the classification a phone needs to decide
+  // whether to show the token-entry screen.
+  app.get('/api/connection', async (req) => {
+    const trust = requestTrust(req);
+    return { kind: trust.kind, capabilities: [...trust.capabilities] };
+  });
+
+  app.get('/api/sessions', async (req) => {
+    const sessions = manager.listSessions();
+    return (requestTrust(req).kind === 'remote'
+      ? sessions.filter((session) => session.origin === 'managed')
+      : sessions).map(publicSession);
+  });
   app.get('/api/companion', async () => {
     const sessions = manager.listSessions().map(publicSession);
     const events = ctx.store?.listEvents({ limit: 1000 }) ?? [];
@@ -733,6 +761,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
     if (text.length > MAX_MESSAGE_LENGTH) return reply.code(400).send({ error: 'text is too long' });
+    // Code-review finding: this route writes `text` to the PTY verbatim
+    // (below, for a managed session), and ticket 05 made it reachable by an
+    // authenticated remote connection — without this check a remote client
+    // could smuggle raw control bytes (Ctrl-C, Esc, ...) through the
+    // free-text composer, bypassing the WS 'input' path's control-key
+    // allowlist (ticket 14, remote-input.ts) through a different door.
+    // Local connections are unaffected; a valid remote token authenticates
+    // the connection, it doesn't grant it raw-write.
+    const trust = requestTrust(req);
+    if (trust.kind === 'remote' && session.origin !== 'managed') {
+      return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
+    if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
+      return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
+    }
 
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const recordSend = () => appendAgentMessage(repoPath, {

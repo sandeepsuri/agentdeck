@@ -115,4 +115,29 @@ describe('saveConfig', () => {
     saveConfig({ openaiApiKey: 'sk-secret' }, file);
     expect(loadConfig(file).openaiApiKey).toBe('sk-secret');
   });
+
+  // ticket 05: tailscaleToken follows the exact same pattern as
+  // openaiApiKey — 0600 file, absent by default, round-trips through
+  // save/load, never baked in as a resolved default.
+  it('round-trips tailscaleToken through save/load at 0600, absent by default', () => {
+    const file = tmpConfigPath();
+    expect(loadConfig(file).tailscaleToken).toBeUndefined();
+
+    saveConfig({ tailscaleToken: 'tskey-abc123' }, file);
+    const mode = fs.statSync(file).mode & 0o777;
+    expect(mode).toBe(0o600);
+    expect(loadConfig(file).tailscaleToken).toBe('tskey-abc123');
+
+    saveConfig({ tailscaleToken: undefined }, file);
+    expect(loadConfig(file).tailscaleToken).toBeUndefined();
+  });
+
+  it('keeps tailscaleToken independent of openaiApiKey when saved separately', () => {
+    const file = tmpConfigPath();
+    saveConfig({ openaiApiKey: 'sk-secret' }, file);
+    saveConfig({ tailscaleToken: 'tskey-abc123' }, file);
+    const cfg = loadConfig(file);
+    expect(cfg.openaiApiKey).toBe('sk-secret');
+    expect(cfg.tailscaleToken).toBe('tskey-abc123');
+  });
 });

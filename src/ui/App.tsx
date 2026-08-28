@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
-import type { ServerFrame } from '../protocol.js';
+import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
+import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
@@ -11,12 +13,14 @@ import { GridView } from './workspace/GridView.js';
 import { HistoryView } from './workspace/HistoryView.js';
 import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
+import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
+import { finalizeRemoteAuthentication } from './remote-auth.js';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
   { value: 'system', label: 'System', glyph: '◐' },
@@ -71,6 +75,20 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const requestedSessionIdRef = useRef(initialNavigation.sessionId);
   const historyWitnessRef = useRef(INITIAL_HISTORY_WITNESS_STATE);
+  // Ticket 05: defaults to 'ready' (render normally, no delay) rather than
+  // an initial "unknown/loading" state — the ordinary desktop/loopback case
+  // must be a complete no-op with zero extra render delay. Only flips to
+  // 'needs-token'/'denied' once GET /api/connection reports it. That check
+  // includes a stored token so returning phones can become ready directly.
+  const [connectionGate, setConnectionGate] = useState<'ready' | 'needs-token' | 'denied'>('ready');
+  const [tokenInput, setTokenInput] = useState('');
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  // Ticket 13: which workspace to render once the gate is 'ready'. Defaults
+  // to 'local' for the same reason connectionGate defaults to 'ready' — the
+  // ordinary desktop/loopback case must render its normal tree immediately,
+  // with zero extra delay, and only switch to the phone view once
+  // GET /api/connection actually reports 'remote'.
+  const [connectionKind, setConnectionKind] = useState<'local' | 'remote'>('local');
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
@@ -102,36 +120,44 @@ export function App() {
     return next;
   }), []);
 
-  const refreshSessions = useCallback(() => fetch('/api/sessions').then((response) => response.json()).then((body: Session[]) => {
-    setSessions(body);
-    const requested = requestedSessionIdRef.current;
-    if (requested) {
-      requestedSessionIdRef.current = undefined;
-      history.replaceState(null, '', location.pathname);
-      if (body.some((session) => session.id === requested)) {
-        setSelectedId(requested);
-      } else {
-        setView('operations');
-        setSelectedId(body[0]?.id ?? null);
+  const refreshSessions = useCallback(() => apiFetch('/api/sessions')
+    .then((response) => responseJsonArray<Session>(response)).then((body) => {
+      setSessions(body);
+      setError(null);
+      const requested = requestedSessionIdRef.current;
+      if (requested) {
+        requestedSessionIdRef.current = undefined;
+        history.replaceState(null, '', location.pathname);
+        if (body.some((session) => session.id === requested)) {
+          setSelectedId(requested);
+        } else {
+          setView('operations');
+          setSelectedId(body[0]?.id ?? null);
+        }
+        return;
       }
-      return;
-    }
-    setSelectedId((current) => {
-      return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
-    });
-  }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => fetch('/api/repos').then((response) => response.json()).then(setRepos).catch(() => undefined), []);
-  const refreshEvents = useCallback(() => fetch('/api/events?limit=300').then((response) => response.json()).then(setEvents).catch(() => undefined), []);
-  const refreshClaims = useCallback(() => fetch('/api/claims').then((response) => response.json()).then(setClaims).catch(() => undefined), []);
-  const refreshConflicts = useCallback(() => fetch('/api/conflicts').then((response) => response.json()).then(setConflicts).catch(() => undefined), []);
-  const refreshDiscovery = useCallback(() => fetch('/api/discovery/status').then((response) => response.json()).then(setDiscoveryStatus).catch(() => undefined), []);
-  const refreshVsCode = useCallback(() => fetch('/api/integrations/vscode/status').then((response) => response.json()).then(setVsCodeStatus).catch(() => undefined), []);
+      setSelectedId((current) => {
+        return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
+      });
+    }).catch(() => setError('AgentDeck API is unreachable.')), []);
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
+  const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
+  const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
+  const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
+  const refreshDiscovery = useCallback(() => apiFetch('/api/discovery/status').then((response) => responseJson<DiscoveryStatus>(response)).then(setDiscoveryStatus).catch(() => undefined), []);
+  const refreshVsCode = useCallback(() => apiFetch('/api/integrations/vscode/status').then((response) => responseJson<{ connected: boolean; windows: number; terminals: number; installable: boolean }>(response)).then(setVsCodeStatus).catch(() => undefined), []);
 
   useEffect(() => {
-    refreshSessions(); refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
+    refreshSessions();
+    // The remote mobile surface intentionally cannot access repository,
+    // event, discovery, or integration APIs. Stop polling them once the
+    // connection is classified; response validation above also makes the
+    // brief pre-classification requests harmless if their 403s arrive late.
+    if (connectionKind === 'remote') return;
+    refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
     const background = setInterval(() => { refreshRepos(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
+  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -139,7 +165,11 @@ export function App() {
     let disposed = false;
     const connect = () => {
       if (disposed) return;
-      socket = new WebSocket(`ws://${location.host}/ws`);
+      const storedToken = getStoredToken(tokenStorage());
+      const wsUrl = storedToken
+        ? `ws://${location.host}/ws?${TOKEN_QUERY_PARAM}=${encodeURIComponent(storedToken)}`
+        : `ws://${location.host}/ws`;
+      socket = new WebSocket(wsUrl);
       wsRef.current = socket;
       socket.addEventListener('open', () => {
         setWsReady(true);
@@ -207,18 +237,54 @@ export function App() {
     persistInspectorCollapsed(inspectorPreferenceStorage(), inspectorCollapsed);
   }, [inspectorCollapsed]);
 
+  // Ticket 05: how the client discovers "you're remote, please enter a
+  // token". The endpoint is reachable without a token, but this request
+  // still carries a stored token so a returning phone can validate it and
+  // proceed without prompting again. On loopback this always resolves to
+  // 'local' and connectionGate never leaves 'ready'.
+  useEffect(() => {
+    let cancelled = false;
+    fetchConnection()
+      .then((body: { kind: 'local' | 'remote' | 'denied'; capabilities: string[] }) => {
+        if (cancelled) return;
+        if (body.kind === 'remote') setConnectionKind('remote');
+        if (body.kind === 'denied') setConnectionGate('denied');
+        else if (body.kind === 'remote' && body.capabilities.length === 0) setConnectionGate('needs-token');
+        else setConnectionGate('ready');
+      })
+      .catch(() => undefined); // can't reach the API at all — leave the normal error/reconnect paths to surface that
+    return () => { cancelled = true; };
+  }, []);
+
+  const submitToken = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setStoredToken(tokenStorage(), tokenInput.trim());
+    try {
+      const body = await fetchConnection();
+      if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
+        setConnectionKind('remote');
+        setTokenError(null);
+        setConnectionGate('ready');
+      } else {
+        setTokenError('That token was not accepted. Check it and try again.');
+      }
+    } catch {
+      setTokenError('Could not reach AgentDeck to check the token.');
+    }
+  };
+
   const selectSession = (session: Session) => setSelectedId(session.id);
   const openTerminal = (session: Session) => { setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
 
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
     const body = await response.json() as Session & { error?: string };
     if (!response.ok) return setError(body.error ?? `${actionName} failed.`);
     if (actionName === 'restart') upsertSession(body);
   };
 
   const rename = async (session: Session, name: string) => {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name.trim() }),
     });
     const body = await response.json() as Session & { error?: string };
@@ -227,17 +293,62 @@ export function App() {
 
   const retryDiscovery = async () => {
     setDiscoveryStatus((current) => current ? { ...current, polling: true } : current);
-    await fetch('/api/discovery/refresh', { method: 'POST' }).catch(() => undefined);
+    await apiFetch('/api/discovery/refresh', { method: 'POST' }).catch(() => undefined);
     refreshDiscovery(); refreshSessions();
   };
 
   const installHooks = async () => {
     const repo = repos.find((item) => item.path === selectedRepoPath) ?? repos[0];
     if (!repo) return setError('No repository is available for hook installation.');
-    const response = await fetch('/api/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repoPath: repo.path, user: true }) });
+    const response = await apiFetch('/api/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repoPath: repo.path, user: true }) });
     const body = await response.json() as { error?: string };
     setError(response.ok ? `Hooks installed for ${repo.name}. Restart active sessions to apply them.` : body.error ?? 'Hook installation failed.');
   };
+
+  // Ticket 05: minimal, unstyled-is-fine gate for a remote connection that
+  // hasn't entered its token yet (or was denied outright). Ticket 13 builds
+  // the real mobile UI on top of this; this only needs to work. The
+  // ordinary loopback case never reaches here — connectionGate stays
+  // 'ready' from the initial render.
+  if (connectionGate === 'denied') {
+    return (
+      <div className="agentdeck-shell">
+        <p>Access denied. This host is not allowed to reach AgentDeck.</p>
+      </div>
+    );
+  }
+  if (connectionGate === 'needs-token') {
+    return (
+      <div className="agentdeck-shell">
+        <form onSubmit={(event) => { void submitToken(event); }}>
+          <label htmlFor="agentdeck-token-input">Enter access token</label>
+          <input
+            autoFocus
+            id="agentdeck-token-input"
+            onChange={(event) => setTokenInput(event.target.value)}
+            type="password"
+            value={tokenInput}
+          />
+          <button type="submit">Continue</button>
+          {tokenError && <p role="alert">{tokenError}</p>}
+        </form>
+      </div>
+    );
+  }
+
+  // Ticket 13: a remote (phone) connection gets the reflowed mobile view
+  // instead of the desktop workspace tree below — no session sidebar,
+  // Mission Control grid, or inspector rail, none of which fit a phone
+  // screen or apply to a connection that never receives raw PTY bytes. The
+  // local/desktop path below this is otherwise completely untouched.
+  if (connectionKind === 'remote') {
+    return (
+      <div className="mobile-shell">
+        {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
+        <MobileWorkspace onError={setError} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
+      </div>
+    );
+  }
 
   return (
     <div className="agentdeck-shell">

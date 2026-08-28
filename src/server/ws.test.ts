@@ -12,7 +12,8 @@ import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
-import { attachWs, closeWs } from './ws.js';
+import { attachWs, closeWs, getConnectionTrust } from './ws.js';
+import { TOKEN_HEADER } from './connection-trust.js';
 import type { ServerFrame } from '../protocol.js';
 import { TerminalRegistry, VsCodeBridge, type TerminalAdapter } from '../discovery/terminals/index.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
@@ -133,7 +134,7 @@ beforeEach(async () => {
     terminals: new TerminalRegistry([vscodeAdapter]), installVsCode, discovery,
   });
   await app.listen({ port: 0, host: '127.0.0.1' });
-  wss = attachWs(app.server, manager, '/ws', vscode, () => ({
+  wss = attachWs([app.server], manager, '/ws', vscode, () => ({
     sessions: manager.listSessions(),
     attention: [],
     agents: [],
@@ -631,6 +632,24 @@ describe('WS protocol', () => {
     expect(backend.resized.get('1000')).toEqual([]);
   });
 
+  // ticket 14 regression: the raw-write allowlist applies only to
+  // connections lacking the 'raw-write' capability. A 'local' connection
+  // (the default for these tests — loopback host, no tailnet trust config)
+  // must keep sending arbitrary raw bytes exactly as before.
+  it('ticket 14: a local connection\'s arbitrary printable text is unaffected by the remote allowlist', async () => {
+    const { id, pid } = await launchViaRest();
+    const c = await connect();
+    c.send({ t: 'attach', sessionId: id });
+    await c.waitFor('replay');
+    c.send({ t: 'input', sessionId: id, data: 'echo hello world && rm -rf /tmp/whatever\r' });
+    c.send({ t: 'input', sessionId: id, data: '\x1b[Aextra-bytes-a-remote-connection-could-never-send' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(backend.written.get(String(pid))).toEqual([
+      'echo hello world && rm -rf /tmp/whatever\r',
+      '\x1b[Aextra-bytes-a-remote-connection-could-never-send',
+    ]);
+  });
+
   it('broadcasts session_update to all sockets on status change', async () => {
     const c = await connect();
     const { id, pid } = await launchViaRest();
@@ -712,5 +731,367 @@ describe('WS protocol', () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(companion.frames.filter((frame) => frame.t === 'ui_presence').at(-1))
       .toEqual({ t: 'ui_presence', visible: false });
+  });
+});
+
+// ticket 05: a live WS client actually holding a connection, not just an
+// HTTP page load — this is the acceptance line "verified by a remote client
+// holding a live connection rather than only loading the page." A real
+// tailnet interface isn't available in this sandbox, so "remote" is
+// simulated by connecting to the loopback-bound test server while sending a
+// Host header equal to the configured tailnet hostname (`ws` forwards a
+// caller-supplied `Host` header as-is) — classify() only ever looks at the
+// Host header string, so this exercises the exact same code path a real
+// second bind would.
+describe('remote (tailnet) WebSocket access', () => {
+  const REMOTE_HOST = 'phone-test-host.tailnet-1234.ts.net';
+  const REMOTE_IP = '100.101.102.103';
+  const TOKEN = 'a-real-remote-access-token-0123456789';
+
+  let remoteStore: Store;
+  let remoteManager: SessionManager;
+  let remoteBackend: FakeBackend;
+  let remoteSessionsDir: string;
+  let remoteApp: ReturnType<typeof buildApp>;
+  let remoteWss: WebSocketServer;
+  let remotePort: number;
+
+  beforeEach(async () => {
+    remoteStore = new Store(':memory:');
+    remoteSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-remote-'));
+    remoteBackend = new FakeBackend();
+    remoteManager = new SessionManager(remoteBackend, remoteStore, { sessionsDir: remoteSessionsDir });
+    remoteApp = buildApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN },
+      manager: remoteManager,
+      store: remoteStore,
+      remoteHosts: [REMOTE_HOST, REMOTE_IP],
+    });
+    await remoteApp.listen({ port: 0, host: '127.0.0.1' });
+    remoteWss = attachWs(
+      [remoteApp.server], remoteManager, '/ws', undefined, undefined,
+      { remoteHosts: [REMOTE_HOST, REMOTE_IP], token: TOKEN },
+    );
+    const addr = remoteApp.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    remotePort = addr.port;
+  });
+
+  afterEach(async () => {
+    await closeWs(remoteWss);
+    await remoteApp.close();
+    await remoteManager.shutdown();
+    remoteStore.close();
+    fs.rmSync(remoteSessionsDir, { recursive: true, force: true });
+  });
+
+  async function launchViaRemoteRest(): Promise<{ id: string; pid: number }> {
+    const res = await fetch(`http://127.0.0.1:${remotePort}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(SPEC),
+    });
+    expect(res.status).toBe(201);
+    return res.json();
+  }
+
+  /** Opens an authenticated remote (tailnet-host + valid token) WS client. */
+  async function connectRemote(): Promise<WebSocket> {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    return ws;
+  }
+
+  it('accepts a loopback connection with no token at all', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    expect(getConnectionTrust(ws as unknown as import('ws').WebSocket)).toBeUndefined(); // this is the client-side socket, not the server's
+    ws.close();
+  });
+
+  it('refuses a tailnet-host upgrade with no token', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws`, { headers: { host: REMOTE_HOST } });
+    const rejected = await new Promise<boolean>((resolve) => {
+      ws.once('error', () => resolve(true));
+      ws.once('open', () => resolve(false));
+    });
+    ws.terminate();
+    expect(rejected).toBe(true);
+  });
+
+  it('refuses a tailnet-host upgrade with the wrong token', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws?token=wrong-token`, { headers: { host: REMOTE_HOST } });
+    const rejected = await new Promise<boolean>((resolve) => {
+      ws.once('error', () => resolve(true));
+      ws.once('open', () => resolve(false));
+    });
+    ws.terminate();
+    expect(rejected).toBe(true);
+  });
+
+  it('accepts a tailnet-host upgrade with the correct token, and the resulting classification is retrievable server-side', async () => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    // A live connection, not just a successful handshake: round-trip an
+    // actual protocol frame over it.
+    const framesReceived: unknown[] = [];
+    ws.on('message', (raw) => framesReceived.push(JSON.parse(String(raw))));
+    ws.send(JSON.stringify({ t: 'attach', sessionId: 'does-not-exist' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+
+    let serverSocket: import('ws').WebSocket | undefined;
+    for (const client of remoteWss.clients) serverSocket = client;
+    expect(serverSocket).toBeDefined();
+    const trust = getConnectionTrust(serverSocket!);
+    expect(trust).toEqual({ kind: 'remote', capabilities: new Set(['view', 'compose', 'control-keys']) });
+    expect(trust?.capabilities.has('raw-write')).toBe(false);
+
+    ws.close();
+  });
+
+  it('accepts the bound raw tailnet IP for a same-origin authenticated upgrade', async () => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_IP, origin: `http://${REMOTE_IP}` } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  // ticket 14: raw-write refusal for remote connections, verified by a raw
+  // WS client that bypasses the UI entirely — the acceptance line "verified
+  // by a request that bypasses the UI."
+  it('lets a remote connection send Ctrl-C through to the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const ws = await connectRemote();
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: '\x03' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(remoteBackend.written.get(String(pid))).toEqual(['\x03']);
+    ws.close();
+  });
+
+  it('refuses arbitrary printable text sent by a remote connection — it never reaches the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const ws = await connectRemote();
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: 'rm -rf /\r' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(remoteBackend.written.get(String(pid))).toEqual([]);
+    ws.close();
+  });
+
+  // ticket 14 acceptance line: "Free-text messages continue to work from a
+  // phone." This route (routes.ts POST /api/sessions/:id/send) isn't
+  // changed by this ticket — ticket 05's onRequest gate already covers it —
+  // this just confirms an authenticated remote request still succeeds.
+  it('POST /api/sessions/:id/send still succeeds for an authenticated remote request', async () => {
+    const { id } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: {
+        host: `${REMOTE_HOST}:1234`,
+        [TOKEN_HEADER]: TOKEN,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({ text: 'hello from a phone' }),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ delivered: 'typed' });
+  });
+
+  // Code-review finding: POST .../send writes `text` verbatim to the PTY,
+  // and this route is reachable by an authenticated remote connection
+  // (confirmed above) — without a check here, a remote client could
+  // smuggle raw control bytes through the composer, bypassing the WS
+  // 'input' path's control-key allowlist through a different door. This
+  // proves the closed bypass end-to-end: the byte never reaches the
+  // backend, and the same request from a local connection is unaffected.
+  it('refuses control bytes smuggled through POST /send on a remote connection — they never reach the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: { host: `${REMOTE_HOST}:1234`, [TOKEN_HEADER]: TOKEN, 'content-type': 'application/json' },
+      payload: JSON.stringify({ text: 'please continue\x03' }),
+    });
+    expect(response.statusCode).toBe(400);
+    expect(remoteBackend.written.get(String(pid)) ?? []).toEqual([]);
+  });
+
+  it('the same control-byte text via POST /send still succeeds on a local (loopback) connection — unaffected', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: { host: '127.0.0.1:1234', 'content-type': 'application/json' },
+      payload: JSON.stringify({ text: 'please continue\x03' }),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(remoteBackend.written.get(String(pid))).toContain('please continue\x03');
+  });
+
+  it('withholds external-session updates and refuses external attach for remote sockets', async () => {
+    const external = {
+      id: 'external-phone-hidden', origin: 'external' as const, agent: 'claude' as const,
+      cwd: '/tmp', startedAt: '2026-08-28T00:00:00.000Z', lastActivityAt: '2026-08-28T00:00:00.000Z',
+      status: 'working' as const, statusSource: 'cpu_heuristic' as const, terminalApp: 'Terminal' as const,
+    };
+    remoteStore.upsertSession(external);
+    const ws = await connectRemote();
+    const frames: ServerFrame[] = [];
+    ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+
+    remoteManager.publishSessionUpdate(external);
+    ws.send(JSON.stringify({ t: 'attach', sessionId: external.id }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(frames.some((frame) => frame.t === 'session_update' && frame.session.id === external.id)).toBe(false);
+    expect(frames.some((frame) => (frame.t === 'replay' || frame.t === 'reflow_text') && frame.sessionId === external.id)).toBe(false);
+    ws.close();
+  });
+
+  // Ticket 13: the mobile reflow view. `attach` behaves completely
+  // differently depending on ConnectionTrust's classification of the
+  // socket — these tests exercise both branches against the same
+  // tailnet-token-configured server used above.
+  describe('ticket 13: live reflow view', () => {
+    function connectLocal(): WebSocket {
+      return new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
+    }
+    function connectRemote(): WebSocket {
+      return new WebSocket(
+        `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+        { headers: { host: REMOTE_HOST } },
+      );
+    }
+    function collectFrames(ws: WebSocket): ServerFrame[] {
+      const frames: ServerFrame[] = [];
+      ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+      return frames;
+    }
+    function opened(ws: WebSocket): Promise<void> {
+      return new Promise((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+    }
+    async function waitForFrame<T extends ServerFrame['t']>(
+      frames: ServerFrame[], t: T, ms = 3000,
+    ): Promise<ServerFrame & { t: T }> {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        const hit = frames.find((f) => f.t === t);
+        if (hit) return hit as ServerFrame & { t: T };
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`no ${t} frame within ${ms}ms; got ${JSON.stringify(frames.map((f) => f.t))}`);
+    }
+
+    it('a local (loopback) connection still gets replay + raw output frames, byte-for-byte unchanged, even with a tailnet token configured', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const ws = connectLocal();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      const replay = await waitForFrame(frames, 'replay');
+      expect(replay).toEqual({ t: 'replay', sessionId: id, data: '' });
+
+      remoteBackend.emitOutput(pid, 'local sees raw bytes');
+      const output = await waitForFrame(frames, 'output');
+      expect(output).toEqual({ t: 'output', sessionId: id, data: 'local sees raw bytes' });
+      expect(frames.some((f) => f.t === 'reflow_text')).toBe(false);
+
+      ws.close();
+    });
+
+    it('a remote (token-authenticated) connection gets reflow_text frames instead of replay/output, and never raw output', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      remoteBackend.emitOutput(pid, 'agent output for the phone view\r\n');
+      await new Promise((r) => setTimeout(r, 30)); // let the coalescing timer land it in the transcript
+
+      const ws = connectRemote();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+
+      const reflow = await waitForFrame(frames, 'reflow_text');
+      expect(reflow.sessionId).toBe(id);
+      expect(reflow.text).toContain('agent output for the phone view');
+
+      remoteBackend.emitOutput(pid, 'more output, still no raw frame');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(frames.some((f) => f.t === 'replay')).toBe(false);
+      expect(frames.some((f) => f.t === 'output')).toBe(false);
+
+      ws.close();
+    });
+
+    it('detaching a remote viewer stops further reflow_text frames for that session', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const ws = connectRemote();
+      const frames = collectFrames(ws);
+      await opened(ws);
+      ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      await waitForFrame(frames, 'reflow_text');
+
+      ws.send(JSON.stringify({ t: 'detach', sessionId: id }));
+      await new Promise((r) => setTimeout(r, 50));
+      frames.length = 0;
+      remoteBackend.emitOutput(pid, 'more output after detach');
+      await new Promise((r) => setTimeout(r, 1300)); // longer than LiveReflow's ~1s tick
+      expect(frames.filter((f) => f.t === 'reflow_text')).toHaveLength(0);
+
+      ws.close();
+    }, 10_000);
+
+    it('closing a remote socket stops its own reflow subscription without disrupting another viewer on the same session', async () => {
+      const { id, pid } = await launchViaRemoteRest();
+      const wsA = connectRemote();
+      const wsB = connectRemote();
+      const framesA = collectFrames(wsA);
+      const framesB = collectFrames(wsB);
+      await Promise.all([opened(wsA), opened(wsB)]);
+      wsA.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      wsB.send(JSON.stringify({ t: 'attach', sessionId: id }));
+      await waitForFrame(framesA, 'reflow_text');
+      await waitForFrame(framesB, 'reflow_text');
+
+      wsA.close();
+      await new Promise((r) => setTimeout(r, 50));
+      framesB.length = 0;
+      remoteBackend.emitOutput(pid, 'still live for B');
+      await new Promise((r) => setTimeout(r, 1300)); // wait past the next shared tick
+      expect(framesB.some((f) => f.t === 'reflow_text')).toBe(true);
+
+      wsB.close();
+    }, 10_000);
   });
 });

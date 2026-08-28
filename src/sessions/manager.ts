@@ -329,9 +329,14 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     await this.backend.kill(live.handle, 'SIGTERM');
-    live.killTimer = setTimeout(() => {
-      void this.backend.kill(live.handle, 'SIGKILL');
-    }, this.opts.killGraceMs);
+    // Some backends report exit synchronously from kill(SIGTERM). In that
+    // case handleExit has already marked this live entry exited; arming the
+    // fallback afterward would fire a stray SIGKILL against a closed store.
+    if (!live.exited) {
+      live.killTimer = setTimeout(() => {
+        void this.backend.kill(live.handle, 'SIGKILL');
+      }, this.opts.killGraceMs);
+    }
     await live.exitDone;
   }
 
@@ -360,6 +365,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /** Transcript contents for replay-on-attach. */
   getBuffer(sessionId: string): string {
     return this.live.get(sessionId)?.transcript.snapshot() ?? '';
+  }
+
+  /**
+   * The live SessionTranscript for a session, if it's currently live —
+   * undefined once the session has exited (its `live` entry is deleted
+   * after handleExit compacts). Ticket 13's LiveReflow uses this (rather
+   * than depending on SessionManager directly) to periodically re-render a
+   * phone-viewed session's transcript; see src/sessions/live-reflow.ts.
+   */
+  getTranscript(sessionId: string): SessionTranscript | undefined {
+    return this.live.get(sessionId)?.transcript;
   }
 
   getSession(sessionId: string): Session | undefined {

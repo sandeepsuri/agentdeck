@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AgentMessage, Conflict, Repo, Session } from '../../types.js';
+import { apiFetch } from '../apiFetch.js';
 import { ElapsedTime, SparkBars, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
 interface DiffFileSummary {
@@ -25,7 +26,7 @@ function useRepoChanges(repoPath: string | undefined) {
     let disposed = false;
     const refresh = () => {
       const query = new URLSearchParams({ repo: repoPath, mode: 'uncommitted' });
-      fetch(`/api/repos/diff?${query}`)
+      apiFetch(`/api/repos/diff?${query}`)
         .then((response) => response.ok ? response.json() : { files: [] })
         .then((body: { files?: DiffFileSummary[] }) => { if (!disposed) setFiles(body.files ?? []); })
         .catch(() => { if (!disposed) setFiles([]); });

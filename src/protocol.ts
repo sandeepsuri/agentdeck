@@ -13,6 +13,37 @@ const MAX_ERROR_LENGTH = 4096;
 export const TERMINAL_COLS = 100;
 export const TERMINAL_ROWS = 30;
 
+// Ticket 05: the tailnet access token's transport. Browsers cannot set
+// custom headers on a WebSocket upgrade request, so the token travels as a
+// query param there; REST requests carry it as a header instead. These live
+// here (rather than in server/connection-trust.ts, which imports
+// node:crypto) so the UI bundle can import them without pulling
+// server-only code into the client — same reasoning as TERMINAL_COLS above.
+// connection-trust.ts re-exports both for server-side callers.
+export const TOKEN_QUERY_PARAM = 'token';
+export const TOKEN_HEADER = 'x-agentdeck-token';
+
+/**
+ * Ticket 14: the fixed control-key set a remote (non-'raw-write')
+ * connection may send, one WS 'input' frame per byte sequence. Shared
+ * between src/ui/components/ControlKeys.tsx (the button labels) and
+ * src/server/remote-input.ts (the server-side allowlist) so the two sides
+ * can't drift — same reasoning as TOKEN_HEADER/TOKEN_QUERY_PARAM above.
+ */
+export interface ControlKeyDef {
+  label: string;
+  data: string;
+}
+export const CONTROL_KEYS: ControlKeyDef[] = [
+  { label: 'Ctrl-C', data: '\x03' },
+  { label: 'Esc', data: '\x1b' },
+  { label: '↑', data: '\x1b[A' },
+  { label: '↓', data: '\x1b[B' },
+  { label: '←', data: '\x1b[D' },
+  { label: '→', data: '\x1b[C' },
+  { label: 'Enter', data: '\r' },
+];
+
 export interface VsCodeTerminalFrame {
   id: string;
   name: string;
@@ -41,7 +72,12 @@ export type ServerFrame =
   // viewer) so grid tiles update without per-tile HTTP polling. `seed: true`
   // is a full-buffer replace sent once on connect; `seed: false` is an
   // incremental chunk to append client-side (see GridView.tsx).
-  | { t: 'tile_preview'; sessionId: string; data: string; seed: boolean };
+  | { t: 'tile_preview'; sessionId: string; data: string; seed: boolean }
+  // Ticket 13: sent instead of 'replay'/'output' to a 'remote'-classified
+  // connection attached to a session — periodically re-rendered plain text
+  // (LiveReflow, src/sessions/live-reflow.ts), never raw PTY bytes. `text`
+  // is a full replace of the view, not an incremental chunk.
+  | { t: 'reflow_text'; sessionId: string; text: string };
 
 function parseVsCodeTerminals(value: unknown): VsCodeTerminalFrame[] | null {
   if (!Array.isArray(value) || value.length > 500) return null;
