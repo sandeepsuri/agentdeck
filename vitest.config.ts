@@ -5,6 +5,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // Ticket 14: ControlKeys.test.tsx renders a standalone React component
+    // and needs `document`/`window`. It opts into jsdom itself via a
+    // `// @vitest-environment jsdom` docblock rather than switching the
+    // whole suite — everything else here is server-side and stays on the
+    // lighter default 'node' environment.
   },
 });
