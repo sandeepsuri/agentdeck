@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
-import { apiFetch, fetchConnection } from './apiFetch.js';
+import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
@@ -120,40 +120,44 @@ export function App() {
     return next;
   }), []);
 
-  const refreshSessions = useCallback(() => apiFetch('/api/sessions').then(async (response) => {
-    if (!response.ok) throw new Error(`session refresh failed: ${response.status}`);
-    return response.json() as Promise<Session[]>;
-  }).then((body) => {
-    setSessions(body);
-    setError(null);
-    const requested = requestedSessionIdRef.current;
-    if (requested) {
-      requestedSessionIdRef.current = undefined;
-      history.replaceState(null, '', location.pathname);
-      if (body.some((session) => session.id === requested)) {
-        setSelectedId(requested);
-      } else {
-        setView('operations');
-        setSelectedId(body[0]?.id ?? null);
+  const refreshSessions = useCallback(() => apiFetch('/api/sessions')
+    .then((response) => responseJsonArray<Session>(response)).then((body) => {
+      setSessions(body);
+      setError(null);
+      const requested = requestedSessionIdRef.current;
+      if (requested) {
+        requestedSessionIdRef.current = undefined;
+        history.replaceState(null, '', location.pathname);
+        if (body.some((session) => session.id === requested)) {
+          setSelectedId(requested);
+        } else {
+          setView('operations');
+          setSelectedId(body[0]?.id ?? null);
+        }
+        return;
       }
-      return;
-    }
-    setSelectedId((current) => {
-      return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
-    });
-  }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => response.json()).then(setRepos).catch(() => undefined), []);
-  const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => response.json()).then(setEvents).catch(() => undefined), []);
-  const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => response.json()).then(setClaims).catch(() => undefined), []);
-  const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => response.json()).then(setConflicts).catch(() => undefined), []);
-  const refreshDiscovery = useCallback(() => apiFetch('/api/discovery/status').then((response) => response.json()).then(setDiscoveryStatus).catch(() => undefined), []);
-  const refreshVsCode = useCallback(() => apiFetch('/api/integrations/vscode/status').then((response) => response.json()).then(setVsCodeStatus).catch(() => undefined), []);
+      setSelectedId((current) => {
+        return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
+      });
+    }).catch(() => setError('AgentDeck API is unreachable.')), []);
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
+  const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
+  const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
+  const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
+  const refreshDiscovery = useCallback(() => apiFetch('/api/discovery/status').then((response) => responseJson<DiscoveryStatus>(response)).then(setDiscoveryStatus).catch(() => undefined), []);
+  const refreshVsCode = useCallback(() => apiFetch('/api/integrations/vscode/status').then((response) => responseJson<{ connected: boolean; windows: number; terminals: number; installable: boolean }>(response)).then(setVsCodeStatus).catch(() => undefined), []);
 
   useEffect(() => {
-    refreshSessions(); refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
+    refreshSessions();
+    // The remote mobile surface intentionally cannot access repository,
+    // event, discovery, or integration APIs. Stop polling them once the
+    // connection is classified; response validation above also makes the
+    // brief pre-classification requests harmless if their 403s arrive late.
+    if (connectionKind === 'remote') return;
+    refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
     const background = setInterval(() => { refreshRepos(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
+  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;

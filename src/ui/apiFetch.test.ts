@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TOKEN_HEADER } from '../protocol.js';
-import { apiFetch, fetchConnection } from './apiFetch.js';
+import { apiFetch, fetchConnection, responseJsonArray } from './apiFetch.js';
 
 type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
 
@@ -72,5 +72,15 @@ describe('apiFetch', () => {
       'content-type': 'application/json',
       [TOKEN_HEADER]: 'override',
     });
+  });
+
+  it('rejects a forbidden error payload instead of treating it as an array', async () => {
+    const response = new Response(JSON.stringify({ error: 'not available remotely' }), { status: 403 });
+    await expect(responseJsonArray(response)).rejects.toThrow('request failed: 403');
+  });
+
+  it('rejects a successful non-array payload from a collection endpoint', async () => {
+    const response = new Response(JSON.stringify({ error: 'unexpected shape' }), { status: 200 });
+    await expect(responseJsonArray(response)).rejects.toThrow('expected an array response');
   });
 });

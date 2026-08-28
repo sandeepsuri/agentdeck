@@ -14,7 +14,20 @@ export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
   });
 }
 
+/** Reject HTTP errors before a caller can mistake an error payload for domain data. */
+export async function responseJson<T>(response: Response): Promise<T> {
+  if (!response.ok) throw new Error(`request failed: ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+/** Collection endpoints must return an array, never an `{ error }` payload. */
+export async function responseJsonArray<T>(response: Response): Promise<T[]> {
+  const body = await responseJson<unknown>(response);
+  if (!Array.isArray(body)) throw new Error('expected an array response');
+  return body as T[];
+}
+
 export async function fetchConnection(): Promise<{ kind: 'local' | 'remote' | 'denied'; capabilities: string[] }> {
   const response = await apiFetch('/api/connection');
-  return response.json() as Promise<{ kind: 'local' | 'remote' | 'denied'; capabilities: string[] }>;
+  return responseJson(response);
 }
