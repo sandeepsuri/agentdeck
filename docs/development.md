@@ -34,7 +34,11 @@ npm run dev
 - Vite UI: [http://127.0.0.1:4040](http://127.0.0.1:4040)
 - Fastify API and WebSocket server: `127.0.0.1:4041`
 
-Vite proxies `/api` and `/ws` to Fastify. One `Ctrl+C` stops both processes.
+Vite proxies `/api` and `/ws` to Fastify. When Tailscale is running, the dev runner also starts Vite on the detected concrete tailnet IP at port `4040` and logs the phone-reachable URL. It never binds `0.0.0.0`. Fastify adds the matching concrete-IP listener at port `4041`; the browser should still open the logged Vite URL on `4040`.
+
+Remote access accepts both the detected MagicDNS hostname and raw tailnet IP, then requires the token generated in `~/.agentdeck/config.json`. Remote capabilities cover managed sessions only: reflowed output, free-text composition, approval actions, and fixed control keys. Loopback retains the full desktop/API surface.
+
+One `Ctrl+C` stops all development processes.
 
 The development server can run without a built native companion. Use the production build when validating the complete browser and native-companion package.
 

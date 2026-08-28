@@ -20,7 +20,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "tsx scripts/dev.ts",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && npm run build:vscode && npm run build:notch",
     "build:vscode": "node scripts/build-vscode-extension.mjs",
     "build:notch": "node scripts/build-notch.mjs",

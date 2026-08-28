@@ -48,7 +48,7 @@ export function attachWs(
   path = '/ws',
   vscode?: VsCodeBridge,
   companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
-  trust: { remoteHost?: string; token?: string } = {},
+  trust: { remoteHosts?: readonly string[]; token?: string } = {},
 ): WebSocketServer {
   // noServer: true because there are now potentially two underlying
   // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
@@ -103,6 +103,9 @@ export function attachWs(
   // socket → sessionIds it is viewing
   const viewing = new Map<WebSocket, Set<string>>();
   const uiPresence = new Map<WebSocket, boolean>();
+  const managedSessionIds = new Set(
+    manager.listSessions().filter((session) => session.origin === 'managed').map((session) => session.id),
+  );
 
   // Ticket 13: one LiveReflow instance for the whole server, backed by the
   // manager's live transcripts. socket → sessionId → unsubscribe tracks
@@ -136,7 +139,9 @@ export function attachWs(
       sessions: provided.sessions.map(publicSession),
       uiVisible: isUiVisible(),
     };
-    for (const ws of wss.clients) send(ws, { t: 'companion_snapshot', snapshot });
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'companion_snapshot', snapshot });
+    }
   };
 
   manager.on('output', (sessionId, data) => {
@@ -158,9 +163,14 @@ export function attachWs(
     }
   });
 
-  // session_update goes to every socket — the session list is global state.
+  // Local sockets see the global list; remote sockets see managed sessions only.
   manager.on('session_update', (session) => {
-    for (const ws of wss.clients) send(ws, { t: 'session_update', session: publicSession(session) });
+    if (session.origin === 'managed') managedSessionIds.add(session.id);
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws) || session.origin === 'managed') {
+        send(ws, { t: 'session_update', session: publicSession(session) });
+      }
+    }
     broadcastCompanionSnapshot();
   });
 
@@ -169,17 +179,22 @@ export function attachWs(
       sessionIds.delete(sessionId);
       if (sessionIds.size === 0) viewing.delete(ws);
     }
-    for (const ws of wss.clients) send(ws, { t: 'session_removed', sessionId });
+    const wasManaged = managedSessionIds.delete(sessionId);
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws) || wasManaged) send(ws, { t: 'session_removed', sessionId });
+    }
     broadcastCompanionSnapshot();
   });
 
   manager.on('agent_event', (event) => {
-    for (const ws of wss.clients) send(ws, { t: 'agent_event', event });
+    for (const ws of wss.clients) {
+      if (isLocalSocket(ws)) send(ws, { t: 'agent_event', event });
+    }
     broadcastCompanionSnapshot();
   });
 
   wss.on('connection', (ws) => {
-    if (companionSnapshot) {
+    if (companionSnapshot && isLocalSocket(ws)) {
       const provided = companionSnapshot();
       send(ws, { t: 'ui_presence', visible: isUiVisible() });
       send(ws, {
@@ -208,7 +223,8 @@ export function attachWs(
       if (!frame) return;
       switch (frame.t) {
         case 'attach': {
-          if (!manager.getSession(frame.sessionId)) return;
+          const session = manager.getSession(frame.sessionId);
+          if (!session || (!isLocalSocket(ws) && session.origin !== 'managed')) return;
           const sessionIds = viewing.get(ws) ?? new Set<string>();
           sessionIds.add(frame.sessionId);
           viewing.set(ws, sessionIds);

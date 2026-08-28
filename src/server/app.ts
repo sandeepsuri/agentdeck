@@ -81,12 +81,12 @@ export interface AppContext {
   publish?: RouteContext['publish'];
   modelCatalog?: ModelCatalog;
   /**
-   * The tailnet hostname/IP detected at startup (see server/tailscale.ts),
-   * or undefined when no Tailscale interface was found. Feeds classify()
+   * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
+   * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
    * for the host allow-check, the origin check, the CSP connect-src, and
    * (via routes.ts) GET /api/connection.
    */
-  remoteHost?: string;
+  remoteHosts?: readonly string[];
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -100,7 +100,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // another (see docs/specs, "ConnectionTrust").
     const trust = classify(
       { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
+      { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
     );
     const allowedHost = trust.kind !== 'denied';
     const connectPolicy = allowedHost ? `connect-src 'self' ws://${req.headers.host}` : "connect-src 'self'";
@@ -151,7 +151,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     installVsCode: ctx.installVsCode,
     publish: ctx.publish,
     modelCatalog: ctx.modelCatalog,
-    remoteHost: ctx.remoteHost,
+    remoteHosts: ctx.remoteHosts,
   });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the

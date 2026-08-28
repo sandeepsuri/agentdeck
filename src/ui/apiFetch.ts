@@ -2,8 +2,9 @@
 // when one is stored, or nothing works past the initial page load once a
 // phone is remote-but-authenticated. Call sites across src/ui/** that hit
 // /api/* use this instead of the bare `fetch` (see App.tsx and friends);
-// GET /api/connection is the one deliberate exception (see App.tsx) since
-// that route ignores the token by design.
+// GET /api/connection also goes through this wrapper: the route is exempt
+// from the authentication gate so a missing token can discover the prompt,
+// but a stored token must be sent so reloads can validate it immediately.
 import { authHeaders } from './connection.js';
 
 export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -11,4 +12,9 @@ export function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<
     ...init,
     headers: { ...authHeaders(), ...init?.headers },
   });
+}
+
+export async function fetchConnection(): Promise<{ kind: 'local' | 'remote' | 'denied'; capabilities: string[] }> {
+  const response = await apiFetch('/api/connection');
+  return response.json() as Promise<{ kind: 'local' | 'remote' | 'denied'; capabilities: string[] }>;
 }

@@ -1,5 +1,5 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
@@ -197,12 +197,20 @@ export interface RouteContext {
   modelCatalog?: ModelCatalog;
   /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
-  /** Ticket 05: the detected Tailscale hostname/IP, feeding classify() for GET /api/connection. Undefined when no tailnet interface was found. */
-  remoteHost?: string;
+  /** Ticket 05: the detected Tailscale hostname and IP, feeding classify() for GET /api/connection. Empty/undefined when no tailnet interface was found. */
+  remoteHosts?: readonly string[];
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
+  const requestTrust = (req: FastifyRequest) => classify(
+    {
+      host: req.headers.host,
+      origin: req.headers.origin,
+      token: req.headers[TOKEN_HEADER] as string | undefined,
+    },
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+  );
 
   // Ticket 05: how the client discovers "you're remote, please enter a
   // token" in the first place. Deliberately exempt from the token gate in
@@ -210,15 +218,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // anything sensitive, only the classification a phone needs to decide
   // whether to show the token-entry screen.
   app.get('/api/connection', async (req) => {
-    const token = req.headers[TOKEN_HEADER] as string | undefined;
-    const trust = classify(
-      { host: req.headers.host, origin: req.headers.origin, token },
-      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
-    );
+    const trust = requestTrust(req);
     return { kind: trust.kind, capabilities: [...trust.capabilities] };
   });
 
-  app.get('/api/sessions', async () => manager.listSessions().map(publicSession));
+  app.get('/api/sessions', async (req) => {
+    const sessions = manager.listSessions();
+    return (requestTrust(req).kind === 'remote'
+      ? sessions.filter((session) => session.origin === 'managed')
+      : sessions).map(publicSession);
+  });
   app.get('/api/companion', async () => {
     const sessions = manager.listSessions().map(publicSession);
     const events = ctx.store?.listEvents({ limit: 1000 }) ?? [];
@@ -760,10 +769,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // allowlist (ticket 14, remote-input.ts) through a different door.
     // Local connections are unaffected; a valid remote token authenticates
     // the connection, it doesn't grant it raw-write.
-    const trust = classify(
-      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
-    );
+    const trust = requestTrust(req);
+    if (trust.kind === 'remote' && session.origin !== 'managed') {
+      return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
     if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
       return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
     }

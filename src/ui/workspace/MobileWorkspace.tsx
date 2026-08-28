@@ -83,7 +83,12 @@ function SessionPicker({ sessions, value, onSelect }: { sessions: Session[]; val
 }
 
 export function MobileWorkspace({ session, sessions, ws, wsReady, onSelect, onError }: Props) {
-  const sessionId = session?.id ?? null;
+  // Remote access deliberately covers managed PTYs only. The server filters
+  // the list and update stream, while this last-mile filter prevents a stale
+  // pre-classification desktop selection from exposing an external session.
+  const managedSessions = sessions.filter((item) => item.origin === 'managed');
+  const managedSession = session?.origin === 'managed' ? session : null;
+  const sessionId = managedSession?.id ?? null;
   const [reflowText, setReflowText] = useState('');
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -114,11 +119,11 @@ export function MobileWorkspace({ session, sessions, ws, wsReady, onSelect, onEr
     };
   }, [ws, sessionId]);
 
-  const submit = async () => {
-    if (!session || !text.trim() || sending) return;
+  const submit = async (value = text) => {
+    if (!managedSession || !value.trim() || sending) return;
     setSending(true);
     try {
-      await sendToMobileSession(session, text.trim());
+      await sendToMobileSession(managedSession, value.trim());
       setText('');
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -127,23 +132,23 @@ export function MobileWorkspace({ session, sessions, ws, wsReady, onSelect, onEr
     }
   };
 
-  if (!session) {
+  if (!managedSession) {
     return (
       <section className="mobile-workspace mobile-workspace-empty">
         <strong>Select a session</strong>
-        {sessions.length > 0
-          ? <SessionPicker onSelect={onSelect} sessions={sessions} value="" />
+        {managedSessions.length > 0
+          ? <SessionPicker onSelect={onSelect} sessions={managedSessions} value="" />
           : <span>No sessions yet.</span>}
       </section>
     );
   }
 
-  const canMessage = !isEndedSession(session) && wsReady;
+  const canMessage = !isEndedSession(managedSession) && wsReady;
 
   return (
     <section className="mobile-workspace">
       <header className="mobile-topbar">
-        <SessionPicker onSelect={onSelect} sessions={sessions} value={session.id} />
+        <SessionPicker onSelect={onSelect} sessions={managedSessions} value={managedSession.id} />
       </header>
 
       <ReflowPane text={reflowText} />
@@ -153,9 +158,16 @@ export function MobileWorkspace({ session, sessions, ws, wsReady, onSelect, onEr
           while the session is live and the socket is up; the server would
           silently drop it anyway (manager.isLive check in ws.ts), but
           there's no reason to show live buttons for a dead session. */}
+      {canMessage && managedSession.status === 'waiting_input' && (
+        <div className="mobile-approval-actions" role="group" aria-label="Approval response">
+          <button className="button prompt-primary" onClick={() => void submit('1')} type="button">[1] Yes</button>
+          <button className="button" onClick={() => void submit('2')} type="button">[2] No</button>
+        </div>
+      )}
+
       {canMessage && (
         <div className="mobile-control-keys">
-          <ControlKeys sessionId={session.id} ws={ws} />
+          <ControlKeys sessionId={managedSession.id} ws={ws} />
         </div>
       )}
 
