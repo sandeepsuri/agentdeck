@@ -43,28 +43,29 @@ export function isLoopbackHostHeader(host: string | undefined): boolean {
   return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
 }
 
-function isRemoteHostHeader(host: string | undefined, remoteHost: string | undefined): boolean {
-  if (!host || !remoteHost) return false;
-  return hostnameOf(host).toLowerCase() === remoteHost.toLowerCase();
+function isRemoteHostHeader(host: string | undefined, remoteHosts: readonly string[] | undefined): boolean {
+  if (!host || !remoteHosts) return false;
+  const hostname = hostnameOf(host).toLowerCase();
+  return remoteHosts.some((remoteHost) => hostname === remoteHost.toLowerCase());
 }
 
 /**
  * `requestHost` is the request's own Host header — the Origin must name the
  * exact host (and port) the request came in on, loopback or the configured
- * tailnet host. `remoteHost` is optional so existing loopback-only callers
+ * tailnet host. `remoteHosts` is optional so existing loopback-only callers
  * (and their tests) see unchanged behavior when it's omitted.
  */
 export function isAllowedOrigin(
   origin: string | undefined,
   requestHost?: string,
-  remoteHost?: string,
+  remoteHosts?: readonly string[],
 ): boolean {
   if (origin === undefined) return true; // non-browser client
   try {
     const parsed = new URL(origin);
     if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
       || parsed.origin !== origin) return false;
-    if (!isLoopbackHostHeader(parsed.host) && !isRemoteHostHeader(parsed.host, remoteHost)) return false;
+    if (!isLoopbackHostHeader(parsed.host) && !isRemoteHostHeader(parsed.host, remoteHosts)) return false;
     if (requestHost === undefined) return true;
     const requested = new URL(`${parsed.protocol}//${requestHost}`);
     return parsed.hostname === requested.hostname && parsed.port === requested.port;
@@ -96,24 +97,24 @@ function tokensMatch(a: string | undefined, b: string | undefined): boolean {
  * newly allowed host (the tailnet address) can never be added in one place
  * and forgotten in another — see the spec's "ConnectionTrust" module design.
  *
- * `opts.remoteHost` is the detected Tailscale hostname/IP (see
+ * `opts.remoteHosts` contains both the detected Tailscale hostname and IP (see
  * tailscale.ts); `opts.token` is the configured tailnet access token (see
  * config.ts's `tailscaleToken`). Both may be undefined before the server has
  * finished startup detection/generation.
  */
 export function classify(
   input: { host?: string; origin?: string; token?: string },
-  opts: { remoteHost?: string; token?: string },
+  opts: { remoteHosts?: readonly string[]; token?: string },
 ): TrustResult {
   const denied: TrustResult = { kind: 'denied', capabilities: new Set() };
 
   if (isLoopbackHostHeader(input.host)) {
-    if (!isAllowedOrigin(input.origin, input.host, opts.remoteHost)) return denied;
+    if (!isAllowedOrigin(input.origin, input.host, opts.remoteHosts)) return denied;
     return { kind: 'local', capabilities: new Set(ALL_CAPABILITIES) };
   }
 
-  if (isRemoteHostHeader(input.host, opts.remoteHost)) {
-    if (!isAllowedOrigin(input.origin, input.host, opts.remoteHost)) return denied;
+  if (isRemoteHostHeader(input.host, opts.remoteHosts)) {
+    if (!isAllowedOrigin(input.origin, input.host, opts.remoteHosts)) return denied;
     // Missing/wrong token (or no token configured yet) is "remote, no
     // capabilities" — this is the state the client's token-entry screen
     // needs to detect (GET /api/connection), not a hard denial.

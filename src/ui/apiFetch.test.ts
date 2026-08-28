@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TOKEN_HEADER } from '../protocol.js';
-import { apiFetch } from './apiFetch.js';
+import { apiFetch, fetchConnection } from './apiFetch.js';
 
 type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
 
@@ -40,6 +40,21 @@ describe('apiFetch', () => {
     await apiFetch('/api/sessions');
     const [, init] = fetchMock.mock.calls[0]!;
     expect(init?.headers).toEqual({ [TOKEN_HEADER]: 'my-token' });
+  });
+
+  it('validates /api/connection with the stored token on reload and token submission', async () => {
+    vi.stubGlobal('localStorage', fakeLocalStorage({ 'agentdeck.connection.token': 'saved-phone-token' }));
+    const fetchMock = vi.fn<(...args: FetchArgs) => Promise<Response>>(async () => new Response(JSON.stringify({
+      kind: 'remote', capabilities: ['view', 'compose', 'control-keys'],
+    })));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(fetchConnection()).resolves.toEqual({
+      kind: 'remote', capabilities: ['view', 'compose', 'control-keys'],
+    });
+    expect(fetchMock).toHaveBeenCalledWith('/api/connection', {
+      headers: { [TOKEN_HEADER]: 'saved-phone-token' },
+    });
   });
 
   it('merges caller-supplied init, with caller headers taking precedence', async () => {

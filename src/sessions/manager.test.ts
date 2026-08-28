@@ -10,6 +10,7 @@ import { RingBuffer } from './ringbuffer.js';
 import { SessionTranscript } from './transcript.js';
 import type { Summarizer } from './summarizer.js';
 import { SessionManager, type SessionManagerOptions } from './manager.js';
+import type { Handle, SessionBackend } from './backend.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -147,6 +148,38 @@ describe('SessionManager + PtyBackend', () => {
     await manager.stop(s.id);
     expect(store.getSession(s.id)?.status).toBe('exited');
   }, 10000);
+
+  it('stop() does not arm SIGKILL after SIGTERM reports exit synchronously', async () => {
+    let onExit: ((exitCode: number) => void) | undefined;
+    const kills: string[] = [];
+    const handle: Handle = { id: 'sync-exit', pid: 1234 };
+    const backend: SessionBackend = {
+      spawn: async () => handle,
+      write: () => undefined,
+      onData: () => undefined,
+      onExit: (_handle, callback) => { onExit = callback; },
+      resize: () => undefined,
+      kill: async (_handle, signal = 'SIGTERM') => {
+        kills.push(signal);
+        if (signal === 'SIGTERM') onExit?.(0);
+      },
+      list: async () => [],
+    };
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-manager-sync-exit-'));
+    const manager = new SessionManager(backend, store, { sessionsDir, killGraceMs: 10 });
+    cleanups.push(async () => {
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    });
+
+    const launched = await manager.launch(spec({}));
+    await manager.stop(launched.id);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(kills).toEqual(['SIGTERM']);
+  });
 
   it('restart() uses an in-memory launch spec without persisting its secrets', async () => {
     const { manager, store } = makeManager();

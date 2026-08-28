@@ -745,6 +745,7 @@ describe('WS protocol', () => {
 // second bind would.
 describe('remote (tailnet) WebSocket access', () => {
   const REMOTE_HOST = 'phone-test-host.tailnet-1234.ts.net';
+  const REMOTE_IP = '100.101.102.103';
   const TOKEN = 'a-real-remote-access-token-0123456789';
 
   let remoteStore: Store;
@@ -764,12 +765,12 @@ describe('remote (tailnet) WebSocket access', () => {
       config: { ...defaultConfig(), tailscaleToken: TOKEN },
       manager: remoteManager,
       store: remoteStore,
-      remoteHost: REMOTE_HOST,
+      remoteHosts: [REMOTE_HOST, REMOTE_IP],
     });
     await remoteApp.listen({ port: 0, host: '127.0.0.1' });
     remoteWss = attachWs(
       [remoteApp.server], remoteManager, '/ws', undefined, undefined,
-      { remoteHost: REMOTE_HOST, token: TOKEN },
+      { remoteHosts: [REMOTE_HOST, REMOTE_IP], token: TOKEN },
     );
     const addr = remoteApp.server.address();
     if (addr === null || typeof addr === 'string') throw new Error('no port');
@@ -864,6 +865,19 @@ describe('remote (tailnet) WebSocket access', () => {
     ws.close();
   });
 
+  it('accepts the bound raw tailnet IP for a same-origin authenticated upgrade', async () => {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_IP, origin: `http://${REMOTE_IP}` } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
   // ticket 14: raw-write refusal for remote connections, verified by a raw
   // WS client that bypasses the UI entirely — the acceptance line "verified
   // by a request that bypasses the UI."
@@ -944,20 +958,31 @@ describe('remote (tailnet) WebSocket access', () => {
     expect(remoteBackend.written.get(String(pid))).toContain('please continue\x03');
   });
 
+  it('withholds external-session updates and refuses external attach for remote sockets', async () => {
+    const external = {
+      id: 'external-phone-hidden', origin: 'external' as const, agent: 'claude' as const,
+      cwd: '/tmp', startedAt: '2026-08-28T00:00:00.000Z', lastActivityAt: '2026-08-28T00:00:00.000Z',
+      status: 'working' as const, statusSource: 'cpu_heuristic' as const, terminalApp: 'Terminal' as const,
+    };
+    remoteStore.upsertSession(external);
+    const ws = await connectRemote();
+    const frames: ServerFrame[] = [];
+    ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+
+    remoteManager.publishSessionUpdate(external);
+    ws.send(JSON.stringify({ t: 'attach', sessionId: external.id }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(frames.some((frame) => frame.t === 'session_update' && frame.session.id === external.id)).toBe(false);
+    expect(frames.some((frame) => (frame.t === 'replay' || frame.t === 'reflow_text') && frame.sessionId === external.id)).toBe(false);
+    ws.close();
+  });
+
   // Ticket 13: the mobile reflow view. `attach` behaves completely
   // differently depending on ConnectionTrust's classification of the
   // socket — these tests exercise both branches against the same
   // tailnet-token-configured server used above.
   describe('ticket 13: live reflow view', () => {
-    async function launchViaRemoteRest(): Promise<{ id: string; pid: number }> {
-      const res = await fetch(`http://127.0.0.1:${remotePort}/api/sessions`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(SPEC),
-      });
-      expect(res.status).toBe(201);
-      return res.json();
-    }
     function connectLocal(): WebSocket {
       return new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
     }

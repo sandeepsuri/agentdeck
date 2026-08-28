@@ -6,7 +6,7 @@ AgentDeck is a local macOS application composed of a browser workspace, a Node.j
 
 ```text
 React workspace
-    │ REST + WebSocket on loopback
+    │ REST + WebSocket on loopback or authenticated tailnet listener
     ▼
 Fastify control server
     ├── managed PTYs
@@ -18,7 +18,7 @@ Fastify control server
     └── native Swift companion
 ```
 
-The production server serves the built browser application and API on `127.0.0.1:4040`. In development, Vite serves the UI on port `4040` and proxies API and WebSocket traffic to Fastify on port `4041`.
+The production server serves the built browser application and API on `127.0.0.1:4040`. When Tailscale is detected, it adds a second listener on that interface's concrete IPv4 address—never a wildcard address. In development, Vite serves the UI on port `4040` on loopback and, when available, the concrete Tailscale IP; both proxy API and WebSocket traffic to Fastify on port `4041`.
 
 ## Main components
 
@@ -32,7 +32,7 @@ The managed terminal uses xterm.js. REST requests handle application actions and
 
 The Fastify server under `src/server/` coordinates sessions, repositories, integrations, and persistence. Its REST and WebSocket routes are an internal interface for the local UI and companion rather than a versioned public API.
 
-The server binds only to loopback. Production also serves the compiled single-page application from `dist/ui`.
+The server always binds loopback. It may also bind the detected concrete Tailscale IPv4 interface. Production serves the compiled single-page application from `dist/ui`; development runs matching loopback and tailnet Vite listeners so a phone reaches the UI on the public port rather than the API-only port.
 
 ### Managed terminals
 
@@ -94,18 +94,19 @@ Session state combines several signals:
 
 Higher-confidence hook and output signals take precedence over CPU inference. Conflict state is derived from current sessions, repositories, claims, and dependencies rather than stored as a permanent record.
 
-## Local security boundaries
+## Connection security boundaries
 
-- HTTP and WebSocket listeners bind to `127.0.0.1` only.
-- Requests must use an allowed loopback host and the exact origin serving AgentDeck.
-- WebSocket upgrades are origin-checked separately.
+- HTTP and WebSocket listeners always bind `127.0.0.1`; optional remote listeners bind only the detected concrete Tailscale IPv4 address, never `0.0.0.0`.
+- Requests must use an allowed loopback host or either detected tailnet identity (MagicDNS hostname or raw IP), with the exact origin serving AgentDeck.
+- Remote REST and WebSocket requests require the owner-only token stored in `~/.agentdeck/config.json`; WebSocket upgrades are origin-checked separately.
+- Local connections retain all capabilities. Remote connections are limited to viewing managed sessions, composing messages, and the fixed control-key set. They cannot enumerate or attach to external sessions, use arbitrary raw writes, launch or administer sessions, change settings, or invoke repository and integration operations.
 - Content Security Policy and defensive browser headers restrict the local UI.
 - Repository actions are limited to discovered repositories and constrained paths.
 - Database files are restricted to the current operating-system user.
 - Managed launch secrets are excluded from REST responses, WebSocket broadcasts, and persistence.
 - The VS Code helper accepts only loopback `ws://` or `wss://` server URLs.
 
-Claude Code and Codex continue to communicate with their respective providers according to their own configuration. Do not place AgentDeck behind a public proxy without adding authentication and accounting for the terminal access exposed by managed sessions.
+Claude Code and Codex continue to communicate with their respective providers according to their own configuration. Tailscale plus the AgentDeck token is the only supported remote boundary; do not place AgentDeck behind a public proxy.
 
 ## Primary technologies
 

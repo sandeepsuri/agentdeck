@@ -329,9 +329,14 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     await this.backend.kill(live.handle, 'SIGTERM');
-    live.killTimer = setTimeout(() => {
-      void this.backend.kill(live.handle, 'SIGKILL');
-    }, this.opts.killGraceMs);
+    // Some backends report exit synchronously from kill(SIGTERM). In that
+    // case handleExit has already marked this live entry exited; arming the
+    // fallback afterward would fire a stray SIGKILL against a closed store.
+    if (!live.exited) {
+      live.killTimer = setTimeout(() => {
+        void this.backend.kill(live.handle, 'SIGKILL');
+      }, this.opts.killGraceMs);
+    }
     await live.exitDone;
   }
 

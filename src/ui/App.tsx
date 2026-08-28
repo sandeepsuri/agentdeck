@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
-import { apiFetch } from './apiFetch.js';
+import { apiFetch, fetchConnection } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
@@ -77,8 +77,8 @@ export function App() {
   // Ticket 05: defaults to 'ready' (render normally, no delay) rather than
   // an initial "unknown/loading" state — the ordinary desktop/loopback case
   // must be a complete no-op with zero extra render delay. Only flips to
-  // 'needs-token'/'denied' once GET /api/connection (plain fetch — this
-  // route ignores any stored token by design) actually reports it.
+  // 'needs-token'/'denied' once GET /api/connection reports it. That check
+  // includes a stored token so returning phones can become ready directly.
   const [connectionGate, setConnectionGate] = useState<'ready' | 'needs-token' | 'denied'>('ready');
   const [tokenInput, setTokenInput] = useState('');
   const [tokenError, setTokenError] = useState<string | null>(null);
@@ -229,14 +229,13 @@ export function App() {
   }, [inspectorCollapsed]);
 
   // Ticket 05: how the client discovers "you're remote, please enter a
-  // token" — plain fetch (not apiFetch) since /api/connection is
-  // deliberately exempt from the token gate and ignores whatever header a
-  // stale/absent token would attach. On loopback this always resolves to
+  // token". The endpoint is reachable without a token, but this request
+  // still carries a stored token so a returning phone can validate it and
+  // proceed without prompting again. On loopback this always resolves to
   // 'local' and connectionGate never leaves 'ready'.
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/connection')
-      .then((response) => response.json())
+    fetchConnection()
       .then((body: { kind: 'local' | 'remote' | 'denied'; capabilities: string[] }) => {
         if (cancelled) return;
         if (body.kind === 'remote') setConnectionKind('remote');
@@ -252,7 +251,7 @@ export function App() {
     event.preventDefault();
     setStoredToken(tokenStorage(), tokenInput.trim());
     try {
-      const body = await (await fetch('/api/connection')).json() as { kind: string; capabilities: string[] };
+      const body = await fetchConnection();
       if (body.kind === 'remote' && body.capabilities.length > 0) {
         setConnectionKind('remote');
         setTokenError(null);

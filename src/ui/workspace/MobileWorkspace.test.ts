@@ -38,6 +38,13 @@ const endedSession: Session = {
   endedAt: '2026-08-27T12:30:00.000Z',
 };
 
+const externalSession: Session = {
+  ...session,
+  id: 'external-session',
+  origin: 'external',
+  terminalApp: 'Terminal',
+};
+
 describe('nextReflowText (frame → display-text reducer)', () => {
   it('adopts a reflow_text frame scoped to the current session', () => {
     const result = nextReflowText('old text', { t: 'reflow_text', sessionId: 'sess-1', text: 'new text' }, 'sess-1');
@@ -154,5 +161,33 @@ describe('MobileWorkspace (static render)', () => {
     }));
     expect(html).toContain('mobile-control-keys');
     expect(html).toContain('Ctrl-C');
+  });
+
+  it('renders [1] Yes and [2] No actions while the agent is waiting for input', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: { ...session, status: 'waiting_input' },
+      sessions: [{ ...session, status: 'waiting_input' }],
+      ws: null,
+      wsReady: true,
+    }));
+    expect(html).toContain('[1] Yes');
+    expect(html).toContain('[2] No');
+  });
+
+  it('filters external sessions and refuses to render a stale external selection', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: externalSession,
+      sessions: [externalSession, session],
+      ws: null,
+      wsReady: true,
+    }));
+    expect(html).toContain('Select a session');
+    expect(html).toContain(session.id);
+    expect(html).not.toContain(externalSession.id);
+    expect(html).not.toContain('Message the agent');
   });
 });
