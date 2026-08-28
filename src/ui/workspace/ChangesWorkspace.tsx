@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FileClaim, Session } from '../../types.js';
+import { apiFetch } from '../apiFetch.js';
 import { PublishModal, type PublishMode } from '../components/PublishModal.js';
 import { sessionLabel } from './model.js';
 
@@ -57,7 +58,7 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
     }
     const requestSummary = (requestedMode: DiffMode) => {
       const query = new URLSearchParams({ repo: repoPath, mode: requestedMode });
-      return fetch(`/api/repos/diff?${query}`)
+      return apiFetch(`/api/repos/diff?${query}`)
         .then((response) => response.ok ? response.json() as Promise<Summary> : Promise.reject(new Error('Unable to load repository changes.')));
     };
     const visibleSummary = requestSummary(mode);
@@ -81,7 +82,7 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
     if (!repoPath || !selectedPath) return setDiff('');
     setLoading(true);
     const query = new URLSearchParams({ repo: repoPath, mode, path: selectedPath, ignoreWhitespace: String(ignoreWhitespace) });
-    fetch(`/api/repos/diff/file?${query}`)
+    apiFetch(`/api/repos/diff/file?${query}`)
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('Unable to load this file.')))
       .then((body: { diff?: string }) => setDiff(body.diff ?? ''))
       .catch((error) => onError(error instanceof Error ? error.message : String(error)))
@@ -101,7 +102,7 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
     if (action === 'discard' && !window.confirm(`Discard all uncommitted changes in ${filePath}?`)) return;
     setFileActionPath(filePath);
     try {
-      const response = await fetch('/api/repos/file-action', {
+      const response = await apiFetch('/api/repos/file-action', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ repo: repoPath, path: filePath, action }),
@@ -118,7 +119,7 @@ export function ChangesWorkspace({ repoPath, sessions, claims, onError }: {
 
   const openInEditor = async () => {
     if (!repoPath || !selectedPath) return;
-    const response = await fetch('/api/repos/open-file', {
+    const response = await apiFetch('/api/repos/open-file', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ repo: repoPath, path: selectedPath }),

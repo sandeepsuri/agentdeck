@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentType, Repo, Session } from '../../types.js';
+import { apiFetch } from '../apiFetch.js';
 
 interface EnvRow { key: string; value: string }
 type PermissionMode = 'default' | 'acceptEdits' | 'plan';
@@ -60,7 +61,7 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
     if (!cwd) return;
     let disposed = false;
     const timer = setTimeout(() => {
-      fetch('/api/launch/preflight', {
+      apiFetch('/api/launch/preflight', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ agent, cwd, branch: branch.trim() || undefined, createBranchIfMissing: createBranch }),
       }).then((response) => response.json()).then((body: PreflightResult) => { if (!disposed) setPreflight(body); }).catch(() => { if (!disposed) setPreflight(null); });
@@ -92,7 +93,7 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
     setError(null);
     const env = Object.fromEntries(envRows.map((row) => [row.key.trim(), row.value] as const).filter(([key]) => key));
     try {
-      const response = await fetch('/api/sessions', {
+      const response = await apiFetch('/api/sessions', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ agent, cwd, permissionMode, ...(name.trim() ? { name: name.trim() } : {}), ...(branch.trim() ? { branch: branch.trim(), createBranchIfMissing: createBranch } : {}), ...(prompt.trim() ? { initialPrompt: prompt } : {}), ...(Object.keys(env).length ? { env } : {}) }),
       });
