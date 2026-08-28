@@ -13,6 +13,7 @@ import { Store } from '../store/index.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs, getConnectionTrust } from './ws.js';
+import { TOKEN_HEADER } from './connection-trust.js';
 import type { ServerFrame } from '../protocol.js';
 import { TerminalRegistry, VsCodeBridge, type TerminalAdapter } from '../discovery/terminals/index.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
@@ -631,6 +632,24 @@ describe('WS protocol', () => {
     expect(backend.resized.get('1000')).toEqual([]);
   });
 
+  // ticket 14 regression: the raw-write allowlist applies only to
+  // connections lacking the 'raw-write' capability. A 'local' connection
+  // (the default for these tests — loopback host, no tailnet trust config)
+  // must keep sending arbitrary raw bytes exactly as before.
+  it('ticket 14: a local connection\'s arbitrary printable text is unaffected by the remote allowlist', async () => {
+    const { id, pid } = await launchViaRest();
+    const c = await connect();
+    c.send({ t: 'attach', sessionId: id });
+    await c.waitFor('replay');
+    c.send({ t: 'input', sessionId: id, data: 'echo hello world && rm -rf /tmp/whatever\r' });
+    c.send({ t: 'input', sessionId: id, data: '\x1b[Aextra-bytes-a-remote-connection-could-never-send' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(backend.written.get(String(pid))).toEqual([
+      'echo hello world && rm -rf /tmp/whatever\r',
+      '\x1b[Aextra-bytes-a-remote-connection-could-never-send',
+    ]);
+  });
+
   it('broadcasts session_update to all sockets on status change', async () => {
     const c = await connect();
     const { id, pid } = await launchViaRest();
@@ -730,6 +749,7 @@ describe('remote (tailnet) WebSocket access', () => {
 
   let remoteStore: Store;
   let remoteManager: SessionManager;
+  let remoteBackend: FakeBackend;
   let remoteSessionsDir: string;
   let remoteApp: ReturnType<typeof buildApp>;
   let remoteWss: WebSocketServer;
@@ -738,7 +758,8 @@ describe('remote (tailnet) WebSocket access', () => {
   beforeEach(async () => {
     remoteStore = new Store(':memory:');
     remoteSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-remote-'));
-    remoteManager = new SessionManager(new FakeBackend(), remoteStore, { sessionsDir: remoteSessionsDir });
+    remoteBackend = new FakeBackend();
+    remoteManager = new SessionManager(remoteBackend, remoteStore, { sessionsDir: remoteSessionsDir });
     remoteApp = buildApp({
       config: { ...defaultConfig(), tailscaleToken: TOKEN },
       manager: remoteManager,
@@ -762,6 +783,29 @@ describe('remote (tailnet) WebSocket access', () => {
     remoteStore.close();
     fs.rmSync(remoteSessionsDir, { recursive: true, force: true });
   });
+
+  async function launchViaRemoteRest(): Promise<{ id: string; pid: number }> {
+    const res = await fetch(`http://127.0.0.1:${remotePort}/api/sessions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(SPEC),
+    });
+    expect(res.status).toBe(201);
+    return res.json();
+  }
+
+  /** Opens an authenticated remote (tailnet-host + valid token) WS client. */
+  async function connectRemote(): Promise<WebSocket> {
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${remotePort}/ws?token=${encodeURIComponent(TOKEN)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    return ws;
+  }
 
   it('accepts a loopback connection with no token at all', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${remotePort}/ws`);
@@ -818,5 +862,54 @@ describe('remote (tailnet) WebSocket access', () => {
     expect(trust?.capabilities.has('raw-write')).toBe(false);
 
     ws.close();
+  });
+
+  // ticket 14: raw-write refusal for remote connections, verified by a raw
+  // WS client that bypasses the UI entirely — the acceptance line "verified
+  // by a request that bypasses the UI."
+  it('lets a remote connection send Ctrl-C through to the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const ws = await connectRemote();
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: '\x03' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(remoteBackend.written.get(String(pid))).toEqual(['\x03']);
+    ws.close();
+  });
+
+  it('refuses arbitrary printable text sent by a remote connection — it never reaches the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const ws = await connectRemote();
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: 'rm -rf /\r' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(remoteBackend.written.get(String(pid))).toEqual([]);
+    ws.close();
+  });
+
+  // ticket 14 acceptance line: "Free-text messages continue to work from a
+  // phone." This route (routes.ts POST /api/sessions/:id/send) isn't
+  // changed by this ticket — ticket 05's onRequest gate already covers it —
+  // this just confirms an authenticated remote request still succeeds.
+  it('POST /api/sessions/:id/send still succeeds for an authenticated remote request', async () => {
+    const { id } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: {
+        host: `${REMOTE_HOST}:1234`,
+        [TOKEN_HEADER]: TOKEN,
+        'content-type': 'application/json',
+      },
+      payload: JSON.stringify({ text: 'hello from a phone' }),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ delivered: 'typed' });
   });
 });

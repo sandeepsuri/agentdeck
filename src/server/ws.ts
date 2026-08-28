@@ -15,6 +15,7 @@ import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
 import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
+import { isAllowedRemoteInput } from './remote-input.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -193,7 +194,15 @@ export function attachWs(
         case 'input': {
           const sessionIds = viewing.get(ws);
           if (sessionIds?.has(frame.sessionId) && manager.isLive(frame.sessionId)) {
-            manager.write(frame.sessionId, frame.data);
+            // Ticket 14: a connection without 'raw-write' (remote, or —
+            // fail safe — one whose trust result is missing entirely) may
+            // only pass through the fixed control-key set. Refusal is a
+            // silent no-op, the same shape as the existing viewing/isLive
+            // checks above, not an error frame back to the client.
+            const hasRawWrite = getConnectionTrust(ws)?.capabilities.has('raw-write') ?? false;
+            if (hasRawWrite || isAllowedRemoteInput(frame.data)) {
+              manager.write(frame.sessionId, frame.data);
+            }
           }
           break;
         }
