@@ -20,6 +20,7 @@ import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
+import { finalizeRemoteAuthentication } from './remote-auth.js';
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
   { value: 'system', label: 'System', glyph: '◐' },
@@ -119,8 +120,12 @@ export function App() {
     return next;
   }), []);
 
-  const refreshSessions = useCallback(() => apiFetch('/api/sessions').then((response) => response.json()).then((body: Session[]) => {
+  const refreshSessions = useCallback(() => apiFetch('/api/sessions').then(async (response) => {
+    if (!response.ok) throw new Error(`session refresh failed: ${response.status}`);
+    return response.json() as Promise<Session[]>;
+  }).then((body) => {
     setSessions(body);
+    setError(null);
     const requested = requestedSessionIdRef.current;
     if (requested) {
       requestedSessionIdRef.current = undefined;
@@ -252,7 +257,7 @@ export function App() {
     setStoredToken(tokenStorage(), tokenInput.trim());
     try {
       const body = await fetchConnection();
-      if (body.kind === 'remote' && body.capabilities.length > 0) {
+      if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
         setConnectionKind('remote');
         setTokenError(null);
         setConnectionGate('ready');
