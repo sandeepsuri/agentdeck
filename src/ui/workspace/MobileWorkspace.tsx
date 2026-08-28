@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import type { Session } from '../../types.js';
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
 import { apiFetch } from '../apiFetch.js';
+import { ControlKeys } from '../components/ControlKeys.js';
 import { isEndedSession, sessionLabel } from './model.js';
 
 interface Props {
@@ -147,10 +148,16 @@ export function MobileWorkspace({ session, sessions, ws, wsReady, onSelect, onEr
 
       <ReflowPane text={reflowText} />
 
-      {/* Ticket 14 drops a <ControlKeys> component here (fixed Ctrl-C /
-          Esc / arrow / Enter buttons) — left as an obvious, empty slot so
-          adding it later doesn't require restructuring this file. */}
-      <div className="mobile-control-keys" />
+      {/* Fixed Ctrl-C / Esc / arrow / Enter buttons (ticket 14). Gated the
+          same way as the composer below — a raw write only makes sense
+          while the session is live and the socket is up; the server would
+          silently drop it anyway (manager.isLive check in ws.ts), but
+          there's no reason to show live buttons for a dead session. */}
+      {canMessage && (
+        <div className="mobile-control-keys">
+          <ControlKeys sessionId={session.id} ws={ws} />
+        </div>
+      )}
 
       {canMessage && (
         <footer className="mobile-composer">

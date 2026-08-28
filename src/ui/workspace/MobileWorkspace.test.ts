@@ -143,7 +143,7 @@ describe('MobileWorkspace (static render)', () => {
     expect(ended).not.toContain('Message the agent');
   });
 
-  it('leaves an obvious slot for ticket 14\'s control keys', () => {
+  it('renders ticket 14\'s control keys for a live session', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -153,5 +153,6 @@ describe('MobileWorkspace (static render)', () => {
       wsReady: true,
     }));
     expect(html).toContain('mobile-control-keys');
+    expect(html).toContain('Ctrl-C');
   });
 });
