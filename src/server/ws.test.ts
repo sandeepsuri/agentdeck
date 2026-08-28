@@ -913,6 +913,37 @@ describe('remote (tailnet) WebSocket access', () => {
     expect(response.json()).toEqual({ delivered: 'typed' });
   });
 
+  // Code-review finding: POST .../send writes `text` verbatim to the PTY,
+  // and this route is reachable by an authenticated remote connection
+  // (confirmed above) — without a check here, a remote client could
+  // smuggle raw control bytes through the composer, bypassing the WS
+  // 'input' path's control-key allowlist through a different door. This
+  // proves the closed bypass end-to-end: the byte never reaches the
+  // backend, and the same request from a local connection is unaffected.
+  it('refuses control bytes smuggled through POST /send on a remote connection — they never reach the backend', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: { host: `${REMOTE_HOST}:1234`, [TOKEN_HEADER]: TOKEN, 'content-type': 'application/json' },
+      payload: JSON.stringify({ text: 'please continue\x03' }),
+    });
+    expect(response.statusCode).toBe(400);
+    expect(remoteBackend.written.get(String(pid)) ?? []).toEqual([]);
+  });
+
+  it('the same control-byte text via POST /send still succeeds on a local (loopback) connection — unaffected', async () => {
+    const { id, pid } = await launchViaRemoteRest();
+    const response = await remoteApp.inject({
+      method: 'POST',
+      url: `/api/sessions/${id}/send`,
+      headers: { host: '127.0.0.1:1234', 'content-type': 'application/json' },
+      payload: JSON.stringify({ text: 'please continue\x03' }),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(remoteBackend.written.get(String(pid))).toContain('please continue\x03');
+  });
+
   // Ticket 13: the mobile reflow view. `attach` behaves completely
   // differently depending on ConnectionTrust's classification of the
   // socket — these tests exercise both branches against the same

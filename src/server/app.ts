@@ -29,6 +29,36 @@ const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
 ].join('; ');
 
+/**
+ * Code-review finding: an authenticated remote connection had the exact
+ * same REST surface as local — launching sessions, discarding uncommitted
+ * git changes, installing hooks, PATCHing settings (including the OpenAI
+ * key), publish/PR, stop/restart — because the onRequest hook below only
+ * ever checked "is this connection authenticated at all", never "is this
+ * specific route part of what a remote connection is for". The spec's
+ * Decisions table is explicit about the intended surface: "Mobile
+ * capability | Reflowed text view, free-text composer, fixed control-key
+ * buttons" — nothing about session launch or app configuration. A valid
+ * tailnet token authenticates a connection; it does not grant it the same
+ * administrative capability as sitting at the machine.
+ *
+ * This is an explicit allowlist (not a denylist) of exactly the /api/*
+ * routes the mobile UI (tickets 13/14) actually calls — GET /api/sessions
+ * (MobileWorkspace's session list/picker) and POST .../send (the
+ * composer) — plus the always-safe, non-sensitive health check. Everything
+ * else under /api/* is local-only by default; a new route added later
+ * doesn't need to remember to exclude remote, it has to be deliberately
+ * added here to include it. GET /api/connection is handled separately
+ * above this check (it must work pre-authentication) and WS traffic isn't
+ * an /api/* path at all — ws.ts enforces its own capability checks
+ * (raw-write on 'input', local-only for raw output/replay/tile_preview).
+ */
+function isRemoteAllowedRoute(method: string, pathname: string): boolean {
+  if (method === 'GET' && (pathname === '/api/health' || pathname === '/api/sessions')) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/send$/.test(pathname)) return true;
+  return false;
+}
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -93,9 +123,18 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // token, except /api/connection itself, which is how the client
     // discovers "you're remote, please enter a token" in the first place.
     const pathname = (req.url ?? '').split('?')[0] ?? '';
-    const requiresRemoteToken = pathname.startsWith('/api/') && pathname !== '/api/connection';
+    const isApiRoute = pathname.startsWith('/api/');
+    const requiresRemoteToken = isApiRoute && pathname !== '/api/connection';
     if (requiresRemoteToken && trust.kind === 'remote' && trust.capabilities.size === 0) {
       return reply.code(403).send({ error: 'a valid tailnet token is required' });
+    }
+    // A remote connection is scoped to exactly what the mobile experience
+    // needs, not the full local REST surface — see isRemoteAllowedRoute's
+    // comment above. Only reached once a remote connection is already
+    // authenticated (the check above already rejected an empty-capability
+    // remote request), so this narrows further rather than duplicating it.
+    if (requiresRemoteToken && trust.kind === 'remote' && !isRemoteAllowedRoute(req.method, pathname)) {
+      return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
     }
   });
 

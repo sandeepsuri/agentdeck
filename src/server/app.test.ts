@@ -97,3 +97,68 @@ describe('host/origin/CSP agreement (ticket 05)', () => {
     expect(response.statusCode).toBe(403);
   });
 });
+
+describe('remote route allowlist (code-review finding: an authenticated remote connection must not get the full local REST surface)', () => {
+  let app: ReturnType<typeof Fastify>;
+  afterEach(async () => { await app.close(); });
+
+  function remoteHeaders(): Record<string, string> {
+    return { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: TOKEN };
+  }
+
+  it('an authenticated remote connection can list sessions (GET /api/sessions is on the allowlist)', async () => {
+    app = makeApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN },
+      remoteHost: REMOTE_HOST,
+      manager: { listSessions: () => [] } as unknown as RouteContext['manager'],
+    });
+    const response = await app.inject({ method: 'GET', url: '/api/sessions', headers: remoteHeaders() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([]);
+  });
+
+  it('an authenticated remote connection reaches POST /api/sessions/:id/send (the composer route is on the allowlist — not blocked at the app gate)', async () => {
+    app = makeApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN },
+      remoteHost: REMOTE_HOST,
+      manager: { getSession: () => undefined } as unknown as RouteContext['manager'],
+    });
+    const response = await app.inject({
+      method: 'POST', url: '/api/sessions/some-id/send', headers: { ...remoteHeaders(), 'content-type': 'application/json' },
+      payload: JSON.stringify({ text: 'hello' }),
+    });
+    // Reaches the route handler (404 "no such session" from the fake
+    // manager) rather than 403 — proves this path isn't blocked by the
+    // allowlist gate, distinct from the routes below which never reach a
+    // handler at all.
+    expect(response.statusCode).toBe(404);
+  });
+
+  it.each([
+    ['POST', '/api/sessions'],
+    ['PATCH', '/api/settings'],
+    ['POST', '/api/hooks/install'],
+    ['POST', '/api/repos/file-action'],
+    ['POST', '/api/sessions/some-id/stop'],
+    ['PATCH', '/api/sessions/some-id'],
+  ])('an authenticated remote connection is refused %s %s — not on the mobile allowlist, regardless of a valid token', async (method, url) => {
+    app = makeApp({ config: { ...defaultConfig(), tailscaleToken: TOKEN }, remoteHost: REMOTE_HOST });
+    const response = await app.inject({ method: method as 'POST' | 'PATCH', url, headers: remoteHeaders() });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
+  });
+
+  it('loopback is completely unaffected by the remote allowlist — every route stays reachable', async () => {
+    app = makeApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN },
+      manager: { renameSession: () => undefined } as unknown as RouteContext['manager'],
+    });
+    const response = await app.inject({
+      method: 'PATCH', url: '/api/sessions/some-id', headers: { host: '127.0.0.1:4040', 'content-type': 'application/json' },
+      payload: JSON.stringify({ name: 'renamed' }),
+    });
+    // Reaches the handler (404, fake manager has no such session) — not
+    // the 403 a remote connection would get for the same route.
+    expect(response.statusCode).toBe(404);
+  });
+});

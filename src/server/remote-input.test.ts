@@ -2,7 +2,7 @@
 // connection that lacks the 'raw-write' capability (ticket 14). This is a
 // security boundary — every rejection case here is adversarial on purpose.
 import { describe, expect, it } from 'vitest';
-import { isAllowedRemoteInput } from './remote-input.js';
+import { containsDisallowedControlBytes, isAllowedRemoteInput } from './remote-input.js';
 
 describe('isAllowedRemoteInput', () => {
   it('allows Ctrl-C', () => {
@@ -64,5 +64,43 @@ describe('isAllowedRemoteInput', () => {
     expect(isAllowedRemoteInput('\x04')).toBe(false); // Ctrl-D
     expect(isAllowedRemoteInput('\t')).toBe(false); // Tab
     expect(isAllowedRemoteInput('\x7f')).toBe(false); // Backspace/DEL
+  });
+});
+
+// Code-review finding: POST /api/sessions/:id/send (routes.ts) writes its
+// `text` verbatim to the PTY, and ticket 05 made that route reachable by an
+// authenticated remote connection — this predicate is what closes the
+// resulting bypass of the control-key restriction above.
+describe('containsDisallowedControlBytes', () => {
+  it('allows ordinary human-authored text', () => {
+    expect(containsDisallowedControlBytes('hello, please continue')).toBe(false);
+  });
+
+  it('allows newlines and tabs (legitimate message formatting)', () => {
+    expect(containsDisallowedControlBytes('line one\nline two\tindented')).toBe(false);
+  });
+
+  it('flags an embedded Ctrl-C', () => {
+    expect(containsDisallowedControlBytes('please continue\x03')).toBe(true);
+  });
+
+  it('flags an embedded Esc/CSI sequence smuggled inside otherwise-normal text', () => {
+    expect(containsDisallowedControlBytes('looks fine\x1b[Anow move up')).toBe(true);
+  });
+
+  it('flags a bare Esc anywhere in the string', () => {
+    expect(containsDisallowedControlBytes('a\x1bb')).toBe(true);
+  });
+
+  it('flags DEL', () => {
+    expect(containsDisallowedControlBytes('a\x7fb')).toBe(true);
+  });
+
+  it('flags other C0 control bytes (e.g. Ctrl-D)', () => {
+    expect(containsDisallowedControlBytes('a\x04b')).toBe(true);
+  });
+
+  it('allows an empty string', () => {
+    expect(containsDisallowedControlBytes('')).toBe(false);
   });
 });

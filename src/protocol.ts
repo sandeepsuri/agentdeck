@@ -23,6 +23,27 @@ export const TERMINAL_ROWS = 30;
 export const TOKEN_QUERY_PARAM = 'token';
 export const TOKEN_HEADER = 'x-agentdeck-token';
 
+/**
+ * Ticket 14: the fixed control-key set a remote (non-'raw-write')
+ * connection may send, one WS 'input' frame per byte sequence. Shared
+ * between src/ui/components/ControlKeys.tsx (the button labels) and
+ * src/server/remote-input.ts (the server-side allowlist) so the two sides
+ * can't drift — same reasoning as TOKEN_HEADER/TOKEN_QUERY_PARAM above.
+ */
+export interface ControlKeyDef {
+  label: string;
+  data: string;
+}
+export const CONTROL_KEYS: ControlKeyDef[] = [
+  { label: 'Ctrl-C', data: '\x03' },
+  { label: 'Esc', data: '\x1b' },
+  { label: '↑', data: '\x1b[A' },
+  { label: '↓', data: '\x1b[B' },
+  { label: '←', data: '\x1b[D' },
+  { label: '→', data: '\x1b[C' },
+  { label: 'Enter', data: '\r' },
+];
+
 export interface VsCodeTerminalFrame {
   id: string;
   name: string;

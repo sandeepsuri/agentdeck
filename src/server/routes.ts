@@ -29,6 +29,7 @@ import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import { publicSession } from './security.js';
 import { classify, TOKEN_HEADER } from './connection-trust.js';
+import { containsDisallowedControlBytes } from './remote-input.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
@@ -751,6 +752,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
     if (text.length > MAX_MESSAGE_LENGTH) return reply.code(400).send({ error: 'text is too long' });
+    // Code-review finding: this route writes `text` to the PTY verbatim
+    // (below, for a managed session), and ticket 05 made it reachable by an
+    // authenticated remote connection — without this check a remote client
+    // could smuggle raw control bytes (Ctrl-C, Esc, ...) through the
+    // free-text composer, bypassing the WS 'input' path's control-key
+    // allowlist (ticket 14, remote-input.ts) through a different door.
+    // Local connections are unaffected; a valid remote token authenticates
+    // the connection, it doesn't grant it raw-write.
+    const trust = classify(
+      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+      { remoteHost: ctx.remoteHost, token: ctx.config.tailscaleToken },
+    );
+    if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
+      return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
+    }
 
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const recordSend = () => appendAgentMessage(repoPath, {
