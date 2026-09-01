@@ -43,3 +43,47 @@ _Avoid_: Launch manifest
 **Repository**:
 A Git working tree known to AgentDeck and used as the security boundary for repository-scoped actions.
 _Avoid_: Project, workspace
+
+**Run**:
+A durable execution of one Task objective. A Run has its own identity and lifecycle, survives AgentDeck restarts, and may use multiple Attempts or Sessions without becoming either one.
+_Avoid_: Session, provider thread, process
+
+**Attempt**:
+One runtime/process execution within a Run. Retries and runtime replacement create new Attempts while preserving the Run identity and intent.
+_Avoid_: Run, Session
+
+**Provider conversation**:
+A runtime-specific conversation identity, such as a Codex thread or Claude session, kept inside its runtime adapter. It may support continuation for an Attempt but is never the AgentDeck Run identity.
+_Avoid_: Run ID, AgentDeck Session
+
+**Work specification**:
+The immutable intent submitted to the Work Engine: objective, acceptance criteria, Repository, requested base reference, runtime preference, budget, verification intent, and requested delivery result.
+_Avoid_: Launch specification, mutable task state
+
+**Principal**:
+The authenticated human, device, service, or runtime identity requesting an action. A transport or Session identifier is routing context, not authority.
+_Avoid_: Session, channel
+
+**Profile**:
+A reusable, admin-approved configuration for how work may run, including runtime preferences, instructions, budgets, tools, and policy references. Profiles reference secrets but never contain secret values.
+_Avoid_: Work specification, runtime credentials
+
+**Policy decision**:
+The durable result of evaluating a Principal's requested action and context: allow, deny, or require approval, with a stable rule identifier and human-readable reason.
+_Avoid_: Capability, approval
+
+**Capability envelope**:
+The effective, frozen limits granted to a Run or Attempt, such as filesystem roots, network domains, environment policy, process ceilings, and child-Run ceilings.
+_Avoid_: Profile, runtime feature list
+
+**Approval**:
+A durable, correlated request and explicit resolution authorizing or denying a particular gated action. An approval never grants broader authority than the action it names.
+_Avoid_: Input response, policy rule
+
+**Verification gate**:
+A configured check whose recorded evidence must satisfy the Run's verification intent before the Run may advance or complete.
+_Avoid_: Runtime status, informal test output
+
+**Run result**:
+The durable terminal record of a Run's outcome, including its submitted intent, delivery artifacts, verification evidence, approvals, usage, budget state, and recovery notes.
+_Avoid_: Session summary, terminal transcript

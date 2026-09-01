@@ -20,6 +20,8 @@ import { launchNativeCompanion, type RunningCompanion } from '../native/companio
 import { WakeLock } from './wake-lock.js';
 import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
 import { coordinateManagedWakeLock } from './managed-wake-lock.js';
+import { DurableWorkEngine } from '../work-engine/engine.js';
+import { registerWorkRoutes } from './work-routes.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -27,6 +29,7 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
+  const workEngine = new DurableWorkEngine(store);
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than
@@ -94,6 +97,7 @@ export async function startServer(): Promise<RunningServer> {
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog,
     remoteHosts: remoteAccess.hosts,
   });
+  registerWorkRoutes(app, workEngine);
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;
   let companion: RunningCompanion | undefined;

@@ -194,6 +194,7 @@ describe('remote route allowlist (code-review finding: an authenticated remote c
 
   it.each([
     ['POST', '/api/sessions'],
+    ['POST', '/api/runs'],
     ['PATCH', '/api/settings'],
     ['POST', '/api/hooks/install'],
     ['POST', '/api/repos/file-action'],

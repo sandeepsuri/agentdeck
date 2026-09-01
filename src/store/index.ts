@@ -5,6 +5,7 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
+import type { WorkRun, WorkSpec } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../../migrations');
@@ -60,7 +61,8 @@ function rowToSession(r: SessionRow): Session {
 
 interface TaskRow {
   id: string; title: string; repo_id: string | null; status: string;
-  depends_on: string | null; session_ids: string;
+  depends_on: string | null; session_ids: string; objective: string | null;
+  acceptance_criteria: string | null;
 }
 
 function rowToTask(r: TaskRow): Task {
@@ -70,10 +72,27 @@ function rowToTask(r: TaskRow): Task {
     status: r.status as Task['status'],
     sessionIds: fromJson<string[]>(r.session_ids) ?? [],
   };
+  if (r.objective !== null) t.objective = r.objective;
+  const acceptanceCriteria = fromJson<string[]>(r.acceptance_criteria);
+  if (acceptanceCriteria !== undefined) t.acceptanceCriteria = acceptanceCriteria;
   if (r.repo_id !== null) t.repoId = r.repo_id;
   const dependsOn = fromJson<string[]>(r.depends_on);
   if (dependsOn !== undefined) t.dependsOn = dependsOn;
   return t;
+}
+
+interface RunRow {
+  id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
+}
+
+function rowToRun(r: RunRow): WorkRun {
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    status: r.status as WorkRun['status'],
+    spec: JSON.parse(r.work_spec) as WorkSpec,
+    submittedAt: r.submitted_at,
+  };
 }
 
 interface RepoRow {
@@ -202,15 +221,19 @@ export class Store {
   saveTask(t: Task): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, title, repo_id, status, depends_on, session_ids)
-         VALUES (@id, @title, @repoId, @status, @dependsOn, @sessionIds)
+        `INSERT INTO tasks (id, title, objective, acceptance_criteria, repo_id, status, depends_on, session_ids)
+         VALUES (@id, @title, @objective, @acceptanceCriteria, @repoId, @status, @dependsOn, @sessionIds)
          ON CONFLICT(id) DO UPDATE SET
-           title=excluded.title, repo_id=excluded.repo_id, status=excluded.status,
+           title=excluded.title, objective=excluded.objective,
+           acceptance_criteria=excluded.acceptance_criteria,
+           repo_id=excluded.repo_id, status=excluded.status,
            depends_on=excluded.depends_on, session_ids=excluded.session_ids`,
       )
       .run({
         id: t.id,
         title: t.title,
+        objective: t.objective ?? null,
+        acceptanceCriteria: toJson(t.acceptanceCriteria),
         repoId: t.repoId ?? null,
         status: t.status,
         dependsOn: toJson(t.dependsOn),
@@ -225,6 +248,34 @@ export class Store {
 
   listTasks(): Task[] {
     return (this.db.prepare('SELECT * FROM tasks').all() as TaskRow[]).map(rowToTask);
+  }
+
+  // -- durable work runs --
+
+  createTaskAndRun(task: Task, run: WorkRun): void {
+    this.db.transaction(() => {
+      this.saveTask(task);
+      this.db.prepare(
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt)`,
+      ).run({
+        id: run.id,
+        taskId: run.taskId,
+        status: run.status,
+        workSpec: JSON.stringify(run.spec),
+        submittedAt: run.submittedAt,
+      });
+    })();
+  }
+
+  getRun(id: string): WorkRun | undefined {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as RunRow | undefined;
+    return row ? rowToRun(row) : undefined;
+  }
+
+  listRuns(): WorkRun[] {
+    return (this.db.prepare('SELECT * FROM runs ORDER BY submitted_at DESC').all() as RunRow[])
+      .map(rowToRun);
   }
 
   // -- repos --

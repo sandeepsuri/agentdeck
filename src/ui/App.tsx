@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
+import type { WorkRun } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { LaunchModal } from './components/LaunchModal.js';
+import { RunSubmissionModal } from './components/RunSubmissionModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
 import { type ThemePreference, useTheme } from './theme.js';
@@ -15,6 +17,7 @@ import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSession
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
+import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
@@ -57,6 +60,7 @@ function ThemeControl() {
 export function App() {
   const initialNavigation = useMemo(() => parseInitialNavigation(location.search), []);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [runs, setRuns] = useState<WorkRun[]>([]);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [events, setEvents] = useState<AgentMessage[]>([]);
   const [claims, setClaims] = useState<FileClaim[]>([]);
@@ -65,7 +69,9 @@ export function App() {
   const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
   const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'operations');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [showLaunch, setShowLaunch] = useState(false);
+  const [showRunSubmission, setShowRunSubmission] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,7 +97,8 @@ export function App() {
   const [connectionKind, setConnectionKind] = useState<'local' | 'remote'>('local');
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
-  const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
+  const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const selectedRepoPath = selectedRun?.spec.repository.path ?? (selected ? repoPathOf(selected) : repos[0]?.path ?? null);
   const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
 
   // Ticket 10: an ended managed session stays in the rail ~1h, then moves to
@@ -141,6 +148,7 @@ export function App() {
       });
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
   const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
+  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then(setRuns).catch(() => undefined), []);
   const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
   const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
   const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
@@ -154,10 +162,10 @@ export function App() {
     // connection is classified; response validation above also makes the
     // brief pre-classification requests harmless if their 403s arrive late.
     if (connectionKind === 'remote') return;
-    refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
-    const background = setInterval(() => { refreshRepos(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
+    refreshRepos(); refreshRuns(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
+    const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
+  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRuns, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -273,8 +281,9 @@ export function App() {
     }
   };
 
-  const selectSession = (session: Session) => setSelectedId(session.id);
-  const openTerminal = (session: Session) => { setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
+  const selectRun = (run: WorkRun) => { setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
+  const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
 
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
@@ -363,6 +372,7 @@ export function App() {
           <ThemeControl />
           <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — summary model default and API key" type="button">⚙</button>
           <button className="button compact-button" onClick={() => void installHooks()} type="button">Install hooks</button>
+          <button className="button compact-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
           <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button">Launch agent <kbd>⌘L</kbd></button>
         </div>
       </header>
@@ -370,9 +380,9 @@ export function App() {
       {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
 
       <div className="app-body">
-        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selectedId={selectedId} sessions={railSessions} />
+        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}><OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} /></div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace run={selectedRun} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
@@ -390,7 +400,7 @@ export function App() {
             type="button"
           >{inspectorCollapsed ? '‹' : '›'}</button>
           <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
-            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selected} view={view} />
+            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selectedRun ? null : selected} view={view} />
           </div>
         </div>
       </div>
@@ -398,7 +408,7 @@ export function App() {
       <footer className="app-statusbar">
         <span className={wsReady ? 'is-live' : ''}><i />{wsReady ? 'Live' : 'Offline'}</span>
         <span>AgentDeck v0.1.0</span>
-        <span>▣ {selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
+        <span>▣ {selectedRun ? selectedRun.spec.repository.name : selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
         {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
         <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>
         <Clock />
@@ -406,7 +416,8 @@ export function App() {
       </footer>
 
       <CommandPalette onClose={() => setPaletteOpen(false)} onLaunch={() => setShowLaunch(true)} onSelectSession={(session) => { selectSession(session); setView('operations'); }} onView={setView} open={paletteOpen} repos={repos} sessions={sessions} />
-      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
+      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
+      {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   );

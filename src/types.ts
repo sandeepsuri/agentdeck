@@ -97,6 +97,8 @@ export interface Repo {
 export interface Task {
   id: string;
   title: string;
+  objective?: string;
+  acceptanceCriteria?: string[];
   repoId?: string;
   status: 'todo' | 'in_progress' | 'blocked' | 'done';
   dependsOn?: string[]; // task ids — readiness signalling

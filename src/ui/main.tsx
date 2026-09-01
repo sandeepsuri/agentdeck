@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { ThemeProvider } from './theme.js';
 import './theme.css';
 import './workspace.css';
+import './runs.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root');
