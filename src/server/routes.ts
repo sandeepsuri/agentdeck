@@ -261,6 +261,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.get('/api/settings', async () => ({
     defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
     openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
+    // Ticket 05: feature gate for the structured Codex Attempt UI — set in
+    // config.json only (see AgentDeckConfig), never through this route.
+    structuredAttemptsEnabled: Boolean(ctx.config.structuredAttemptsEnabled),
   }));
 
   app.patch('/api/settings', async (req, reply) => {

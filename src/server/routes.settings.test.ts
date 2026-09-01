@@ -76,7 +76,7 @@ describe('GET/PATCH /api/settings', () => {
   it('reports openaiKeyConfigured: false and no default when nothing is set', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/settings' });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ defaultModel: undefined, openaiKeyConfigured: false });
+    expect(response.json()).toEqual({ defaultModel: undefined, openaiKeyConfigured: false, structuredAttemptsEnabled: false });
   });
 
   it('reports openaiKeyConfigured: true once a key is in config, without ever including the key', async () => {
@@ -84,13 +84,19 @@ describe('GET/PATCH /api/settings', () => {
     const response = await app.inject({ method: 'GET', url: '/api/settings' });
     const body = response.body;
     expect(body).not.toContain('sk-super-secret');
-    expect(response.json()).toEqual({ defaultModel: undefined, openaiKeyConfigured: true });
+    expect(response.json()).toEqual({ defaultModel: undefined, openaiKeyConfigured: true, structuredAttemptsEnabled: false });
   });
 
   it('reports the stored default model', async () => {
     getSetting.mockReturnValue('claude-cli:sonnet');
     const response = await app.inject({ method: 'GET', url: '/api/settings' });
-    expect(response.json()).toEqual({ defaultModel: 'claude-cli:sonnet', openaiKeyConfigured: false });
+    expect(response.json()).toEqual({ defaultModel: 'claude-cli:sonnet', openaiKeyConfigured: false, structuredAttemptsEnabled: false });
+  });
+
+  it('reports structuredAttemptsEnabled: true once set in config (ticket 05 feature gate)', async () => {
+    config.structuredAttemptsEnabled = true;
+    const response = await app.inject({ method: 'GET', url: '/api/settings' });
+    expect(response.json()).toEqual({ defaultModel: undefined, openaiKeyConfigured: false, structuredAttemptsEnabled: true });
   });
 
   it('PATCH sets the default model via store.setSetting, never via saveConfig', async () => {

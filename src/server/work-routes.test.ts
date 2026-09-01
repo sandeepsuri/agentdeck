@@ -3,10 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Fastify from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
-import { Store } from '../store/index.js';
+import {
+  afterEach, describe, expect, it, vi,
+} from 'vitest';
+import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
 import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
+import { Store } from '../store/index.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
+import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
 import type { WorkSpec } from '../work-engine/types.js';
 import { registerWorkRoutes } from './work-routes.js';
 
@@ -25,7 +29,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** A real repository, never the caller's real ~/.agentdeck/runs, so prepare() has something to resolve against. */
-function makeApp() {
+function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
   const root = tempDir();
   const repoPath = path.join(root, 'repo');
   fs.mkdirSync(repoPath, { recursive: true });
@@ -40,10 +44,13 @@ function makeApp() {
   const app = Fastify();
   const store = new Store(':memory:');
   store.upsertRepo({ id: repoPath, name: 'example', path: repoPath });
-  registerWorkRoutes(app, new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource()));
+  const engine = runtimeAdapters
+    ? new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), runtimeAdapters)
+    : new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource());
+  registerWorkRoutes(app, engine);
   apps.push(app);
   stores.push(store);
-  return { app, repoPath };
+  return { app, repoPath, store };
 }
 
 function submittedIntent(repoPath: string, requestedBaseReference = 'feature/exact-request'): WorkSpec {
@@ -155,5 +162,60 @@ describe('run preparation routes', () => {
     expect(cancelled.statusCode).toBe(200);
     expect(cancelled.json()).toMatchObject({ status: 'cancelled', preparation: prepared.preparation });
     expect(fs.existsSync(prepared.preparation.worktreePath)).toBe(true);
+  });
+});
+
+describe('run Attempt start route', () => {
+  it('reports an unknown run and a not-yet-eligible run precisely', async () => {
+    const { app, repoPath } = makeApp();
+
+    const missing = await app.inject({ method: 'POST', url: '/api/runs/unknown/start' });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: 'no such run: unknown' });
+
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    const tooSoon = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    expect(tooSoon.statusCode).toBe(400);
+    expect(tooSoon.json().error).toMatch(/prepared/);
+  });
+
+  it('starts a Codex Attempt for a prepared, enveloped run and reports its structured progress to completion', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+
+    const started = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+
+    expect(started.statusCode).toBe(200);
+    expect(started.json()).toMatchObject({ status: 'running', attempt: { state: 'running', runtime: 'codex' } });
+
+    await vi.waitUntil(async () => {
+      const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'completed';
+    });
+    const settled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(settled.json()).toMatchObject({ status: 'completed', attempt: { state: 'completed', runtime: 'codex' } });
+  });
+
+  it('refuses to start a second Attempt for the same Run', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+
+    const secondStart = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+
+    expect(secondStart.statusCode).toBe(400);
+    expect(secondStart.json().error).toMatch(/already been started/);
+
+    await vi.waitUntil(async () => {
+      const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'completed';
+    });
   });
 });

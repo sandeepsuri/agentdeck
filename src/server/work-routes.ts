@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import {
-  InvalidRunStateError, InvalidWorkSpecError, RunNotFoundError, RunPreparationError,
+  InvalidRunStateError, InvalidWorkSpecError, RunNotFoundError, RunPreparationError, UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
 import type { WorkEngine, WorkSpec } from '../work-engine/types.js';
 
@@ -33,6 +33,19 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine)
     } catch (error) {
       if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
       if (error instanceof InvalidRunStateError || error instanceof RunPreparationError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/runs/:id/start', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.start(id);
+    } catch (error) {
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError || error instanceof UnsupportedRuntimeError) {
         return reply.code(400).send({ error: error.message });
       }
       throw error;

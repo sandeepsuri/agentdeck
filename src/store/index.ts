@@ -5,7 +5,9 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
-import type { RunEnvelopeState, RunPreparation, WorkRun, WorkSpec } from '../work-engine/types.js';
+import type {
+  AttemptState, RunEnvelopeState, RunPreparation, WorkRun, WorkSpec,
+} from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../../migrations');
@@ -83,7 +85,7 @@ function rowToTask(r: TaskRow): Task {
 
 interface RunRow {
   id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
-  preparation: string; envelope: string;
+  preparation: string; envelope: string; attempt: string;
 }
 
 function rowToRun(r: RunRow): WorkRun {
@@ -95,6 +97,7 @@ function rowToRun(r: RunRow): WorkRun {
     submittedAt: r.submitted_at,
     preparation: JSON.parse(r.preparation) as RunPreparation,
     envelope: JSON.parse(r.envelope) as RunEnvelopeState,
+    attempt: JSON.parse(r.attempt) as AttemptState,
   };
 }
 
@@ -259,8 +262,8 @@ export class Store {
     this.db.transaction(() => {
       this.saveTask(task);
       this.db.prepare(
-        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope)
-         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope)`,
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, attempt)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @attempt)`,
       ).run({
         id: run.id,
         taskId: run.taskId,
@@ -269,6 +272,7 @@ export class Store {
         submittedAt: run.submittedAt,
         preparation: JSON.stringify(run.preparation),
         envelope: JSON.stringify(run.envelope),
+        attempt: JSON.stringify(run.attempt),
       });
     })();
   }
@@ -283,15 +287,16 @@ export class Store {
       .map(rowToRun);
   }
 
-  /** Updates a Run's status, preparation, and envelope records. The frozen spec never changes. */
+  /** Updates a Run's status, preparation, envelope, and attempt records. The frozen spec never changes. */
   updateRun(run: WorkRun): void {
     this.db.prepare(
-      'UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope WHERE id = @id',
+      'UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope, attempt = @attempt WHERE id = @id',
     ).run({
       id: run.id,
       status: run.status,
       preparation: JSON.stringify(run.preparation),
       envelope: JSON.stringify(run.envelope),
+      attempt: JSON.stringify(run.attempt),
     });
   }
 

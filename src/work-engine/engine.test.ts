@@ -2,13 +2,19 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import {
+  afterEach, describe, expect, it, vi,
+} from 'vitest';
 import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
-import { Store } from '../store/index.js';
+import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
 import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
+import { Store } from '../store/index.js';
 import { CHILD_RUN_CEILING, TRUSTED_RUNTIME_PROVIDER_DOMAINS } from './envelope.js';
-import { DurableWorkEngine, InvalidRunStateError, RunNotFoundError } from './engine.js';
+import {
+  DurableWorkEngine, InvalidRunStateError, RunNotFoundError, UnsupportedRuntimeError,
+} from './engine.js';
 import { runBranchName, runWorktreePath } from './prepare.js';
+import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import type { RunRepository, WorkSpec } from './types.js';
 
 const tempDirectories: string[] = [];
@@ -396,5 +402,155 @@ describe('DurableWorkEngine.prepare', () => {
 
     expect(engine.get(submitted.id)?.preparation).toEqual(prepared.preparation);
     store.close();
+  });
+});
+
+describe('DurableWorkEngine.start', () => {
+  function setUp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters);
+    return { root, repoPath, store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    return engine.get(runId)!;
+  }
+
+  it('rejects starting an Attempt before the worktree is prepared', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+
+    await expect(engine.start(submitted.id)).rejects.toThrow(/prepared/);
+    store.close();
+  });
+
+  it('rejects starting an Attempt when no preferred runtime satisfies the envelope', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository, { runtimePreference: ['claude'] });
+    expect(prepared.envelope.state).toBe('refused');
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(/capability envelope/);
+    store.close();
+  });
+
+  it('rejects starting an Attempt for a runtime with no wired adapter', async () => {
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(UnsupportedRuntimeError);
+    store.close();
+  });
+
+  it('rejects starting an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.start('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('starts one Codex Attempt in the prepared worktree, reporting ordered structured progress to completion', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    const started = await engine.start(prepared.id);
+
+    expect(started.status).toBe('running');
+    expect(started.attempt).toMatchObject({ state: 'running', runtime: 'codex' });
+
+    const settled = await waitForSettled(engine, prepared.id);
+    expect(settled.status).toBe('completed');
+    expect(settled.attempt.state).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.map((event) => event.kind)).toEqual([
+      'lifecycle', 'lifecycle', 'tool-activity', 'tool-activity', 'message', 'usage', 'lifecycle', 'completion',
+    ]);
+    expect(settled.attempt.events[0]).toMatchObject({ kind: 'lifecycle', phase: 'attempt-started' });
+    expect(fake.writes.some((line) => line.includes(prepared.preparation.worktreePath!))).toBe(true);
+    store.close();
+  });
+
+  it('never leaks the Codex provider conversation id into the stored Run', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success', threadId: 'thread-should-stay-internal' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(JSON.stringify(settled)).not.toContain('thread-should-stay-internal');
+    store.close();
+  });
+
+  it('ends a Run in failed status with a precise reason when the Attempt fails', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed');
+    expect(settled.attempt).toMatchObject({ state: 'failed', reason: 'The sandboxed command exited non-zero.' });
+    store.close();
+  });
+
+  it('refuses to start a second Attempt once one has already been started', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(/already been started/);
+    await waitForSettled(engine, prepared.id);
+    store.close();
+  });
+
+  it('persists Attempt progress durably: a fresh engine on the same store observes the completed Attempt', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await submitAndPrepare(firstEngine, repository);
+    await firstEngine.start(prepared.id);
+    await waitForSettled(firstEngine, prepared.id);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id);
+
+    expect(reopened?.status).toBe('completed');
+    expect(reopened?.attempt.state).toBe('completed');
+    reopenedStore.close();
   });
 });

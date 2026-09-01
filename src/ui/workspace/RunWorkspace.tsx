@@ -1,9 +1,34 @@
-import type { WorkRun } from '../../work-engine/types.js';
+import type { AttemptEvent, WorkRun } from '../../work-engine/types.js';
 import { formatRunLabel } from './runModel.js';
 
-export function RunWorkspace({ run, onPrepare }: { run: WorkRun; onPrepare?: (run: WorkRun) => void }) {
-  const { preparation, envelope } = run;
+function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: string } {
+  switch (event.kind) {
+    case 'lifecycle': return { label: formatRunLabel(event.phase) };
+    case 'message': return { label: 'Assistant message', detail: event.text };
+    case 'tool-activity': return { label: `${formatRunLabel(event.tool)} ${event.status}`, detail: event.summary };
+    case 'usage': return { label: 'Usage', detail: `Input tokens: ${event.inputTokens} · Output tokens: ${event.outputTokens}` };
+    case 'completion': return { label: `Completed — ${formatRunLabel(event.outcome)}`, detail: event.summary };
+    case 'failure': return { label: 'Failed', detail: event.reason };
+    default: return { label: String(event) };
+  }
+}
+
+interface Props {
+  run: WorkRun;
+  onPrepare?: (run: WorkRun) => void;
+  onStart?: (run: WorkRun) => void;
+  /** Ticket 05: the structured Attempt panel is experimental and stays hidden until this feature gate is on. */
+  structuredAttemptsEnabled?: boolean;
+}
+
+export function RunWorkspace({
+  run, onPrepare, onStart, structuredAttemptsEnabled = false,
+}: Props) {
+  const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
+  const eligibleForCodexAttempt = preparation.state === 'ready' && envelope.state === 'ready'
+    && envelope.capabilityEnvelope.runtime === 'codex';
+  const canStart = structuredAttemptsEnabled && eligibleForCodexAttempt && attempt.state === 'idle' && Boolean(onStart);
   return (
     <article className="run-workspace">
       <header>
@@ -74,6 +99,47 @@ export function RunWorkspace({ run, onPrepare }: { run: WorkRun; onPrepare?: (ru
           })()}
         </dl>
       </section>
+      {structuredAttemptsEnabled && eligibleForCodexAttempt && (
+        <section className="run-attempt">
+          <h2>Attempt</h2>
+          <dl className="run-intent-grid">
+            <div><dt>Objective</dt><dd>{run.spec.objective}</dd></div>
+            <div><dt>Runtime</dt><dd>{formatRunLabel(envelope.state === 'ready' ? envelope.capabilityEnvelope.runtime : '')}</dd></div>
+            <div>
+              <dt>Attempt state</dt>
+              <dd><span className={`work-run-status status-${attempt.state}`}>{formatRunLabel(attempt.state)}</span></dd>
+            </div>
+            {attempt.state === 'failed' && <div><dt>Terminal outcome</dt><dd>Failed — {attempt.reason}</dd></div>}
+            {attempt.state === 'completed' && (
+              <div>
+                <dt>Terminal outcome</dt>
+                <dd>{(() => {
+                  const last = attempt.events.at(-1);
+                  return last?.kind === 'completion' ? `Completed — ${formatRunLabel(last.outcome)}` : 'Completed';
+                })()}</dd>
+              </div>
+            )}
+          </dl>
+          {canStart && (
+            <button className="button button-primary" onClick={() => onStart?.(run)} type="button">
+              Start Attempt
+            </button>
+          )}
+          {attempt.state !== 'idle' && (
+            <ol className="run-attempt-activity">
+              {attempt.events.map((event) => {
+                const { label, detail } = describeAttemptEvent(event);
+                return (
+                  <li className={`run-attempt-event kind-${event.kind}`} key={event.sequence}>
+                    <strong>{label}</strong>
+                    {detail && <p>{detail}</p>}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </section>
+      )}
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>
   );

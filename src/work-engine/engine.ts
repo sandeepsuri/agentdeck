@@ -3,10 +3,14 @@ import path from 'node:path';
 import { defaultDataDir } from '../config.js';
 import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
-import type { Task } from '../types.js';
+import type { AgentType, Task } from '../types.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
-import type { WorkEngine, WorkRun, WorkSpec } from './types.js';
+import { createCodexAttemptAdapter } from './runtimes/codex.js';
+import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
+import type {
+  AttemptEvent, AttemptState, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
+} from './types.js';
 
 // Re-exported so callers (e.g. the REST adapter) reach every error prepare()
 // can throw through this one module, keeping prepare.ts an internal detail.
@@ -30,6 +34,14 @@ export class InvalidRunStateError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidRunStateError';
+  }
+}
+
+/** No RuntimeAttemptAdapter is wired for the Run's envelope runtime (ticket 05 wires Codex only; ticket 14 adds Claude). */
+export class UnsupportedRuntimeError extends Error {
+  constructor(runtime: AgentType) {
+    super(`no runtime adapter is available for: ${runtime}`);
+    this.name = 'UnsupportedRuntimeError';
   }
 }
 
@@ -93,14 +105,17 @@ const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set(['completed', 
 export class DurableWorkEngine implements WorkEngine {
   private readonly runsRoot: string;
   private readonly runtimeReadiness: RuntimeReadinessSource;
+  private readonly runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>>;
 
   constructor(
     private readonly store: Store,
     runsRoot: string = path.join(defaultDataDir(), 'runs'),
     runtimeReadiness: RuntimeReadinessSource = createRuntimeReadinessSource(),
+    runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = { codex: createCodexAttemptAdapter() },
   ) {
     this.runsRoot = runsRoot;
     this.runtimeReadiness = runtimeReadiness;
+    this.runtimeAdapters = runtimeAdapters;
   }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
@@ -120,6 +135,7 @@ export class DurableWorkEngine implements WorkEngine {
       submittedAt: new Date().toISOString(),
       preparation: { state: 'pending' },
       envelope: { state: 'pending' },
+      attempt: { state: 'idle' },
     });
     const task: Task = {
       id: taskId,
@@ -197,5 +213,86 @@ export class DurableWorkEngine implements WorkEngine {
     const cancelled = frozenCopy<WorkRun>({ ...existing, status: 'cancelled' });
     this.store.updateRun(cancelled);
     return cancelled;
+  }
+
+  async start(runId: string): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new InvalidRunStateError(`cannot start an Attempt for a Run in terminal status: ${existing.status}`);
+    }
+    if (existing.preparation.state !== 'ready') {
+      throw new InvalidRunStateError('cannot start an Attempt before the Run worktree is prepared');
+    }
+    if (existing.envelope.state !== 'ready') {
+      throw new InvalidRunStateError('cannot start an Attempt without a ready capability envelope');
+    }
+    if (existing.attempt.state !== 'idle') {
+      throw new InvalidRunStateError(`an Attempt has already been started for this Run (${existing.attempt.state})`);
+    }
+    const { capabilityEnvelope } = existing.envelope;
+    const adapter = this.runtimeAdapters[capabilityEnvelope.runtime];
+    if (!adapter) throw new UnsupportedRuntimeError(capabilityEnvelope.runtime);
+
+    const startedAt = new Date().toISOString();
+    const running = frozenCopy<WorkRun>({
+      ...existing,
+      status: 'running',
+      attempt: { state: 'running', runtime: capabilityEnvelope.runtime, startedAt, events: [] },
+    });
+    this.store.updateRun(running);
+
+    // Fire-and-forget: the Attempt itself can run far longer than an HTTP
+    // request should block for. Progress is observed by rereading the Run
+    // (get/list), never by awaiting this call.
+    void this.runAttempt(existing, adapter, capabilityEnvelope, startedAt);
+    return running;
+  }
+
+  private async runAttempt(
+    base: WorkRun,
+    adapter: RuntimeAttemptAdapter,
+    envelope: CapabilityEnvelope,
+    startedAt: string,
+  ): Promise<void> {
+    const context: AttemptLaunchContext = {
+      runId: base.id,
+      objective: base.spec.objective,
+      acceptanceCriteria: base.spec.acceptanceCriteria,
+      worktreePath: envelope.profile.writableWorktree,
+      profile: envelope.profile,
+    };
+    const events: AttemptEvent[] = [];
+    const persist = (status: WorkRun['status'], attempt: AttemptState): void => {
+      this.store.updateRun(frozenCopy<WorkRun>({ ...base, status, attempt }));
+    };
+    const persistFailure = (reason: string, at: string = new Date().toISOString()): void => {
+      persist('failed', {
+        state: 'failed', runtime: envelope.runtime, startedAt, failedAt: at, reason, events: [...events],
+      });
+    };
+
+    try {
+      for await (const event of adapter.run(context)) {
+        events.push(event);
+        if (event.kind === 'completion') {
+          persist('completed', {
+            state: 'completed', runtime: envelope.runtime, startedAt, completedAt: event.at, events: [...events],
+          });
+          return;
+        }
+        if (event.kind === 'failure') {
+          persistFailure(event.reason, event.at);
+          return;
+        }
+        persist('running', { state: 'running', runtime: envelope.runtime, startedAt, events: [...events] });
+      }
+      // The adapter contract (adapter.contract.ts) requires exactly one
+      // terminal event; an adapter that violates it still ends the Run in a
+      // precise, recoverable failure rather than leaving it stuck running.
+      persistFailure('The runtime adapter ended without reporting completion or failure.');
+    } catch (error) {
+      persistFailure(error instanceof Error ? error.message : String(error));
+    }
   }
 }

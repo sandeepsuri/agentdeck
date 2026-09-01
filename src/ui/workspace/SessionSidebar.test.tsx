@@ -33,6 +33,7 @@ const run: WorkRun = {
   },
   preparation: { state: 'pending' },
   envelope: { state: 'pending' },
+  attempt: { state: 'idle' },
 };
 
 describe('SessionSidebar', () => {

@@ -22,6 +22,7 @@ function baseRun(): WorkRun {
     },
     preparation: { state: 'pending' },
     envelope: { state: 'pending' },
+    attempt: { state: 'idle' },
   };
 }
 
@@ -124,5 +125,143 @@ describe('RunWorkspace', () => {
 
     expect(html).toContain('Refused');
     expect(html).toContain('execution restrictions unsupported');
+  });
+});
+
+function eligibleRun(): WorkRun {
+  return {
+    ...baseRun(),
+    preparation: { state: 'ready', baseCommit: 'abc123', worktreePath: '/repos/example-runs/run-durable-123' },
+    envelope: {
+      state: 'ready',
+      capabilityEnvelope: {
+        runtime: 'codex',
+        profile: {
+          writableWorktree: '/repos/example-runs/run-durable-123',
+          readableRoots: ['/repos/example-runs/run-durable-123'],
+          allowedNetworkDomains: ['api.openai.com', 'chatgpt.com'],
+          environmentAllowlist: ['PATH', 'HOME'],
+          processCeiling: 16,
+          childRunCeiling: 0,
+        },
+        secretGrants: [],
+      },
+    },
+  };
+}
+
+describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
+  it('stays hidden when the feature gate is off, even for an eligible Run', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: false }));
+
+    expect(html).not.toContain('Start Attempt');
+    expect(html).not.toContain('Attempt state');
+  });
+
+  it('stays hidden for a Run whose envelope runtime is not Codex, even with the gate on', () => {
+    const base = eligibleRun();
+    if (base.envelope.state !== 'ready') throw new Error('expected a ready envelope');
+    const run: WorkRun = {
+      ...base,
+      envelope: { state: 'ready', capabilityEnvelope: { ...base.envelope.capabilityEnvelope, runtime: 'claude' } },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).not.toContain('Attempt state');
+  });
+
+  it('offers a Start Attempt action for an idle, eligible Run once the gate is on', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: eligibleRun(), structuredAttemptsEnabled: true, onStart: () => undefined,
+    }));
+
+    expect(html).toContain('Start Attempt');
+    expect(html).toContain('Idle');
+  });
+
+  it('offers no Start Attempt action without a handler, even when eligible', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: true }));
+
+    expect(html).not.toContain('Start Attempt');
+  });
+
+  it('shows ordered structured activity for a running Attempt, and no Start action once one is underway', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'running',
+      attempt: {
+        state: 'running',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'lifecycle', sequence: 1, at: '2026-09-01T00:05:01.000Z', phase: 'turn-started' },
+          {
+            kind: 'tool-activity', sequence: 2, at: '2026-09-01T00:05:02.000Z', tool: 'command_execution', status: 'started', summary: 'npm test',
+          },
+          {
+            kind: 'message', sequence: 3, at: '2026-09-01T00:05:03.000Z', role: 'assistant', text: 'Working on the fix now.',
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onStart: () => undefined }));
+
+    expect(html).not.toContain('Start Attempt');
+    expect(html).toContain('Attempt started');
+    expect(html).toContain('Turn started');
+    expect(html).toContain('npm test');
+    expect(html).toContain('Working on the fix now.');
+  });
+
+  it('shows the terminal outcome for a completed Attempt', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'completed',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          {
+            kind: 'completion', sequence: 1, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Completed');
+    expect(html).toContain('Success');
+  });
+
+  it('shows the precise failure reason as the terminal outcome for a failed Attempt', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'failed',
+      attempt: {
+        state: 'failed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        failedAt: '2026-09-01T00:06:00.000Z',
+        reason: 'The sandboxed command exited non-zero.',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          {
+            kind: 'failure', sequence: 1, at: '2026-09-01T00:06:00.000Z', reason: 'The sandboxed command exited non-zero.',
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Failed');
+    expect(html).toContain('The sandboxed command exited non-zero.');
   });
 });

@@ -61,6 +61,9 @@ export function App() {
   const initialNavigation = useMemo(() => parseInitialNavigation(location.search), []);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [runs, setRuns] = useState<WorkRun[]>([]);
+  // Ticket 05: the structured Attempt panel stays hidden until this
+  // admin-configured feature gate (config.json's structuredAttemptsEnabled) is on.
+  const [structuredAttemptsEnabled, setStructuredAttemptsEnabled] = useState(false);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [events, setEvents] = useState<AgentMessage[]>([]);
   const [claims, setClaims] = useState<FileClaim[]>([]);
@@ -166,6 +169,16 @@ export function App() {
     const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
   }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRuns, refreshSessions, refreshVsCode]);
+
+  useEffect(() => {
+    if (connectionKind === 'remote') return;
+    let disposed = false;
+    apiFetch('/api/settings')
+      .then((response) => response.ok ? response.json() as Promise<{ structuredAttemptsEnabled?: boolean }> : null)
+      .then((body) => { if (!disposed && body) setStructuredAttemptsEnabled(Boolean(body.structuredAttemptsEnabled)); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [connectionKind]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -295,6 +308,13 @@ export function App() {
     setRuns((current) => current.map((item) => item.id === body.id ? body : item));
   };
 
+  const startRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/start`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Starting the Attempt failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
     const body = await response.json() as Session & { error?: string };
@@ -392,7 +412,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} run={selectedRun} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} onStart={startRun} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>

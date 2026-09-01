@@ -32,6 +32,13 @@ export interface AgentDeckConfig {
    * is the only place this value is ever surfaced outside this file.
    */
   tailscaleToken?: string;
+  /**
+   * Feature gate for the structured Codex Attempt UI (ticket 05). Off by
+   * default — the underlying capability is still experimental (no budget
+   * enforcement, approvals, or restart recovery yet), so it stays opt-in via
+   * config.json until ticket 15 ships the full managed-work release.
+   */
+  structuredAttemptsEnabled?: boolean;
 }
 
 export function defaultDataDir(): string {
@@ -95,6 +102,9 @@ export function loadConfig(configPath?: string): AgentDeckConfig {
   }
   if (typeof o.tailscaleToken === 'string' && o.tailscaleToken.length > 0) {
     cfg.tailscaleToken = o.tailscaleToken;
+  }
+  if (typeof o.structuredAttemptsEnabled === 'boolean') {
+    cfg.structuredAttemptsEnabled = o.structuredAttemptsEnabled;
   }
   return cfg;
 }
