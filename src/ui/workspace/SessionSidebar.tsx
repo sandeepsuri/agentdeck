@@ -1,6 +1,7 @@
 import type { DiscoveryStatus, Repo, Session } from '../../types.js';
 import type { WorkRun } from '../../work-engine/types.js';
 import { SparkBars, StatusBadge, isEndedSession, sessionLabel } from './model.js';
+import { formatRunLabel } from './runModel.js';
 
 interface Props {
   sessions: Session[];
@@ -21,8 +22,6 @@ function RunRow({ run, selected, onSelect }: {
   selected: boolean;
   onSelect: () => void;
 }) {
-  const statusText = run.status.replaceAll('_', ' ');
-  const status = statusText.charAt(0).toUpperCase() + statusText.slice(1);
   return (
     <button className={`work-run-row${selected ? ' is-selected' : ''}`} onClick={onSelect} type="button">
       <span className="work-run-glyph">RUN</span>
@@ -30,7 +29,7 @@ function RunRow({ run, selected, onSelect }: {
         <strong title={run.spec.objective}>{run.spec.objective}</strong>
         <small>{run.spec.repository.name} · {run.spec.requestedBaseReference}</small>
       </span>
-      <span className={`work-run-status status-${run.status}`}>{status}</span>
+      <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
     </button>
   );
 }

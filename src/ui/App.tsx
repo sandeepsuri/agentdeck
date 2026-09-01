@@ -231,7 +231,10 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setShowLaunch(true); }
       if (!typing && /^[1-9]$/.test(event.key)) {
         const session = sessions[Number(event.key) - 1];
-        if (session) setSelectedId(session.id);
+        if (session) {
+          setSelectedRunId(null);
+          setSelectedId(session.id);
+        }
       }
       if (event.key === 'Escape') setPaletteOpen(false);
     };
