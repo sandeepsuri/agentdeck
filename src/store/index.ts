@@ -4,9 +4,11 @@
 import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentMessage, Repo, Session, Task } from '../types.js';
+import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
+import { deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
+import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
-  AttemptState, RunEnvelopeState, RunPreparation, WorkRun, WorkSpec,
+  AttemptEvent, RunEnvelopeState, RunPreparation, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
@@ -85,19 +87,31 @@ function rowToTask(r: TaskRow): Task {
 
 interface RunRow {
   id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
-  preparation: string; envelope: string; attempt: string;
+  preparation: string; envelope: string;
 }
 
-function rowToRun(r: RunRow): WorkRun {
+interface AttemptRow {
+  id: string; runtime: string; started_at: string;
+}
+
+/**
+ * A Run before its Attempt is folded in. `status` here is raw — see
+ * Store.attachAttempt/deriveRunStatus: the 'running'/'completed'/'failed'
+ * half of RunStatus is never trusted from this row alone, so a crash
+ * between an Attempt's terminal event persisting and any status write can
+ * never leave the two disagreeing.
+ */
+type RawRun = Omit<WorkRun, 'status' | 'attempt'> & { status: string };
+
+function rowToRun(r: RunRow): RawRun {
   return {
     id: r.id,
     taskId: r.task_id,
-    status: r.status as WorkRun['status'],
+    status: r.status,
     spec: JSON.parse(r.work_spec) as WorkSpec,
     submittedAt: r.submitted_at,
     preparation: JSON.parse(r.preparation) as RunPreparation,
     envelope: JSON.parse(r.envelope) as RunEnvelopeState,
-    attempt: JSON.parse(r.attempt) as AttemptState,
   };
 }
 
@@ -262,8 +276,8 @@ export class Store {
     this.db.transaction(() => {
       this.saveTask(task);
       this.db.prepare(
-        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, attempt)
-         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @attempt)`,
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope)`,
       ).run({
         id: run.id,
         taskId: run.taskId,
@@ -272,32 +286,85 @@ export class Store {
         submittedAt: run.submittedAt,
         preparation: JSON.stringify(run.preparation),
         envelope: JSON.stringify(run.envelope),
-        attempt: JSON.stringify(run.attempt),
       });
     })();
   }
 
   getRun(id: string): WorkRun | undefined {
     const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as RunRow | undefined;
-    return row ? rowToRun(row) : undefined;
+    return row ? this.attachAttempt(rowToRun(row)) : undefined;
   }
 
   listRuns(): WorkRun[] {
     return (this.db.prepare('SELECT * FROM runs ORDER BY submitted_at DESC').all() as RunRow[])
-      .map(rowToRun);
+      .map((row) => this.attachAttempt(rowToRun(row)));
   }
 
-  /** Updates a Run's status, preparation, envelope, and attempt records. The frozen spec never changes. */
-  updateRun(run: WorkRun): void {
+  /** Updates a Run's status, preparation, and envelope. The frozen spec never changes; Attempt state is durable elsewhere (see appendAttemptEvent). */
+  updateRun(run: Pick<WorkRun, 'id' | 'status' | 'preparation' | 'envelope'>): void {
     this.db.prepare(
-      'UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope, attempt = @attempt WHERE id = @id',
+      'UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope WHERE id = @id',
     ).run({
       id: run.id,
       status: run.status,
       preparation: JSON.stringify(run.preparation),
       envelope: JSON.stringify(run.envelope),
-      attempt: JSON.stringify(run.attempt),
     });
+  }
+
+  // -- durable Attempt event log (ticket 06) --
+
+  /** Records the one piece of Attempt metadata that isn't itself an event: which runtime, started when. Call once, before the first event. */
+  startAttempt(record: { id: string; runId: string; runtime: AgentType; startedAt: string }): void {
+    this.db.prepare(
+      'INSERT INTO attempts (id, run_id, runtime, started_at) VALUES (@id, @runId, @runtime, @startedAt)',
+    ).run(record);
+  }
+
+  /** Idempotent: an envelope whose dedupeKey already exists for this Attempt is silently dropped — a redelivered provider event never duplicates durable history. */
+  appendAttemptEvent(envelope: AttemptEventEnvelope): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO attempt_events
+         (attempt_id, sequence, correlation_id, dedupe_key, schema_version, durability, at, payload)
+       VALUES (@attemptId, @sequence, @correlationId, @dedupeKey, @schemaVersion, @durability, @at, @payload)`,
+    ).run({
+      attemptId: envelope.attemptId,
+      sequence: envelope.sequence,
+      correlationId: envelope.correlationId,
+      dedupeKey: envelope.dedupeKey,
+      schemaVersion: envelope.schemaVersion,
+      durability: envelope.durability,
+      at: envelope.at,
+      payload: JSON.stringify(envelope.event),
+    });
+  }
+
+  /** The attemptId for a Run's one Attempt, or undefined if none has started — recovery's only use of Attempt identity outside the projected AttemptState. */
+  getAttemptId(runId: string): string | undefined {
+    const row = this.db.prepare('SELECT id FROM attempts WHERE run_id = ?').get(runId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  private loadAttempt(runId: string): { record: AttemptRow | undefined; events: AttemptEvent[] } {
+    const record = this.db.prepare('SELECT id, runtime, started_at FROM attempts WHERE run_id = ?')
+      .get(runId) as AttemptRow | undefined;
+    if (!record) return { record: undefined, events: [] };
+    const events = (
+      this.db.prepare('SELECT payload FROM attempt_events WHERE attempt_id = ? ORDER BY sequence ASC')
+        .all(record.id) as { payload: string }[]
+    ).map((r) => JSON.parse(r.payload) as AttemptEvent);
+    return { record, events };
+  }
+
+  /** Folds the durable event log into AttemptState and derives `status` from it (ticket 06 AC4) — see attempt-projection.ts for both reducers. */
+  private attachAttempt(run: RawRun): WorkRun {
+    const { record, events } = this.loadAttempt(run.id);
+    const attempt = projectAttemptState(
+      record ? { runtime: record.runtime as AgentType, startedAt: record.started_at } : undefined,
+      events,
+    );
+    const status = deriveRunStatus(run.status as WorkRun['status'], attempt);
+    return { ...run, status, attempt };
   }
 
   // -- repos --

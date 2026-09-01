@@ -153,6 +153,22 @@ export type AttemptEvent =
   | AttemptCompletionEvent
   | AttemptFailureEvent;
 
+/**
+ * The one canonical field list per AttemptEvent kind — the single source of
+ * truth both the runtime-adapter contract (adapter.contract.ts, ticket 05)
+ * and the durable-persistence layer (durable-events.ts, ticket 06) check
+ * against, so the two can never drift apart from hand-maintaining separate
+ * copies of the same shape.
+ */
+export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonly string[]>> = {
+  lifecycle: ['kind', 'sequence', 'at', 'phase'],
+  message: ['kind', 'sequence', 'at', 'role', 'text'],
+  'tool-activity': ['kind', 'sequence', 'at', 'tool', 'status', 'summary'],
+  usage: ['kind', 'sequence', 'at', 'inputTokens', 'outputTokens'],
+  completion: ['kind', 'sequence', 'at', 'outcome', 'summary'],
+  failure: ['kind', 'sequence', 'at', 'reason'],
+};
+
 interface AttemptRunBase {
   readonly runtime: AgentType;
   readonly startedAt: string;
@@ -197,4 +213,12 @@ export interface WorkEngine {
    * background and is observed by rereading the Run (get/list).
    */
   start(runId: string): Promise<WorkRun>;
+  /**
+   * Called once at boot (ticket 06), before any caller can reach this
+   * engine: every Run left 'running' when the previous process stopped has
+   * no surviving Attempt to observe, and is ended with a precise,
+   * deterministic unrecoverable reason rather than left stuck. Never
+   * re-invokes a runtime adapter — recovery only records a terminal fact.
+   */
+  recover(): Promise<void>;
 }

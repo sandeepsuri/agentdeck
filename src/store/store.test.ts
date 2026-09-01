@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
+import { buildAttemptEventEnvelope } from '../work-engine/durable-events.js';
+import type { AttemptEvent, RunRepository, WorkSpec } from '../work-engine/types.js';
 import { Store, openStore } from './index.js';
 
 let dir: string;
@@ -158,6 +160,155 @@ describe('repos', () => {
     expect(store.listRepos()).toEqual([repo]);
     store.upsertRepo({ ...repo, isDirty: false, dirtyFiles: [] });
     expect(store.listRepos()[0]?.isDirty).toBe(false);
+  });
+});
+
+describe('durable Attempt events (ticket 06)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+  const spec: WorkSpec = {
+    objective: 'Add durable managed work',
+    acceptanceCriteria: ['Restart keeps identity'],
+    repository,
+    requestedBaseReference: 'refs/heads/main',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 3_600_000 },
+    verificationIntent: { required: false, commands: [] },
+    requestedDeliveryResult: 'working-tree',
+  };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'queued',
+        spec,
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('projects idle with no attempts row', () => {
+    createRun('run-1');
+    expect(store.getRun('run-1')?.attempt).toEqual({ state: 'idle' });
+    expect(store.getRun('run-1')?.status).toBe('queued');
+  });
+
+  it('folds a durable event log into a running Attempt, and derives status from it', () => {
+    createRun('run-2');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-2', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event: AttemptEvent = {
+      kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Working on it.',
+    };
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-2', attemptId: 'attempt-1', event }));
+
+    const run = store.getRun('run-2')!;
+    expect(run.status).toBe('running');
+    expect(run.attempt).toEqual({
+      state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', events: [event],
+    });
+  });
+
+  it('derives status from a completed Attempt even though the raw runs.status column was never separately written', () => {
+    createRun('run-3');
+    // No updateRun('running'/'completed') call ever happens here — the raw
+    // column stays exactly 'queued' from createRun, exactly as a crash
+    // right after the completion event persisted would leave it.
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-3', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+
+    expect(store.getRun('run-3')?.status).toBe('completed');
+  });
+
+  it('is idempotent: appending the same logical event twice never duplicates durable history', () => {
+    createRun('run-4');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-4', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event: AttemptEvent = {
+      kind: 'usage', sequence: 0, at: '2026-09-01T00:05:01.000Z', inputTokens: 100, outputTokens: 50,
+    };
+    const envelope = buildAttemptEventEnvelope({ runId: 'run-4', attemptId: 'attempt-1', event });
+
+    store.appendAttemptEvent(envelope);
+    // A redelivered notification after a reconnect reproduces the same
+    // content but a fresh sequence/timestamp — still the same dedupeKey.
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-4', attemptId: 'attempt-1', event: { ...event, sequence: 7, at: '2026-09-01T00:09:00.000Z' },
+    }));
+
+    const run = store.getRun('run-4')!;
+    if (run.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(run.attempt.events).toHaveLength(1);
+    expect(run.attempt.events[0]).toEqual(event);
+  });
+
+  it('persists only the shared AttemptEvent shape — no extra property survives the JSON round trip', () => {
+    createRun('run-5');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-5', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event = {
+      kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'hi',
+      // A hypothetical leaked provider/credential field — must not survive.
+      threadId: 'thread-should-never-persist', apiKey: 'sk-should-never-persist',
+    } as unknown as AttemptEvent;
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-5', attemptId: 'attempt-1', event }));
+
+    const run = store.getRun('run-5')!;
+    expect(JSON.stringify(run)).not.toContain('should-never-persist');
+  });
+
+  it('reopens a Run\'s full durable Attempt history after the store restarts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-store-attempts-'));
+    const dbPath = path.join(dir, 'agentdeck.db');
+    const firstStore = openStore(dir);
+    firstStore.upsertRepo(repository);
+    firstStore.createTaskAndRun(
+      { id: 'task-run-6', title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: 'run-6',
+        taskId: 'task-run-6',
+        status: 'queued',
+        spec,
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+    firstStore.startAttempt({
+      id: 'attempt-1', runId: 'run-6', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    firstStore.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-6',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = reopenedStore.getRun('run-6')!;
+    expect(reopened.status).toBe('completed');
+    expect(reopened.attempt.state).toBe('completed');
+    reopenedStore.close();
   });
 });
 

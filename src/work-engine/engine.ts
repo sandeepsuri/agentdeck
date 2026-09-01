@@ -4,12 +4,14 @@ import { defaultDataDir } from '../config.js';
 import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import type { AgentType, Task } from '../types.js';
+import { buildAttemptEventEnvelope } from './durable-events.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
+import { describeUnrecoverableAttempt } from './recovery.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
-  AttemptEvent, AttemptState, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
+  AttemptEvent, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
 } from './types.js';
 
 // Re-exported so callers (e.g. the REST adapter) reach every error prepare()
@@ -234,26 +236,28 @@ export class DurableWorkEngine implements WorkEngine {
     const adapter = this.runtimeAdapters[capabilityEnvelope.runtime];
     if (!adapter) throw new UnsupportedRuntimeError(capabilityEnvelope.runtime);
 
+    // Ticket 06: the Attempt's identity and durable event log are their own
+    // records (attempts/attempt_events) from the instant it starts — status
+    // 'running' follows immediately once Store folds them in (see
+    // Store.attachAttempt), with no separate write needed here.
+    const attemptId = randomUUID();
     const startedAt = new Date().toISOString();
-    const running = frozenCopy<WorkRun>({
-      ...existing,
-      status: 'running',
-      attempt: { state: 'running', runtime: capabilityEnvelope.runtime, startedAt, events: [] },
+    this.store.startAttempt({
+      id: attemptId, runId: existing.id, runtime: capabilityEnvelope.runtime, startedAt,
     });
-    this.store.updateRun(running);
 
     // Fire-and-forget: the Attempt itself can run far longer than an HTTP
     // request should block for. Progress is observed by rereading the Run
     // (get/list), never by awaiting this call.
-    void this.runAttempt(existing, adapter, capabilityEnvelope, startedAt);
-    return running;
+    void this.runAttempt(existing, attemptId, adapter, capabilityEnvelope);
+    return this.get(existing.id)!;
   }
 
   private async runAttempt(
     base: WorkRun,
+    attemptId: string,
     adapter: RuntimeAttemptAdapter,
     envelope: CapabilityEnvelope,
-    startedAt: string,
   ): Promise<void> {
     const context: AttemptLaunchContext = {
       runId: base.id,
@@ -262,37 +266,53 @@ export class DurableWorkEngine implements WorkEngine {
       worktreePath: envelope.profile.writableWorktree,
       profile: envelope.profile,
     };
-    const events: AttemptEvent[] = [];
-    const persist = (status: WorkRun['status'], attempt: AttemptState): void => {
-      this.store.updateRun(frozenCopy<WorkRun>({ ...base, status, attempt }));
+    let lastSequence = -1;
+    const persistEvent = (event: AttemptEvent): void => {
+      lastSequence = event.sequence;
+      const eventEnvelope = buildAttemptEventEnvelope({ runId: base.id, attemptId, event });
+      // No AttemptEvent kind is transient today (durable-events.ts) — this
+      // guard is where a future message-delta or raw-output kind would be
+      // dropped rather than persisted as source-of-truth history (ticket 06
+      // AC3), so it stays even though it can never trigger yet.
+      if (eventEnvelope.durability !== 'durable') return;
+      this.store.appendAttemptEvent(eventEnvelope);
     };
-    const persistFailure = (reason: string, at: string = new Date().toISOString()): void => {
-      persist('failed', {
-        state: 'failed', runtime: envelope.runtime, startedAt, failedAt: at, reason, events: [...events],
+    const persistSynthesizedFailure = (reason: string, at: string = new Date().toISOString()): void => {
+      persistEvent({
+        kind: 'failure', sequence: lastSequence + 1, at, reason,
       });
     };
 
     try {
       for await (const event of adapter.run(context)) {
-        events.push(event);
-        if (event.kind === 'completion') {
-          persist('completed', {
-            state: 'completed', runtime: envelope.runtime, startedAt, completedAt: event.at, events: [...events],
-          });
-          return;
-        }
-        if (event.kind === 'failure') {
-          persistFailure(event.reason, event.at);
-          return;
-        }
-        persist('running', { state: 'running', runtime: envelope.runtime, startedAt, events: [...events] });
+        persistEvent(event);
+        if (event.kind === 'completion' || event.kind === 'failure') return;
       }
       // The adapter contract (adapter.contract.ts) requires exactly one
       // terminal event; an adapter that violates it still ends the Run in a
       // precise, recoverable failure rather than leaving it stuck running.
-      persistFailure('The runtime adapter ended without reporting completion or failure.');
+      persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
     } catch (error) {
-      persistFailure(error instanceof Error ? error.message : String(error));
+      persistSynthesizedFailure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** See WorkEngine.recover's doc comment. */
+  async recover(): Promise<void> {
+    const readiness = await this.runtimeReadiness.get();
+    for (const run of this.store.listRuns()) {
+      if (run.attempt.state !== 'running') continue;
+      const attemptId = this.store.getAttemptId(run.id);
+      // Cannot happen given attempt.state === 'running' (Store derives it
+      // from this same attempts row) — guarded rather than asserted so a
+      // future storage bug fails safe instead of throwing mid-boot.
+      if (!attemptId) continue;
+      const { runtime, events } = run.attempt;
+      const reason = describeUnrecoverableAttempt(runtime, readiness, events);
+      const failureEvent: AttemptEvent = {
+        kind: 'failure', sequence: (events.at(-1)?.sequence ?? -1) + 1, at: new Date().toISOString(), reason,
+      };
+      this.store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: run.id, attemptId, event: failureEvent }));
     }
   }
 }

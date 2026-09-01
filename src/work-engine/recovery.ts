@@ -1,0 +1,56 @@
+// Ticket 06 AC5/AC7: what happens to a Run whose Attempt was interrupted by
+// a restart. No live process (and no in-memory task) for that Attempt
+// survives the restart — and AgentDeck deliberately never persists what a
+// runtime needs to resume a specific prior provider conversation (ticket
+// 05: "Provider conversation identity remains inside the adapter and is not
+// used as the AgentDeck Run identity"). So there is currently no state from
+// which a restart could safely reattach or resume, regardless of what the
+// installed CLI itself reports supporting — continuation is always
+// impossible today. This module turns that fact into one precise,
+// deterministic, human-readable reason instead of leaving the Run stuck in
+// 'running' forever. Nothing here re-invokes a runtime adapter: recovery
+// only ever records a terminal fact, never replays one.
+import type { RuntimeReadinessReport } from '../sessions/runtime-readiness.js';
+import type { AgentType } from '../types.js';
+import type { AttemptEvent } from './types.js';
+
+/**
+ * When the last durable event is a tool-activity that started but never
+ * reported completion or failure, its outcome is genuinely unknown — the
+ * crash could have landed before or after the tool's real-world side
+ * effect. That ambiguity is stated plainly rather than guessed at; the
+ * event itself is left exactly as recorded, never rewritten to a guessed
+ * 'completed' or 'failed'.
+ */
+function describeAmbiguousActivity(events: readonly AttemptEvent[]): string | undefined {
+  const last = events.at(-1);
+  if (last?.kind !== 'tool-activity' || last.status !== 'started') return undefined;
+  const detail = last.summary ? `: ${last.summary}` : '';
+  return `The last recorded activity (${last.tool}${detail}) never reported completion or failure before the `
+    + 'restart — its outcome is unknown and was not assumed.';
+}
+
+/** Whether the installed runtime's own CLI reports structured continuation support — never, by itself, whether resuming is actually safe (see describeUnrecoverableAttempt). */
+export function isContinuationSupported(readiness: RuntimeReadinessReport, runtime: AgentType): boolean {
+  const runtimeReadiness = readiness.runtimes.find((candidate) => candidate.runtime === runtime);
+  return runtimeReadiness?.capabilities
+    .some((capability) => capability.capability === 'continuation' && capability.supported) ?? false;
+}
+
+export function describeUnrecoverableAttempt(
+  runtime: AgentType,
+  readiness: RuntimeReadinessReport,
+  events: readonly AttemptEvent[],
+): string {
+  const runtimeReadiness = readiness.runtimes.find((candidate) => candidate.runtime === runtime);
+  const displayName = runtimeReadiness?.displayName ?? runtime;
+  const continuationSupported = isContinuationSupported(readiness, runtime);
+  const base = continuationSupported
+    ? `AgentDeck restarted before this Attempt finished. ${displayName} reports structured continuation `
+      + 'support, but AgentDeck never persists what a runtime needs to resume a specific prior conversation, '
+      + 'so resuming it safely is not possible.'
+    : `AgentDeck restarted before this Attempt finished, and ${displayName} does not support structured `
+      + 'continuation, so it cannot be resumed.';
+  const ambiguous = describeAmbiguousActivity(events);
+  return ambiguous ? `${base} ${ambiguous}` : base;
+}

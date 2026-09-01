@@ -30,6 +30,12 @@ export async function startServer(): Promise<RunningServer> {
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
   const workEngine = new DurableWorkEngine(store, path.join(config.dataDir, 'runs'));
+  // Ticket 06: no in-memory Attempt task survives a restart, so any Run
+  // still 'running' from before this process started is ended now with a
+  // precise unrecoverable reason rather than left stuck — see
+  // DurableWorkEngine.recover. Must finish before any route can observe or
+  // start a Run.
+  await workEngine.recover();
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than

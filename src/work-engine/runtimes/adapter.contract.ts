@@ -3,6 +3,7 @@
 // an ordered lifecycle, well-formed events, exactly one terminal outcome,
 // and no runtime-specific leakage into the shared event shape.
 import { describe, expect, it } from 'vitest';
+import { ATTEMPT_EVENT_FIELDS } from '../types.js';
 import type { AttemptEvent } from '../types.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './adapter.js';
 
@@ -12,15 +13,6 @@ export interface RuntimeAttemptAdapterContractCase {
   readonly createAdapter: () => RuntimeAttemptAdapter;
   readonly expectOutcome: 'completion' | 'failure';
 }
-
-const ALLOWED_KEYS: Record<AttemptEvent['kind'], readonly string[]> = {
-  lifecycle: ['kind', 'sequence', 'at', 'phase'],
-  message: ['kind', 'sequence', 'at', 'role', 'text'],
-  'tool-activity': ['kind', 'sequence', 'at', 'tool', 'status', 'summary'],
-  usage: ['kind', 'sequence', 'at', 'inputTokens', 'outputTokens'],
-  completion: ['kind', 'sequence', 'at', 'outcome', 'summary'],
-  failure: ['kind', 'sequence', 'at', 'reason'],
-};
 
 async function collect(adapter: RuntimeAttemptAdapter, context: AttemptLaunchContext): Promise<AttemptEvent[]> {
   const events: AttemptEvent[] = [];
@@ -68,7 +60,7 @@ export function describeRuntimeAttemptAdapterContract(cases: readonly RuntimeAtt
       it('keeps every event within the shared shape, with no runtime-specific fields', async () => {
         const events = await collect(testCase.createAdapter(), testCase.context);
         for (const event of events) {
-          const allowed = new Set(ALLOWED_KEYS[event.kind]);
+          const allowed = new Set(ATTEMPT_EVENT_FIELDS[event.kind]);
           for (const key of Object.keys(event)) expect(allowed.has(key)).toBe(true);
         }
       });

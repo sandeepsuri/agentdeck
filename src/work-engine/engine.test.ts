@@ -9,6 +9,7 @@ import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
 import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { Store } from '../store/index.js';
+import { buildAttemptEventEnvelope } from './durable-events.js';
 import { CHILD_RUN_CEILING, TRUSTED_RUNTIME_PROVIDER_DOMAINS } from './envelope.js';
 import {
   DurableWorkEngine, InvalidRunStateError, RunNotFoundError, UnsupportedRuntimeError,
@@ -552,5 +553,33 @@ describe('DurableWorkEngine.start', () => {
     expect(reopened?.status).toBe('completed');
     expect(reopened?.attempt.state).toBe('completed');
     reopenedStore.close();
+  });
+
+  it('lets a cancellation surface while the Attempt is still running, without hiding a later real terminal outcome', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    // Ticket 06 doesn't stop the underlying process (ticket 09's "safe
+    // controls" does) — this simulates the Attempt still being 'running'
+    // durably when cancel() is called.
+    store.startAttempt({
+      id: 'attempt-cancel-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString(),
+    });
+    expect(engine.get(prepared.id)?.status).toBe('running');
+
+    const cancelled = await engine.cancel(prepared.id);
+
+    expect(cancelled.status).toBe('cancelled');
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
+
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id,
+      attemptId: 'attempt-cancel-1',
+      event: {
+        kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success',
+      },
+    }));
+
+    expect(engine.get(prepared.id)?.status).toBe('completed');
+    store.close();
   });
 });
