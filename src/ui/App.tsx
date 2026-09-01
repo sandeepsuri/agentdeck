@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
-import type { WorkRun } from '../work-engine/types.js';
+import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session } from '../types.js';
+import type { AttentionDecisionInput, WorkRun } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
@@ -61,6 +61,12 @@ export function App() {
   const initialNavigation = useMemo(() => parseInitialNavigation(location.search), []);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [runs, setRuns] = useState<WorkRun[]>([]);
+  // Ticket 07: a remote (mobile) connection cannot fetch full Run objects
+  // (see the isRemoteAllowedRoute comment in app.ts) — this is the one
+  // minimal, remote-safe queue it polls instead (GET /api/runs/attention).
+  // The local/desktop path never needs it: RunWorkspace already reads
+  // run.pendingAttention straight off the full Run objects `runs` above.
+  const [runAttention, setRunAttention] = useState<RunAttentionItem[]>([]);
   // Ticket 05: the structured Attempt panel stays hidden until this
   // admin-configured feature gate (config.json's structuredAttemptsEnabled) is on.
   const [structuredAttemptsEnabled, setStructuredAttemptsEnabled] = useState(false);
@@ -83,6 +89,7 @@ export function App() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
   const wsRef = useRef<WebSocket | null>(null);
   const requestedSessionIdRef = useRef(initialNavigation.sessionId);
+  const requestedRunIdRef = useRef(initialNavigation.runId);
   const historyWitnessRef = useRef(INITIAL_HISTORY_WITNESS_STATE);
   // Ticket 05: defaults to 'ready' (render normally, no delay) rather than
   // an initial "unknown/loading" state — the ordinary desktop/loopback case
@@ -151,7 +158,21 @@ export function App() {
       });
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
   const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
-  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then(setRuns).catch(() => undefined), []);
+  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((body) => {
+    setRuns(body);
+    // Ticket 07: the native companion's openRun deep-link (?run=<id>) — same
+    // one-shot "consume once loaded, then clear the URL" shape as the
+    // session deep-link above.
+    const requestedRunId = requestedRunIdRef.current;
+    if (requestedRunId && body.some((run) => run.id === requestedRunId)) {
+      requestedRunIdRef.current = undefined;
+      history.replaceState(null, '', location.pathname);
+      setSelectedId(null);
+      setSelectedRunId(requestedRunId);
+      setView('operations');
+    }
+  }).catch(() => undefined), []);
+  const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
   const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
   const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
   const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
@@ -161,14 +182,20 @@ export function App() {
   useEffect(() => {
     refreshSessions();
     // The remote mobile surface intentionally cannot access repository,
-    // event, discovery, or integration APIs. Stop polling them once the
-    // connection is classified; response validation above also makes the
+    // event, discovery, or integration APIs — but GET /api/runs/attention
+    // is the one deliberately narrow, remote-safe Run read it does poll
+    // (see app.ts's isRemoteAllowedRoute and attention.ts's
+    // deriveRunAttentionItems). Response validation above also makes the
     // brief pre-classification requests harmless if their 403s arrive late.
-    if (connectionKind === 'remote') return;
+    if (connectionKind === 'remote') {
+      refreshRunAttention();
+      const background = setInterval(refreshRunAttention, 5000);
+      return () => { clearInterval(background); };
+    }
     refreshRepos(); refreshRuns(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
     const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRuns, refreshSessions, refreshVsCode]);
+  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     if (connectionKind === 'remote') return;
@@ -315,6 +342,27 @@ export function App() {
     setRuns((current) => current.map((item) => item.id === body.id ? body : item));
   };
 
+  // Ticket 07 AC2: the one Work Engine policy path every transport's
+  // approve/deny/provide-input command reaches — this is the REST call both
+  // the local desktop RunWorkspace and the mobile attention card make.
+  const resolveRunAttention = async (runId: string, attentionId: string, decision: AttentionDecisionInput) => {
+    const action = decision.kind === 'approve' ? 'approve' : decision.kind === 'deny' ? 'deny' : 'input';
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/attention/${encodeURIComponent(attentionId)}/${action}`, {
+      method: 'POST',
+      ...(decision.kind === 'input'
+        ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: decision.value }) }
+        : {}),
+    });
+    if (connectionKind === 'remote') {
+      if (response.ok) setRunAttention((current) => current.filter((item) => item.attentionId !== attentionId));
+      else setError((await response.json().catch(() => ({}))).error ?? 'Could not resolve the pending Run attention.');
+      return;
+    }
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Could not resolve the pending Run attention.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
     const body = await response.json() as Session & { error?: string };
@@ -384,7 +432,16 @@ export function App() {
     return (
       <div className="mobile-shell">
         {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
-        <MobileWorkspace onError={setError} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
+        <MobileWorkspace
+          onError={setError}
+          onResolveRunAttention={resolveRunAttention}
+          onSelect={selectSession}
+          runAttention={runAttention}
+          session={selected}
+          sessions={sessions}
+          ws={wsRef.current}
+          wsReady={wsReady}
+        />
       </div>
     );
   }
@@ -412,7 +469,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} onStart={startRun} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onStart={startRun} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>

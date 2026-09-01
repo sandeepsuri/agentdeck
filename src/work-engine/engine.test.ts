@@ -12,7 +12,7 @@ import { Store } from '../store/index.js';
 import { buildAttemptEventEnvelope } from './durable-events.js';
 import { CHILD_RUN_CEILING, TRUSTED_RUNTIME_PROVIDER_DOMAINS } from './envelope.js';
 import {
-  DurableWorkEngine, InvalidRunStateError, RunNotFoundError, UnsupportedRuntimeError,
+  DurableWorkEngine, InvalidRunStateError, RunAttentionNotPendingError, RunNotFoundError, UnsupportedRuntimeError,
 } from './engine.js';
 import { runBranchName, runWorktreePath } from './prepare.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
@@ -580,6 +580,175 @@ describe('DurableWorkEngine.start', () => {
     }));
 
     expect(engine.get(prepared.id)?.status).toBe('completed');
+    store.close();
+  });
+});
+
+describe('DurableWorkEngine.resolveAttention', () => {
+  function setUp(spawn: ReturnType<typeof createFakeCodexAppServer>['spawn']) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), {
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }),
+    });
+    return { store, repository, engine };
+  }
+
+  async function submitPrepareAndStart(engine: DurableWorkEngine, repository: RunRepository) {
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+    await engine.prepare(submitted.id);
+    return engine.start(submitted.id);
+  }
+
+  async function waitForPendingAttention(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => engine.get(runId)?.pendingAttention !== undefined);
+    return engine.get(runId)!.pendingAttention!;
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    return engine.get(runId)!;
+  }
+
+  it('reports an approval request as durable Run attention with a human-readable reason and reflects waiting_approval on the Run', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionParams: { command: 'rm -rf node_modules' } });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    expect(pending).toMatchObject({ kind: 'approval', reason: expect.stringContaining('rm -rf node_modules') });
+    expect(engine.get(started.id)?.status).toBe('waiting_approval');
+    store.close();
+  });
+
+  it('resumes the Attempt exactly once: approving lets it continue to completion, and a second resolution of the same request is refused', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    const resolved = await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    expect(resolved.pendingAttention).toBeUndefined();
+
+    await expect(engine.resolveAttention(started.id, pending.id, { kind: 'approve' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+
+    const settled = await waitForSettled(engine, started.id);
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const resolvedEvents = settled.attempt.events.filter((event) => event.kind === 'attention-resolved');
+    expect(resolvedEvents).toHaveLength(1);
+    expect(resolvedEvents[0]).toMatchObject({ kind: 'attention-resolved', attentionId: pending.id, decision: 'approved' });
+    store.close();
+  });
+
+  it('never drops or collides an event the runtime pushes right after resolution — the resolver and the adapter mint sequence numbers independently and must never race', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    const settled = await waitForSettled(engine, started.id);
+
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const sequences = settled.attempt.events.map((event) => event.sequence);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b)); // strictly ordered, no re-shuffling
+    expect(new Set(sequences).size).toBe(sequences.length); // no two events share a sequence number
+    // The fixture's post-approval turn (a fresh agent message, usage, and
+    // turn/completed) must all still be present — proving nothing the
+    // adapter pushed immediately after the decision was silently dropped
+    // by a sequence-number collision with the attention-resolved event.
+    expect(settled.attempt.events).toContainEqual(
+      expect.objectContaining({ kind: 'message', text: 'Continued after the pending attention request was resolved.' }),
+    );
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'completion', outcome: 'success' });
+    store.close();
+  });
+
+  it('relays a denial to the runtime and never lets a denied request be resolved again', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'deny' });
+
+    expect(fake.attentionResponses).toEqual([{ decision: 'denied' }]);
+    await expect(engine.resolveAttention(started.id, pending.id, { kind: 'deny' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+    await waitForSettled(engine, started.id);
+    store.close();
+  });
+
+  it('relays clarifying input to the runtime without ever changing the frozen spec or envelope (AC5)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionMethod: 'thread/requestClarification' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+    expect(pending.kind).toBe('input');
+    const frozenSpec = started.spec;
+    const frozenEnvelope = started.envelope;
+
+    const resolved = await engine.resolveAttention(started.id, pending.id, { kind: 'input', value: 'Use TypeScript strict mode.' });
+
+    expect(fake.attentionResponses).toEqual([{ value: 'Use TypeScript strict mode.' }]);
+    expect(resolved.spec).toEqual(frozenSpec);
+    expect(resolved.envelope).toEqual(frozenEnvelope);
+    const settled = await waitForSettled(engine, started.id);
+    expect(settled.spec).toEqual(frozenSpec);
+    expect(settled.envelope).toEqual(frozenEnvelope);
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(
+      expect.objectContaining({ kind: 'attention-resolved', decision: 'provided', input: 'Use TypeScript strict mode.' }),
+    );
+    store.close();
+  });
+
+  it('refuses to resolve an approval request with input, and an input request with approve/deny', async () => {
+    const approvalFake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store: approvalStore, repository: approvalRepo, engine: approvalEngine } = setUp(approvalFake.spawn);
+    const approvalRun = await submitPrepareAndStart(approvalEngine, approvalRepo);
+    const approvalPending = await waitForPendingAttention(approvalEngine, approvalRun.id);
+
+    await expect(approvalEngine.resolveAttention(approvalRun.id, approvalPending.id, { kind: 'input', value: 'nope' }))
+      .rejects.toThrow(InvalidRunStateError);
+    await approvalEngine.resolveAttention(approvalRun.id, approvalPending.id, { kind: 'approve' });
+    await waitForSettled(approvalEngine, approvalRun.id);
+    approvalStore.close();
+
+    const inputFake = createFakeCodexAppServer({ behavior: 'attention-request', attentionMethod: 'thread/requestClarification' });
+    const { store: inputStore, repository: inputRepo, engine: inputEngine } = setUp(inputFake.spawn);
+    const inputRun = await submitPrepareAndStart(inputEngine, inputRepo);
+    const inputPending = await waitForPendingAttention(inputEngine, inputRun.id);
+
+    await expect(inputEngine.resolveAttention(inputRun.id, inputPending.id, { kind: 'approve' }))
+      .rejects.toThrow(InvalidRunStateError);
+    await inputEngine.resolveAttention(inputRun.id, inputPending.id, { kind: 'input', value: 'ok' });
+    await waitForSettled(inputEngine, inputRun.id);
+    inputStore.close();
+  });
+
+  it('rejects resolving attention for an unknown Run and a mismatched attentionId', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await expect(engine.resolveAttention('does-not-exist', pending.id, { kind: 'approve' })).rejects.toThrow(RunNotFoundError);
+    await expect(engine.resolveAttention(started.id, 'wrong-attention-id', { kind: 'approve' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    await waitForSettled(engine, started.id);
     store.close();
   });
 });

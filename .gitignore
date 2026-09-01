@@ -17,3 +17,6 @@ spike/
 skills-lock.json
 docs/specs/
 docs/tickets/
+.scratch/
+docs/evolution-roadmap.md
+.codex-*.html

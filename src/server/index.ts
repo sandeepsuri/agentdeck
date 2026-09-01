@@ -14,7 +14,7 @@ import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
 import { reconcileSessionsOnBoot } from './boot.js';
 import { attachWs, closeWs } from './ws.js';
-import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
+import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
 import { WakeLock } from './wake-lock.js';
@@ -100,7 +100,7 @@ export async function startServer(): Promise<RunningServer> {
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
   const app = buildApp({
-    config, manager, store, terminals, coordination, vscode, discovery, modelCatalog,
+    config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts,
   });
   registerWorkRoutes(app, workEngine);
@@ -141,8 +141,9 @@ export async function startServer(): Promise<RunningServer> {
         sessions,
         attention,
         agents: deriveCompanionAgents(sessions, events, attention),
+        runAttention: deriveRunAttentionItems(workEngine.list()),
       };
-    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken });
+    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine);
 
     companion = launchNativeCompanion(port);
     discovery.start();

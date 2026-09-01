@@ -1,12 +1,27 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { deriveRunAttentionItems } from '../attention.js';
 import {
-  InvalidRunStateError, InvalidWorkSpecError, RunNotFoundError, RunPreparationError, UnsupportedRuntimeError,
+  InvalidRunStateError, InvalidWorkSpecError, RunAttentionNotPendingError, RunNotFoundError, RunPreparationError,
+  UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
-import type { WorkEngine, WorkSpec } from '../work-engine/types.js';
+import type { AttentionDecisionInput, WorkEngine, WorkSpec } from '../work-engine/types.js';
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
 
 /** Local admin REST adapter; all behavior remains owned by WorkEngine. */
 export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine): void {
   app.get('/api/runs', async () => workEngine.list());
+
+  // Ticket 07: the one minimal, remote-safe read a mobile client needs to
+  // act on a pending Run attention request — never the Repository path,
+  // budget, envelope, or full spec GET /api/runs/:id returns (local-only,
+  // see app.ts's isRemoteAllowedRoute). Registered before the /:id route
+  // below; Fastify's router prefers a static path segment over a
+  // parametric one regardless of registration order, but this keeps intent
+  // obvious to a reader.
+  app.get('/api/runs/attention', async () => deriveRunAttentionItems(workEngine.list()));
 
   app.get('/api/runs/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -60,5 +75,36 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine)
       if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
       throw error;
     }
+  });
+
+  // Ticket 07 AC2: the one policy path every transport's approve/deny/
+  // provide-input command reaches — local UI and mobile UI both call these
+  // three REST routes (see app.ts's isRemoteAllowedRoute for the mobile
+  // allowlist entry), and the WS 'run_attention_resolve' frame (ws.ts) calls
+  // the exact same workEngine.resolveAttention() method, not a parallel
+  // implementation.
+  const resolveAttention = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    decision: AttentionDecisionInput,
+  ) => {
+    const { id, attentionId } = request.params as { id: string; attentionId: string };
+    try {
+      return await workEngine.resolveAttention(id, attentionId, decision);
+    } catch (error) {
+      if (error instanceof RunNotFoundError || error instanceof RunAttentionNotPendingError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  };
+
+  app.post('/api/runs/:id/attention/:attentionId/approve', async (request, reply) => resolveAttention(request, reply, { kind: 'approve' }));
+  app.post('/api/runs/:id/attention/:attentionId/deny', async (request, reply) => resolveAttention(request, reply, { kind: 'deny' }));
+  app.post('/api/runs/:id/attention/:attentionId/input', async (request, reply) => {
+    const body = request.body as { value?: unknown } | undefined;
+    if (!nonEmptyString(body?.value)) return reply.code(400).send({ error: 'value must be a non-empty string' });
+    return resolveAttention(request, reply, { kind: 'input', value: body.value });
   });
 }

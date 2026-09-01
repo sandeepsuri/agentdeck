@@ -265,3 +265,67 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     expect(html).toContain('The sandboxed command exited non-zero.');
   });
 });
+
+describe('RunWorkspace pending attention (ticket 07)', () => {
+  function runningRun(pendingAttention: WorkRun['pendingAttention']): WorkRun {
+    return {
+      ...eligibleRun(),
+      status: pendingAttention?.kind === 'approval' ? 'waiting_approval' : 'waiting_input',
+      pendingAttention,
+      attempt: {
+        state: 'running',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+        ],
+      },
+    };
+  }
+
+  it('shows nothing attention-related for a Run with no pending request', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: true }));
+    expect(html).not.toContain('run-attention-request');
+  });
+
+  it('shows the reason and Approve/Deny actions for a pending approval request', () => {
+    const run = runningRun({
+      id: 'attention-1', kind: 'approval', reason: 'Approve command: rm -rf node_modules', requestedAt: '2026-09-01T00:05:01.000Z',
+    });
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Approval requested');
+    expect(html).toContain('Approve command: rm -rf node_modules');
+    expect(html).toContain('Approve');
+    expect(html).toContain('Deny');
+    expect(html).not.toContain('Waiting approval status');
+  });
+
+  it('shows an input field instead of Approve/Deny for a pending input request', () => {
+    const run = runningRun({
+      id: 'attention-1', kind: 'input', reason: 'What framework should this use?', requestedAt: '2026-09-01T00:05:01.000Z',
+    });
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Input requested');
+    expect(html).toContain('What framework should this use?');
+    expect(html).toContain('Clarifying input');
+    expect(html).not.toContain('Approval requested');
+  });
+
+  it('reflects waiting_approval and waiting_input as the Run status label', () => {
+    const approvalHtml = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: runningRun({ id: 'attention-1', kind: 'approval', reason: 'Approve?', requestedAt: '2026-09-01T00:05:01.000Z' }),
+      structuredAttemptsEnabled: true,
+    }));
+    expect(approvalHtml).toContain('Waiting approval');
+
+    const inputHtml = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: runningRun({ id: 'attention-1', kind: 'input', reason: 'What next?', requestedAt: '2026-09-01T00:05:01.000Z' }),
+      structuredAttemptsEnabled: true,
+    }));
+    expect(inputHtml).toContain('Waiting input');
+  });
+});

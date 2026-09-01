@@ -145,13 +145,39 @@ export interface AttemptFailureEvent extends AttemptEventBase {
   readonly reason: string;
 }
 
+// Ticket 07: the runtime asked for something before it could continue — an
+// approval (may this proceed?) or clarifying input (what should this be?).
+// `attentionId` is the stable correlation every resolve command (REST, WS,
+// local UI, mobile UI) references; it is minted by the runtime adapter, not
+// derived from any provider request id, so it never carries provider
+// conversation identity onto a durable event (same boundary ticket 05/06
+// already hold for every other AttemptEvent kind).
+export type AttentionRequestKind = 'approval' | 'input';
+
+export interface AttemptAttentionRequestedEvent extends AttemptEventBase {
+  readonly kind: 'attention-requested';
+  readonly attentionId: string;
+  readonly attentionKind: AttentionRequestKind;
+  readonly reason: string;
+}
+
+export interface AttemptAttentionResolvedEvent extends AttemptEventBase {
+  readonly kind: 'attention-resolved';
+  readonly attentionId: string;
+  readonly decision: 'approved' | 'denied' | 'provided';
+  /** Only present when decision is 'provided' — the clarifying text relayed to the runtime, and nothing else (ticket 07 AC5). */
+  readonly input?: string;
+}
+
 export type AttemptEvent =
   | AttemptLifecycleEvent
   | AttemptMessageEvent
   | AttemptToolActivityEvent
   | AttemptUsageEvent
   | AttemptCompletionEvent
-  | AttemptFailureEvent;
+  | AttemptFailureEvent
+  | AttemptAttentionRequestedEvent
+  | AttemptAttentionResolvedEvent;
 
 /**
  * The one canonical field list per AttemptEvent kind — the single source of
@@ -167,6 +193,8 @@ export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonl
   usage: ['kind', 'sequence', 'at', 'inputTokens', 'outputTokens'],
   completion: ['kind', 'sequence', 'at', 'outcome', 'summary'],
   failure: ['kind', 'sequence', 'at', 'reason'],
+  'attention-requested': ['kind', 'sequence', 'at', 'attentionId', 'attentionKind', 'reason'],
+  'attention-resolved': ['kind', 'sequence', 'at', 'attentionId', 'decision', 'input'],
 };
 
 interface AttemptRunBase {
@@ -187,6 +215,20 @@ export type AttemptState =
   | (AttemptRunBase & { readonly state: 'completed'; readonly completedAt: string })
   | (AttemptRunBase & { readonly state: 'failed'; readonly failedAt: string; readonly reason: string });
 
+/** Folded live from the durable event log (see attempt-projection.ts's deriveOpenAttentionRequest) — never its own stored record. */
+export interface RunAttentionRequest {
+  readonly id: string;
+  readonly kind: AttentionRequestKind;
+  readonly reason: string;
+  readonly requestedAt: string;
+}
+
+/** What an operator decided for one pending RunAttentionRequest, from whichever transport carried it (ticket 07 AC2). */
+export type AttentionDecisionInput =
+  | { readonly kind: 'approve' }
+  | { readonly kind: 'deny' }
+  | { readonly kind: 'input'; readonly value: string };
+
 export interface WorkRun {
   readonly id: string;
   readonly taskId: string;
@@ -196,6 +238,13 @@ export interface WorkRun {
   readonly preparation: RunPreparation;
   readonly envelope: RunEnvelopeState;
   readonly attempt: AttemptState;
+  /**
+   * Optional rather than always-present so existing WorkRun literals across
+   * the test suite need no update — absent means "nothing pending" exactly
+   * like an explicit undefined everywhere this is read. Only ever set while
+   * attempt.state is 'running' (see deriveOpenAttentionRequest).
+   */
+  readonly pendingAttention?: RunAttentionRequest;
 }
 
 export interface WorkEngine {
@@ -221,4 +270,16 @@ export interface WorkEngine {
    * re-invokes a runtime adapter — recovery only records a terminal fact.
    */
   recover(): Promise<void>;
+  /**
+   * Ticket 07: the one policy path every transport (local UI, mobile UI,
+   * REST, WebSocket) resolves a pending approval or input request through.
+   * Resolves the returned WorkRun once the durable attention-resolved event
+   * is persisted and (if the Attempt is still live in this process) the
+   * runtime adapter has been handed the decision. Rejects with
+   * RunAttentionNotPendingError when attentionId is not the Run's current
+   * pending request — already resolved, superseded, or the Attempt ended
+   * (including via recover()) — so a decision can never reopen or double-
+   * apply to a request that is no longer waiting.
+   */
+  resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput): Promise<WorkRun>;
 }

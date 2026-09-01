@@ -17,6 +17,7 @@ import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trus
 import { publicSession } from './security.js';
 import { isAllowedRemoteInput } from './remote-input.js';
 import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
+import type { WorkEngine } from '../work-engine/types.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -49,6 +50,8 @@ export function attachWs(
   vscode?: VsCodeBridge,
   companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
   trust: { remoteHosts?: readonly string[]; token?: string } = {},
+  /** Ticket 07: the same one policy path REST reaches (work-routes.ts) — see the 'run_attention_resolve' case below. Undefined only in tests that don't exercise Runs over WS. */
+  workEngine?: WorkEngine,
 ): WebSocketServer {
   // noServer: true because there are now potentially two underlying
   // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
@@ -289,6 +292,25 @@ export function attachWs(
           broadcastPresence();
           broadcastCompanionSnapshot();
           break;
+        case 'run_attention_resolve': {
+          // Ticket 07 AC2: the same DurableWorkEngine.resolveAttention()
+          // REST reaches (work-routes.ts) — fire-and-forget, same shape as
+          // 'input' above; a rejection (already resolved, wrong kind, no
+          // such Run) surfaces on the next Run read rather than an error
+          // frame back to the client, since there's no dedicated Run push
+          // channel yet (local/mobile UI polls GET /api/runs* instead).
+          // 'compose' is granted to every local socket and every
+          // authenticated remote one (connection-trust.ts) — a missing
+          // trust entry (should never happen post-upgrade) fails safe by
+          // withholding it, same direction as the 'input' case's raw-write
+          // check above.
+          if (!workEngine) break;
+          const hasCompose = getConnectionTrust(ws)?.capabilities.has('compose') ?? false;
+          if (!hasCompose) break;
+          const decision = frame.decision === 'input' ? { kind: 'input' as const, value: frame.value } : { kind: frame.decision };
+          workEngine.resolveAttention(frame.runId, frame.attentionId, decision).catch(() => undefined);
+          break;
+        }
       }
     });
     ws.on('close', () => {

@@ -138,6 +138,7 @@ beforeEach(async () => {
     sessions: manager.listSessions(),
     attention: [],
     agents: [],
+    runAttention: [],
   }));
   const addr = app.server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
@@ -1093,5 +1094,108 @@ describe('remote (tailnet) WebSocket access', () => {
 
       wsB.close();
     }, 10_000);
+  });
+});
+
+describe('ticket 07: run_attention_resolve WS authorization — the same DurableWorkEngine.resolveAttention() REST reaches', () => {
+  const REMOTE_HOST = 'attention-test-host.tailnet-1234.ts.net';
+  const TOKEN = 'a-real-remote-access-token-0123456789';
+
+  let attnStore: Store;
+  let attnManager: SessionManager;
+  let attnBackend: FakeBackend;
+  let attnSessionsDir: string;
+  let attnApp: ReturnType<typeof buildApp>;
+  let attnWss: WebSocketServer;
+  let attnPort: number;
+  let resolveAttention: ReturnType<typeof vi.fn>;
+
+  function setUp(workEngine: unknown) {
+    attnStore = new Store(':memory:');
+    attnSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-attention-'));
+    attnBackend = new FakeBackend();
+    attnManager = new SessionManager(attnBackend, attnStore, { sessionsDir: attnSessionsDir });
+    attnApp = buildApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN }, manager: attnManager, store: attnStore, remoteHosts: [REMOTE_HOST],
+    });
+    return attnApp.listen({ port: 0, host: '127.0.0.1' }).then(() => {
+      attnWss = attachWs(
+        [attnApp.server], attnManager, '/ws', undefined, undefined,
+        { remoteHosts: [REMOTE_HOST], token: TOKEN },
+        workEngine as Parameters<typeof attachWs>[6],
+      );
+      const addr = attnApp.server.address();
+      if (addr === null || typeof addr === 'string') throw new Error('no port');
+      attnPort = addr.port;
+    });
+  }
+
+  beforeEach(() => {
+    resolveAttention = vi.fn(async () => ({}));
+  });
+
+  afterEach(async () => {
+    await closeWs(attnWss);
+    await attnApp.close();
+    await attnManager.shutdown();
+    attnStore.close();
+    fs.rmSync(attnSessionsDir, { recursive: true, force: true });
+  });
+
+  async function openWs(headers?: Record<string, string>): Promise<WebSocket> {
+    const ws = headers
+      ? new WebSocket(`ws://127.0.0.1:${attnPort}/ws?token=${encodeURIComponent(TOKEN)}`, { headers })
+      : new WebSocket(`ws://127.0.0.1:${attnPort}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    return ws;
+  }
+
+  it('a local connection resolving an approval reaches WorkEngine.resolveAttention with the exact decision', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'approve' });
+    ws.close();
+  });
+
+  it('an authenticated remote connection can also resolve attention — compose is granted to every authenticated remote socket', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs({ host: REMOTE_HOST });
+
+    ws.send(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: 'Use TypeScript',
+    }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'input', value: 'Use TypeScript' });
+    ws.close();
+  });
+
+  it('relays deny with no stray value field', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'deny' }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'deny' });
+    ws.close();
+  });
+
+  it('is a silent no-op (never throws or crashes the connection) when no WorkEngine is wired to attachWs', async () => {
+    await setUp(undefined);
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
   });
 });

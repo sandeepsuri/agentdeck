@@ -9,6 +9,7 @@ import type { CoordinationService } from '../coordination/service.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import type { ModelCatalog } from '../sessions/model-catalog.js';
+import type { WorkEngine } from '../work-engine/types.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
@@ -52,10 +53,18 @@ const CONTENT_SECURITY_POLICY = [
  * above this check (it must work pre-authentication) and WS traffic isn't
  * an /api/* path at all — ws.ts enforces its own capability checks
  * (raw-write on 'input', local-only for raw output/replay/tile_preview).
+ *
+ * Ticket 07: GET /api/runs/attention and the three POST .../attention/:id/*
+ * routes are the same deliberate, narrow shape — a mobile client can read
+ * the minimal RunAttentionItem queue (objective/reason/correlation only,
+ * see attention.ts's deriveRunAttentionItems) and resolve one request, but
+ * every other Run route (list/get/submit/prepare/start/cancel, which would
+ * expose the Repository path, budget, and full spec) stays local-only.
  */
 function isRemoteAllowedRoute(method: string, pathname: string): boolean {
-  if (method === 'GET' && (pathname === '/api/health' || pathname === '/api/sessions')) return true;
+  if (method === 'GET' && (pathname === '/api/health' || pathname === '/api/sessions' || pathname === '/api/runs/attention')) return true;
   if (method === 'POST' && /^\/api\/sessions\/[^/]+\/send$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/runs\/[^/]+\/attention\/[^/]+\/(approve|deny|input)$/.test(pathname)) return true;
   return false;
 }
 
@@ -80,6 +89,8 @@ export interface AppContext {
   installVsCode?: RouteContext['installVsCode'];
   publish?: RouteContext['publish'];
   modelCatalog?: ModelCatalog;
+  /** Ticket 07: feeds GET /api/companion's runAttention field (routes.ts). Never registered separately — registerWorkRoutes(app, workEngine) in index.ts owns the actual /api/runs* routes. */
+  workEngine?: WorkEngine;
   /**
    * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
    * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
@@ -151,6 +162,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     installVsCode: ctx.installVsCode,
     publish: ctx.publish,
     modelCatalog: ctx.modelCatalog,
+    workEngine: ctx.workEngine,
     remoteHosts: ctx.remoteHosts,
   });
 

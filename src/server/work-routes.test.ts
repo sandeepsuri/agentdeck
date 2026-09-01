@@ -219,3 +219,109 @@ describe('run Attempt start route', () => {
     });
   });
 });
+
+describe('run attention routes (ticket 07)', () => {
+  async function startWithAttentionRequest(app: ReturnType<typeof Fastify>, repoPath: string) {
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    await vi.waitUntil(async () => {
+      const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().pendingAttention !== undefined;
+    });
+    return run.id as string;
+  }
+
+  it('GET /api/runs/attention lists only the objective, reason, and correlation for a pending request — never the Repository, budget, or spec', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionParams: { command: 'rm -rf node_modules' } });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs/attention' });
+
+    expect(listed.statusCode).toBe(200);
+    const items = listed.json();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      runId, kind: 'approval', reason: expect.stringContaining('rm -rf node_modules'), objective: 'Keep a run across restart',
+    });
+    expect(Object.keys(items[0]).sort()).toEqual(['attentionId', 'kind', 'objective', 'reason', 'requestedAt', 'runId']);
+    expect(JSON.stringify(items)).not.toContain(repoPath);
+  });
+
+  it('approves a pending request through POST .../attention/:attentionId/approve, resuming the Attempt to completion', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+    const attentionId = (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).pendingAttention.id;
+
+    const approved = await app.inject({ method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/approve` });
+
+    expect(approved.statusCode).toBe(200);
+    expect(approved.json().pendingAttention).toBeUndefined();
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed');
+  });
+
+  it('denies a pending request through .../deny, and reports an already-resolved request precisely on a repeat call', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+    const attentionId = (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).pendingAttention.id;
+
+    const denied = await app.inject({ method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/deny` });
+    expect(denied.statusCode).toBe(200);
+
+    const repeat = await app.inject({ method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/deny` });
+    expect(repeat.statusCode).toBe(404);
+    expect(repeat.json().error).toMatch(/no pending attention request/);
+  });
+
+  it('provides clarifying input through .../input, requiring a non-empty value', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionMethod: 'thread/requestClarification' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+    const attentionId = (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).pendingAttention.id;
+
+    const missingValue = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/input`,
+      headers: { 'content-type': 'application/json' }, payload: {},
+    });
+    expect(missingValue.statusCode).toBe(400);
+
+    const provided = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/input`,
+      headers: { 'content-type': 'application/json' }, payload: { value: 'Use TypeScript strict mode.' },
+    });
+    expect(provided.statusCode).toBe(200);
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed');
+  });
+
+  it('refuses to resolve an approval-kind request with input, reporting 400', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+    const attentionId = (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).pendingAttention.id;
+
+    const response = await app.inject({
+      method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/input`,
+      headers: { 'content-type': 'application/json' }, payload: { value: 'nope' },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatch(/cannot be resolved by providing input/);
+  });
+
+  it('reports a mismatched attentionId and an unknown run precisely', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const runId = await startWithAttentionRequest(app, repoPath);
+
+    const wrongAttention = await app.inject({ method: 'POST', url: `/api/runs/${runId}/attention/not-the-real-id/approve` });
+    expect(wrongAttention.statusCode).toBe(404);
+
+    const unknownRun = await app.inject({ method: 'POST', url: '/api/runs/does-not-exist/attention/any-id/approve' });
+    expect(unknownRun.statusCode).toBe(404);
+    expect(unknownRun.json()).toEqual({ error: 'no such run: does-not-exist' });
+  });
+});

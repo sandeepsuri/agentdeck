@@ -15,10 +15,11 @@
 // module's closures — it is never put on an AttemptEvent, never reaches
 // WorkRun/Store (ticket 05 AC3/AC4).
 import { spawn as nodeSpawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { resolveAgentExecutable } from '../../sessions/executable.js';
 import { filterEnvironment } from '../envelope.js';
-import type { AttemptEvent } from '../types.js';
+import type { AttentionDecisionInput, AttemptEvent, AttentionRequestKind } from '../types.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './adapter.js';
 
 export interface CodexAttemptProcess {
@@ -132,6 +133,52 @@ function itemSummary(item: Record<string, unknown>): string | undefined {
   if (Array.isArray(item.command)) return item.command.filter((part) => typeof part === 'string').join(' ');
   if (typeof item.path === 'string') return item.path;
   return undefined;
+}
+
+// Ticket 07: Codex's own JSON-RPC schema names the approval request/response
+// pair 'CommandExecutionRequestApprovalParams'/'...Response' (see
+// sessions/runtime-readiness.ts's generateCodexProtocolEvidence, which only
+// confirms those schema files exist — not the exact method name or response
+// field a real `codex app-server` sends, which this repo has no fixture or
+// doc pinning). Every other method name this adapter already relies on
+// follows one consistent PascalCase-schema → 'namespace/verb' convention
+// ('ThreadStartParams' → 'thread/start', 'ThreadTokenUsageUpdatedNotification'
+// → 'thread/tokenUsageUpdated'), so 'commandExecution/requestApproval' is
+// the same convention applied to that schema name — a reasoned inference,
+// not a verified fact. Classification below only ever keys off whether
+// "approval" appears in the method name at all, so it still recognizes a
+// close variant if the real name differs in namespace or verb casing; an
+// unrecognized server-to-client request that doesn't mention approval is
+// treated as a plain input request instead of failing closed.
+function classifyAttentionRequest(method: string): AttentionRequestKind {
+  return /approval/i.test(method) ? 'approval' : 'input';
+}
+
+/** Tries the field names a genuine clarifying question is most likely to arrive under, before giving up on a specific answer. */
+function questionText(params: Record<string, unknown>): string | undefined {
+  for (const key of ['question', 'prompt', 'message', 'text']) {
+    const value = params[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+// Ticket 07 AC1: a human-readable reason describes what's actually being
+// asked, never the wire protocol that carried it — the raw JSON-RPC method
+// name (e.g. 'thread/requestClarification') is an implementation detail an
+// operator approving/denying a request has no reason to see.
+function describeAttentionRequest(kind: AttentionRequestKind, params: Record<string, unknown>): string {
+  if (kind === 'approval') {
+    const command = itemSummary(params);
+    return command ? `Codex is requesting approval to run: ${command}` : 'Codex is requesting approval before it can continue.';
+  }
+  return questionText(params) ?? 'Codex is requesting input before it can continue.';
+}
+
+/** The reply shape is exactly as unverified as the request's own method name (see classifyAttentionRequest) — self-consistent with this adapter's own request/response pairing, not asserted as Codex's real wire contract. */
+function buildAttentionResponseResult(kind: AttentionRequestKind, decision: AttentionDecisionInput): Record<string, unknown> {
+  if (kind === 'approval') return { decision: decision.kind === 'approve' ? 'approved' : 'denied' };
+  return { value: decision.kind === 'input' ? decision.value : '' };
 }
 
 function buildPrompt(context: AttemptLaunchContext): string {
@@ -250,6 +297,45 @@ export function createCodexAttemptAdapter(
       }
     }
 
+    // Ticket 07: a server-to-client request (approval or input) becomes a
+    // durable, human-readable attention-requested event and awaits the
+    // engine's one policy path (context.awaitAttentionDecision) for a
+    // decision, then relays exactly that decision back to Codex — never
+    // anything more (AC5: nothing here can touch the frozen Repository,
+    // revision, Profile, runtime, budget, workspace, policy, or secret
+    // grants, since none of those are reachable from this function at all).
+    // No callback means no engine is wired to a policy path for this run
+    // (e.g. a bare adapter-contract test) — preserve the old safe-decline
+    // behavior rather than hang the turn forever waiting on nothing.
+    async function handleAttentionRequest(id: number | string, method: string, params: Record<string, unknown>): Promise<void> {
+      if (terminal) return;
+      if (!context.awaitAttentionDecision) {
+        proc.stdin.write(`${JSON.stringify({
+          jsonrpc: '2.0', id, error: { code: -32601, message: 'Managed Attempts do not support interactive approvals yet.' },
+        })}\n`);
+        return;
+      }
+      const attentionKind = classifyAttentionRequest(method);
+      // Ticket 07 AC1's "stable correlation": deterministic from
+      // (context.runId, this JSON-RPC request's own id) — Codex assigns
+      // that id, unique among this connection's outstanding requests, so
+      // hashing it (rather than minting a fresh random id per call) means
+      // a genuinely redelivered identical request reproduces the exact
+      // same attentionId and durable event, deduplicated by dedupeKey
+      // (durable-events.ts) the same way every other AttemptEvent already
+      // is — never a second, orphaned pending request.
+      const attentionId = createHash('sha256').update(`${context.runId}:${id}`).digest('hex');
+      pushEvent({
+        kind: 'attention-requested', sequence: sequence++, at: now(), attentionId, attentionKind,
+        reason: describeAttentionRequest(attentionKind, params),
+      });
+      const decision = await context.awaitAttentionDecision(attentionId);
+      if (terminal) return;
+      proc.stdin.write(`${JSON.stringify({
+        jsonrpc: '2.0', id, result: buildAttentionResponseResult(attentionKind, decision),
+      })}\n`);
+    }
+
     function handleLine(line: string): void {
       let message: unknown;
       try {
@@ -268,12 +354,7 @@ export function createCodexAttemptAdapter(
       }
       if (typeof message.method !== 'string') return;
       if (message.id !== undefined) {
-        // A server-to-client request (e.g. an approval) — ticket 07 owns
-        // real approval routing; decline safely here so the turn can never
-        // hang waiting for a reply this adapter has no policy path for.
-        proc.stdin.write(`${JSON.stringify({
-          jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Managed Attempts do not support interactive approvals yet.' },
-        })}\n`);
+        void handleAttentionRequest(message.id, message.method, message.params ?? {});
         return;
       }
       handleNotification(message.method, message.params ?? {});
@@ -302,7 +383,13 @@ export function createCodexAttemptAdapter(
       await request('initialize', { clientInfo: { name: 'agentdeck', version: '1' } });
       const threadStart = await request('thread/start', {
         cwd: context.worktreePath,
-        approvalPolicy: 'never',
+        // Ticket 07: now that a real policy path exists to resolve one
+        // (handleAttentionRequest above), Codex is allowed to actually ask
+        // rather than being told never to. 'on-request' still leaves the
+        // decision of *whether* to ask to Codex itself; AgentDeck's own
+        // capability envelope (envelope.ts) is what already bounds what an
+        // approved command could do regardless of this policy.
+        approvalPolicy: 'on-request',
         sandbox: 'workspace-write',
         runtimeWorkspaceRoots: [context.worktreePath],
       });

@@ -7,6 +7,10 @@ import UserNotifications
 final class CompanionStore: ObservableObject {
     @Published private(set) var agents: [CompanionAgent] = []
     @Published private(set) var attention: [AttentionItem] = []
+    /// Ticket 07: managed Run approval/input requests — a distinct list from
+    /// `attention` (Session attention) so NotchView can render/regress-test
+    /// the two independently, per AC6.
+    @Published private(set) var runAttention: [RunAttentionItem] = []
     @Published private(set) var connected = false
     @Published private(set) var uiVisible = false
     @Published private(set) var hovered = false
@@ -26,9 +30,10 @@ final class CompanionStore: ObservableObject {
     private var announcedAttentionIds = Set<String>()
     weak var notifications: NotificationCoordinator?
 
-    init(port: Int, initialAgents: [CompanionAgent] = []) {
+    init(port: Int, initialAgents: [CompanionAgent] = [], initialRunAttention: [RunAttentionItem] = []) {
         self.port = port
         self.agents = initialAgents
+        self.runAttention = initialRunAttention
     }
 
     var sortedAgents: [CompanionAgent] {
@@ -52,7 +57,7 @@ final class CompanionStore: ObservableObject {
     }
 
     var bodyHeight: CGFloat {
-        NotchGeometry.bodyHeight(groups: repoGroups.count, agents: agents.count)
+        NotchGeometry.bodyHeight(groups: repoGroups.count, agents: agents.count, runAttentionCount: runAttention.count)
     }
 
     func start() {
@@ -108,6 +113,17 @@ final class CompanionStore: ObservableObject {
 
     func openAllAgents() {
         openAgentDeck([URLQueryItem(name: "view", value: "operations")])
+    }
+
+    /// Ticket 07: deep-links to the Run so an operator can approve/deny or
+    /// provide input in the full AgentDeck UI — the notch itself never
+    /// resolves a Run attention request in place, same as openSession never
+    /// answers a Session prompt in place, only navigates there.
+    func openRun(_ runId: String) {
+        openAgentDeck([
+            URLQueryItem(name: "run", value: runId),
+            URLQueryItem(name: "view", value: "operations"),
+        ])
     }
 
     private func openAgentDeck(_ queryItems: [URLQueryItem]) {
@@ -197,6 +213,7 @@ final class CompanionStore: ObservableObject {
     private func apply(_ snapshot: CompanionSnapshot, announce: Bool) {
         agents = snapshot.agents
         attention = snapshot.attention
+        runAttention = snapshot.runAttention
         uiVisible = snapshot.uiVisible
         guard announce else { return }
         notifications?.process(
@@ -204,7 +221,15 @@ final class CompanionStore: ObservableObject {
             uiVisible: snapshot.uiVisible,
             enabled: preferences.notificationsEnabled
         )
-        let currentIds = Set(snapshot.attention.map(\.id))
+        // Ticket 07: a pending Run attention request expands the notch the
+        // same way a new Session attention item does — its own id namespace
+        // ("run-attention-agentdeck.com/attentionId" would collide only in
+        // the unlikely case a Session attention item shared the identical
+        // raw id, which announcedAttentionIds already tolerates fine since
+        // both are just "new id, never seen before" signals) — Session
+        // notifications themselves stay exactly as before (no Run attention
+        // system notification is sent here; NotchView surfaces it visually).
+        let currentIds = Set(snapshot.attention.map(\.id)).union(snapshot.runAttention.map(\.id))
         let newIds = currentIds.subtracting(announcedAttentionIds)
         announcedAttentionIds.formUnion(currentIds)
         if !snapshot.uiVisible && !newIds.isEmpty {

@@ -12,4 +12,11 @@ describe('parseInitialNavigation', () => {
   it('ignores empty sessions and unknown views', () => {
     expect(parseInitialNavigation('?session=%20&view=admin')).toEqual({});
   });
+
+  it('accepts a Run deep-link (ticket 07: the native companion\'s openRun)', () => {
+    expect(parseInitialNavigation('?run=run-1&view=operations')).toEqual({
+      runId: 'run-1',
+      view: 'operations',
+    });
+  });
 });

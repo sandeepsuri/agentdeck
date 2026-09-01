@@ -39,6 +39,16 @@
 .run-attempt-event.kind-failure { border-color: var(--status-error); }
 .run-attempt-event.kind-completion { border-color: var(--status-working); }
 
+/* Ticket 07: a pending Run attention request — approve/deny or provide
+   clarifying input, matching the .run-attempt-event kind-* accent pattern
+   above (border color keyed to what the request means). */
+.run-attention-request { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--status-waiting); border-radius: 6px; background: var(--status-waiting-bg); }
+.run-attention-request strong { display: block; font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--status-waiting); }
+.run-attention-request p { margin: 6px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.run-attention-actions { display: flex; gap: 8px; margin-top: 10px; }
+.run-attention-input-form { display: flex; gap: 8px; margin-top: 10px; }
+.run-attention-input-form input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-input); color: var(--text-primary); font: 12px var(--font-sans); }
+
 .run-submission-modal { width: min(760px,calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 24px 80px rgba(0,0,0,.38); }
 .run-submission-modal > header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
 .run-submission-modal h2 { margin: 3px 0 0; font-size: 18px; }

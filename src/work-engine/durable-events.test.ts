@@ -6,7 +6,10 @@ import type { AttemptEvent } from './types.js';
 
 describe('classifyEventDurability', () => {
   it('classifies every current AttemptEvent kind as durable', () => {
-    const kinds: AttemptEvent['kind'][] = ['lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure'];
+    const kinds: AttemptEvent['kind'][] = [
+      'lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure',
+      'attention-requested', 'attention-resolved',
+    ];
     for (const kind of kinds) expect(classifyEventDurability(kind)).toBe('durable');
   });
 

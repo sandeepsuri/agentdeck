@@ -304,25 +304,119 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
   .operation-card-grid { grid-template-columns: 1fr 1fr 130px; }
 }
 
-/* Ticket 13 (Stage 4, Mobile): the phone-facing view rendered by
-   MobileWorkspace.tsx in place of the desktop workspace tree when the
-   connection is remote. `.mobile-reflow`'s `white-space: pre-wrap` +
-   `word-break: break-word` (plus `overflow-wrap: anywhere` for a single
-   very long unbroken token, e.g. a long path with no spaces) is what
-   reflows the server's fixed 100-col text to the viewport width — no
-   horizontal scroll, no pinch-zoom. `100vw`-relative sizing (not a fixed
-   px width) and `box-sizing: border-box` keep it inside the viewport at
-   any phone width. This has not been visually verified on a real device or
-   narrow browser viewport in this sandbox — see the implementation report. */
-.mobile-shell { width: 100%; min-height: 100dvh; display: flex; flex-direction: column; background: var(--canvas); color: var(--text-primary); font-size: 13px; }
-.mobile-workspace { width: 100%; min-height: 0; flex: 1; display: flex; flex-direction: column; box-sizing: border-box; background: var(--surface-terminal); color: var(--text-primary); }
-.mobile-workspace-empty { align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center; color: var(--text-muted); }
-.mobile-topbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); position: sticky; top: 0; z-index: 1; }
-.mobile-session-picker { width: 100%; max-width: 100%; padding: 9px 10px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-input); color: var(--text-primary); font-size: 15px; }
-.mobile-reflow { flex: 1; min-height: 0; margin: 0; padding: 12px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; max-width: 100vw; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: 13px/1.5 var(--font-mono); color: var(--text-secondary); background: var(--surface-terminal); }
+/* Stage 4 remote surface. It intentionally uses the existing AgentDeck
+   tokens while adopting a quieter, chat-first composition for phones. */
+.mobile-shell { width: 100%; height: 100dvh; min-height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-terminal); color: var(--text-primary); font-size: 13px; }
+.mobile-workspace { position: relative; width: 100%; min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-terminal); color: var(--text-primary); }
+
+.mobile-topbar { position: relative; z-index: 4; min-height: 64px; flex: none; display: grid; grid-template-columns: 44px minmax(0,1fr) 44px; align-items: center; padding: max(8px,env(safe-area-inset-top)) 8px 8px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
+.mobile-icon-button { width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-secondary); font-size: 22px; line-height: 1; cursor: pointer; }
+.mobile-icon-button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mobile-menu-icon { width: 18px; display: grid; gap: 3px; }
+.mobile-menu-icon i { width: 18px; height: 1.5px; display: block; border-radius: 2px; background: currentColor; }
+.mobile-topbar-copy { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; }
+.mobile-topbar-copy > strong { width: 100%; overflow: hidden; font-size: 14px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.mobile-topbar-copy > small { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font: 9.5px var(--font-mono); text-transform: capitalize; }
+.mobile-topbar-spacer { width: 44px; height: 44px; }
+
+.mobile-agent-mark { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--action-primary); }
+.mobile-agent-mark i { width: 8px; height: 8px; border-radius: 2px; background: var(--text-on-action); transform: rotate(45deg); }
+.mobile-conversation { width: min(100%,760px); min-width: 0; min-height: 0; flex: 1; align-self: center; overflow-y: auto; overflow-x: hidden; padding: 18px 16px 28px; overscroll-behavior: contain; }
+.mobile-conversation-date { margin-bottom: 20px; color: var(--text-muted); font: 9.5px var(--font-mono); text-align: center; text-transform: uppercase; letter-spacing: .08em; }
+.mobile-agent-response { min-width: 0; display: grid; grid-template-columns: 28px minmax(0,1fr); gap: 10px; }
+.mobile-agent-output { min-width: 0; overflow: hidden; border: 1px solid var(--border-muted); border-radius: 14px; background: var(--surface-code); }
+.mobile-output-label { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); color: var(--text-muted); font: 9.5px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.mobile-output-label > span:last-child { display: inline-flex; align-items: center; gap: 5px; letter-spacing: 0; text-transform: lowercase; }
+.mobile-output-label > span:last-child i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.mobile-output-label .is-live { color: var(--status-working); }
+.mobile-output-label .is-reconnecting { color: var(--status-waiting); }
+.mobile-reflow { width: 100%; min-height: 260px; margin: 0; padding: 13px; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; color: var(--text-secondary); background: var(--surface-terminal); font: 12px/1.65 var(--font-mono); }
+
+.mobile-workspace-empty { width: min(100%,420px); min-height: 0; flex: 1; align-self: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 28px; color: var(--text-muted); text-align: center; }
+.mobile-workspace-empty > .mobile-agent-mark { width: 38px; height: 38px; margin-bottom: 5px; border-radius: 12px; }
+.mobile-workspace-empty > strong { color: var(--text-primary); font-size: 16px; }
+.mobile-workspace-empty > span { max-width: 280px; line-height: 1.5; }
+.mobile-empty-action { min-height: 44px; margin-top: 8px; padding: 9px 16px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font-weight: 600; cursor: pointer; }
+
+.mobile-approval-card { width: calc(min(100%,760px) - 28px); flex: none; align-self: center; display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; margin: 0 14px 8px; padding: 13px; border: 1px solid var(--status-waiting); border-radius: 15px; background: var(--status-waiting-bg); }
+.mobile-approval-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-panel); color: var(--status-waiting); font: 700 13px var(--font-mono); }
+.mobile-approval-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.mobile-approval-copy strong { font-size: 13px; }
+.mobile-approval-copy small { color: var(--text-muted); font-size: 11px; }
+.mobile-approval-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1.35fr; gap: 8px; margin-top: 3px; }
+.mobile-approval-actions button { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-elevated); color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.mobile-approval-actions button.is-primary { border-color: var(--action-primary); background: var(--action-primary); color: var(--text-on-action); }
+.mobile-approval-actions kbd { opacity: .72; }
+
+/* Ticket 07: a Run attention request is a distinct category from Session
+   attention (approve/deny a runtime action, not "respond to the agent") —
+   the accent-primary border/icon keeps it visually distinguishable from the
+   .mobile-approval-card base it otherwise shares every other rule with. */
+.mobile-run-attention-card { border-color: var(--action-primary); background: var(--surface-panel); }
+.mobile-run-attention-card .mobile-approval-icon { color: var(--action-primary); }
+
+/* Ticket 07: the input-kind Run attention response — same grid rhythm as .mobile-approval-actions (Approve/Deny), a text field standing in for the two buttons. */
+.mobile-run-attention-input { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin-top: 3px; }
+.mobile-run-attention-input input { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
+.mobile-run-attention-input button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--action-primary); border-radius: 11px; background: var(--action-primary); color: var(--text-on-action); font-size: 12px; font-weight: 600; cursor: pointer; }
+.mobile-run-attention-input button:disabled { opacity: .5; cursor: default; }
+
+.mobile-control-keys { width: min(100%,760px); flex: none; align-self: center; display: none; padding: 0 12px 8px; }
+.mobile-control-keys.is-open { display: block; }
 .mobile-control-keys:empty { display: none; }
-.mobile-approval-actions { flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px 12px 0; background: var(--surface-panel); }
-.mobile-approval-actions button { min-height: 42px; }
-.mobile-composer { flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border-muted); background: var(--surface-panel); position: sticky; bottom: 0; }
-.mobile-composer textarea { flex: 1; min-height: 40px; max-height: 140px; padding: 9px 10px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-input); color: var(--text-primary); font-size: 15px; resize: vertical; box-sizing: border-box; }
-.mobile-composer button { flex: none; padding: 10px 14px; }
+.mobile-control-keys .control-keys { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; padding: 1px; }
+.mobile-control-keys .control-key { min-width: 0; min-height: 42px; padding: 8px 5px; border: 1px solid var(--border-muted); border-radius: 10px; background: var(--surface-panel); color: var(--text-secondary); font: 10px var(--font-mono); cursor: pointer; }
+.mobile-control-keys .control-key:hover { border-color: var(--border-strong); background: var(--surface-hover); color: var(--text-primary); }
+
+.mobile-composer-wrap { width: min(100%,760px); flex: none; align-self: center; padding: 8px 12px max(9px,env(safe-area-inset-bottom)); background: linear-gradient(to bottom,transparent,var(--surface-terminal) 14%); }
+.mobile-composer { padding: 8px; border: 1px solid var(--border-muted); border-radius: 20px; background: var(--surface-panel); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
+.mobile-composer textarea { width: 100%; min-height: 38px; max-height: 120px; display: block; resize: vertical; padding: 8px 9px 4px; border: 0; border-radius: 10px; outline-offset: 2px; background: transparent; color: var(--text-primary); font-size: 16px; line-height: 1.4; }
+.mobile-composer textarea::placeholder { color: var(--text-muted); }
+.mobile-composer-actions { display: flex; align-items: center; gap: 5px; }
+.mobile-keys-toggle { min-height: 40px; display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.mobile-keys-toggle > span { font: 10px var(--font-mono); }
+.mobile-keys-toggle[aria-pressed="true"] { background: var(--surface-selected); color: var(--text-primary); }
+.mobile-send-button { width: 40px; height: 40px; display: grid; flex: none; place-items: center; margin-left: auto; padding: 0; border: 1px solid var(--action-primary); border-radius: 50%; background: var(--action-primary); color: var(--text-on-action); font-size: 19px; font-weight: 600; cursor: pointer; }
+.mobile-send-button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
+.mobile-connection-note { display: block; margin-top: 7px; color: var(--text-muted); font: 8.5px var(--font-mono); text-align: center; }
+
+.mobile-status-dot { width: 7px; height: 7px; flex: none; display: inline-block; border-radius: 50%; background: var(--status-idle); }
+.mobile-status-dot.status-starting { background: var(--status-starting); }
+.mobile-status-dot.status-working { background: var(--status-working); }
+.mobile-status-dot.status-waiting_input { background: var(--status-waiting); }
+.mobile-status-dot.status-completed { background: var(--status-completed); }
+.mobile-status-dot.status-exited { background: var(--status-exited); }
+
+.mobile-drawer-scrim { position: fixed; z-index: 20; inset: 0; visibility: hidden; opacity: 0; padding: 0; border: 0; background: var(--overlay); cursor: default; transition: opacity .18s ease,visibility .18s ease; }
+.mobile-drawer-scrim.is-open { visibility: visible; opacity: 1; }
+.mobile-session-drawer { position: fixed; z-index: 21; inset: 0 auto 0 0; width: min(86vw,360px); display: flex; flex-direction: column; padding: max(8px,env(safe-area-inset-top)) 10px max(10px,env(safe-area-inset-bottom)); border-right: 1px solid var(--border-muted); background: var(--surface-sidebar); box-shadow: 18px 0 40px rgba(0,0,0,.22); transform: translateX(-105%); transition: transform .2s ease; }
+.mobile-session-drawer.is-open { transform: translateX(0); }
+.mobile-drawer-header { min-height: 54px; display: flex; align-items: center; justify-content: space-between; }
+.mobile-drawer-brand { display: flex; align-items: center; gap: 9px; padding-left: 8px; }
+.mobile-drawer-brand strong { font-size: 14px; }
+.mobile-drawer-label { padding: 18px 10px 8px; color: var(--text-muted); font: 9px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.mobile-session-list { min-height: 0; display: grid; gap: 3px; overflow-y: auto; }
+.mobile-session-row { width: 100%; min-height: 62px; display: grid; grid-template-columns: 36px minmax(0,1fr) 14px; align-items: center; gap: 9px; padding: 8px 9px; border: 1px solid transparent; border-radius: 13px; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.mobile-session-row:hover { background: var(--surface-hover); }
+.mobile-session-row.is-selected { border-color: var(--border-muted); background: var(--surface-selected); }
+.mobile-session-row.is-ended { opacity: .62; }
+.mobile-session-glyph { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-elevated); color: var(--text-muted); font: 9px var(--font-mono); }
+.mobile-session-copy { min-width: 0; }
+.mobile-session-copy strong,.mobile-session-copy small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mobile-session-copy strong { font-size: 12px; font-weight: 600; }
+.mobile-session-copy small { margin-top: 4px; color: var(--text-muted); font: 9px var(--font-mono); }
+.mobile-session-empty { margin: 8px; padding: 14px; border: 1px dashed var(--border-muted); border-radius: 12px; color: var(--text-muted); text-align: center; }
+.mobile-drawer-footer { display: grid; grid-template-columns: 34px minmax(0,1fr); align-items: center; gap: 9px; margin-top: auto; padding: 12px 8px 4px; border-top: 1px solid var(--border-muted); }
+.mobile-lock { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-elevated); color: var(--status-working); font: 13px var(--font-mono); }
+.mobile-drawer-footer > span:last-child { min-width: 0; }
+.mobile-drawer-footer strong,.mobile-drawer-footer small { display: block; }
+.mobile-drawer-footer strong { font-size: 11px; }
+.mobile-drawer-footer small { margin-top: 3px; color: var(--text-muted); font: 8.5px var(--font-mono); }
+
+@media (max-width: 380px) {
+  .mobile-conversation { padding-inline: 12px; }
+  .mobile-agent-response { grid-template-columns: 24px minmax(0,1fr); gap: 8px; }
+  .mobile-agent-response > .mobile-agent-mark { width: 24px; height: 24px; border-radius: 8px; }
+  .mobile-reflow { padding: 11px; font-size: 11px; }
+  .mobile-approval-card { width: calc(100% - 24px); margin-inline: 12px; }
+}

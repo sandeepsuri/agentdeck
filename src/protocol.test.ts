@@ -53,3 +53,49 @@ describe('VS Code protocol frames', () => {
     expect(TERMINAL_ROWS).toBe(30);
   });
 });
+
+describe('ticket 07: run_attention_resolve frames', () => {
+  it('accepts an approve or deny decision naming the run and attention request', () => {
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve',
+    }))).toEqual({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve',
+    });
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'deny',
+    }))).toEqual({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'deny',
+    });
+  });
+
+  it('accepts an input decision carrying non-empty clarifying text', () => {
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: 'Use TypeScript',
+    }))).toEqual({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: 'Use TypeScript',
+    });
+  });
+
+  it('rejects a missing runId/attentionId, an unrecognized decision, and an input decision with no value', () => {
+    expect(parseClientFrame(JSON.stringify({ t: 'run_attention_resolve', attentionId: 'attention-1', decision: 'approve' }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', decision: 'approve' }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'maybe',
+    }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input',
+    }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: '',
+    }))).toBeNull();
+  });
+
+  it('rejects oversized runId/attentionId/value fields', () => {
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'x'.repeat(201), attentionId: 'attention-1', decision: 'approve',
+    }))).toBeNull();
+    expect(parseClientFrame(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: 'x'.repeat(64 * 1024 + 1),
+    }))).toBeNull();
+  });
+});

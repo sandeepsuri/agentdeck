@@ -11,7 +11,7 @@ import { describeUnrecoverableAttempt } from './recovery.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
-  AttemptEvent, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
+  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
 } from './types.js';
 
 // Re-exported so callers (e.g. the REST adapter) reach every error prepare()
@@ -44,6 +44,20 @@ export class UnsupportedRuntimeError extends Error {
   constructor(runtime: AgentType) {
     super(`no runtime adapter is available for: ${runtime}`);
     this.name = 'UnsupportedRuntimeError';
+  }
+}
+
+/**
+ * Ticket 07 AC3/AC4: attentionId does not name the Run's current pending
+ * attention request — already resolved, denied, superseded, or the Attempt
+ * ended (including via recover() ending a Run left waiting when the
+ * previous process stopped) — so there is nothing left to resolve exactly
+ * once, and never anything to reopen.
+ */
+export class RunAttentionNotPendingError extends Error {
+  constructor(runId: string, attentionId: string) {
+    super(`Run ${runId} has no pending attention request ${attentionId} to resolve.`);
+    this.name = 'RunAttentionNotPendingError';
   }
 }
 
@@ -108,6 +122,19 @@ export class DurableWorkEngine implements WorkEngine {
   private readonly runsRoot: string;
   private readonly runtimeReadiness: RuntimeReadinessSource;
   private readonly runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>>;
+  /**
+   * Ticket 07: the live in-process handle for each Run currently mid-
+   * Attempt, keyed by runId — the only place a pending attention request
+   * can actually be delivered to the runtime adapter that is awaiting it.
+   * Never survives a restart (a fresh DurableWorkEngine starts with an
+   * empty map, same as every other in-memory Attempt task — see recovery.ts):
+   * resolveAttention() against a Run with no live entry here fails precisely
+   * rather than pretending to deliver a decision nothing can receive.
+   */
+  private readonly liveAttempts = new Map<string, {
+    persistResolution(attentionId: string, decision: AttentionDecisionInput): AttemptAttentionResolvedEvent;
+    deliverDecision(attentionId: string, decision: AttentionDecisionInput): boolean;
+  }>();
 
   constructor(
     private readonly store: Store,
@@ -259,28 +286,74 @@ export class DurableWorkEngine implements WorkEngine {
     adapter: RuntimeAttemptAdapter,
     envelope: CapabilityEnvelope,
   ): Promise<void> {
+    let lastSequence = -1;
+    // Ticket 07: the sole authority for a persisted event's sequence number
+    // — whatever `event.sequence` the caller attached (the adapter's own
+    // running counter, or a placeholder from persistResolution/
+    // persistSynthesizedFailure below) is discarded and replaced with
+    // `lastSequence + 1` here. This closes a real race: the adapter's
+    // internal counter and an externally triggered resolveAttention() call
+    // are two independent writers that can't otherwise agree on "the next
+    // number" — an event minted by resolveAttention (running on its own
+    // call stack, not the adapter's) could otherwise reuse a sequence the
+    // adapter's own counter was about to hand to its next event, and
+    // `INSERT OR IGNORE` on attempt_events' (attempt_id, sequence) primary
+    // key would silently drop whichever write lost that race. Because
+    // every event — adapter-yielded or engine-injected — funnels through
+    // this one synchronous function, and JS never interleaves two
+    // synchronous call stacks, centralizing assignment here instead makes
+    // collision structurally impossible.
+    const persistEvent = (event: AttemptEvent): AttemptEvent => {
+      const sequenced = { ...event, sequence: lastSequence + 1 };
+      lastSequence = sequenced.sequence;
+      const eventEnvelope = buildAttemptEventEnvelope({ runId: base.id, attemptId, event: sequenced });
+      // No AttemptEvent kind is transient today (durable-events.ts) — this
+      // guard is where a future message-delta or raw-output kind would be
+      // dropped rather than persisted as source-of-truth history (ticket 06
+      // AC3), so it stays even though it can never trigger yet.
+      if (eventEnvelope.durability === 'durable') this.store.appendAttemptEvent(eventEnvelope);
+      return sequenced;
+    };
+    const persistSynthesizedFailure = (reason: string, at: string = new Date().toISOString()): void => {
+      persistEvent({
+        kind: 'failure', sequence: 0, at, reason,
+      });
+    };
+
+    // Ticket 07: registered before the adapter ever runs so a decision made
+    // the instant an attention-requested event lands can never race ahead of
+    // this map having an entry for it.
+    const attentionResolvers = new Map<string, (decision: AttentionDecisionInput) => void>();
+    this.liveAttempts.set(base.id, {
+      // Runs on the SAME synchronous call stack as resolveAttention() (no
+      // await between its own read-then-append there and this call), so two
+      // resolutions for the same request can never both observe it as
+      // pending — the second always sees the first's durable event already
+      // written by the time it reads the Run again.
+      persistResolution: (attentionId, decision) => persistEvent({
+        kind: 'attention-resolved',
+        sequence: 0, // overwritten by persistEvent — see its own comment
+        at: new Date().toISOString(),
+        attentionId,
+        decision: decision.kind === 'approve' ? 'approved' : decision.kind === 'deny' ? 'denied' : 'provided',
+        ...(decision.kind === 'input' ? { input: decision.value } : {}),
+      } satisfies AttemptAttentionResolvedEvent) as AttemptAttentionResolvedEvent,
+      deliverDecision: (attentionId, decision) => {
+        const resolve = attentionResolvers.get(attentionId);
+        if (!resolve) return false;
+        attentionResolvers.delete(attentionId);
+        resolve(decision);
+        return true;
+      },
+    });
+
     const context: AttemptLaunchContext = {
       runId: base.id,
       objective: base.spec.objective,
       acceptanceCriteria: base.spec.acceptanceCriteria,
       worktreePath: envelope.profile.writableWorktree,
       profile: envelope.profile,
-    };
-    let lastSequence = -1;
-    const persistEvent = (event: AttemptEvent): void => {
-      lastSequence = event.sequence;
-      const eventEnvelope = buildAttemptEventEnvelope({ runId: base.id, attemptId, event });
-      // No AttemptEvent kind is transient today (durable-events.ts) — this
-      // guard is where a future message-delta or raw-output kind would be
-      // dropped rather than persisted as source-of-truth history (ticket 06
-      // AC3), so it stays even though it can never trigger yet.
-      if (eventEnvelope.durability !== 'durable') return;
-      this.store.appendAttemptEvent(eventEnvelope);
-    };
-    const persistSynthesizedFailure = (reason: string, at: string = new Date().toISOString()): void => {
-      persistEvent({
-        kind: 'failure', sequence: lastSequence + 1, at, reason,
-      });
+      awaitAttentionDecision: (attentionId) => new Promise((resolve) => { attentionResolvers.set(attentionId, resolve); }),
     };
 
     try {
@@ -294,7 +367,41 @@ export class DurableWorkEngine implements WorkEngine {
       persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
     } catch (error) {
       persistSynthesizedFailure(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.liveAttempts.delete(base.id);
     }
+  }
+
+  /** See WorkEngine.resolveAttention's doc comment. */
+  async resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const pending = existing.pendingAttention;
+    if (!pending || pending.id !== attentionId) throw new RunAttentionNotPendingError(runId, attentionId);
+    if (pending.kind === 'approval' && decision.kind === 'input') {
+      throw new InvalidRunStateError('an approval request cannot be resolved by providing input');
+    }
+    if (pending.kind === 'input' && decision.kind !== 'input') {
+      throw new InvalidRunStateError('an input request can only be resolved by providing input');
+    }
+    const live = this.liveAttempts.get(runId);
+    // No live Attempt task in this process to hand the decision to — most
+    // often because a restart already ended it via recover() (which always
+    // runs before any caller can reach this engine), leaving no pending
+    // request for a fresh read to find. This branch stays as defense in
+    // depth for that invariant rather than something a normal caller can hit.
+    if (!live) throw new RunAttentionNotPendingError(runId, attentionId);
+    // Delivery is checked BEFORE the durable write, not after: the adapter
+    // (codex.ts) always registers its resolver synchronously, in the same
+    // turn it pushes the attention-requested event that makes this request
+    // visible at all, so `deliverDecision` returning false here should
+    // never happen in practice — but if that invariant were ever broken by
+    // a future adapter, this refuses the decision instead of durably
+    // recording a resolution nothing received, which would otherwise hang
+    // the Attempt forever with no signal back to the caller.
+    if (!live.deliverDecision(attentionId, decision)) throw new RunAttentionNotPendingError(runId, attentionId);
+    live.persistResolution(attentionId, decision);
+    return this.get(runId)!;
   }
 
   /** See WorkEngine.recover's doc comment. */

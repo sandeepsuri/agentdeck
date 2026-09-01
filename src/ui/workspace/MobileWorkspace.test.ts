@@ -114,7 +114,7 @@ describe('sendToMobileSession (composer → POST /api/sessions/:id/send via apiF
 });
 
 describe('MobileWorkspace (static render)', () => {
-  it('shows a session picker instead of the composer when no session is selected', () => {
+  it('shows the managed-session drawer and an empty state instead of the composer when no session is selected', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -124,6 +124,8 @@ describe('MobileWorkspace (static render)', () => {
       wsReady: false,
     }));
     expect(html).toContain('Select a session');
+    expect(html).toContain('Managed sessions');
+    expect(html).toContain('Open sessions');
     expect(html).toContain(session.id);
     expect(html).not.toContain('Message the agent');
   });
@@ -138,6 +140,8 @@ describe('MobileWorkspace (static render)', () => {
       wsReady: true,
     }));
     expect(live).toContain('Message the agent');
+    expect(live).toContain('Message AgentDeck');
+    expect(live).toContain('Toggle terminal control keys');
 
     const ended = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
@@ -174,6 +178,54 @@ describe('MobileWorkspace (static render)', () => {
     }));
     expect(html).toContain('[1] Yes');
     expect(html).toContain('[2] No');
+  });
+
+  it('shows nothing Run-attention-related when the queue is empty (default prop)', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+    }));
+    expect(html).not.toContain('mobile-run-attention-card');
+  });
+
+  it('renders an approval-kind Run attention card with Approve/Deny, independent of any selected session', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: null,
+      sessions: [],
+      ws: null,
+      wsReady: false,
+      runAttention: [{
+        runId: 'run-1', attentionId: 'attention-1', objective: 'Fix the flaky test', kind: 'approval',
+        reason: 'Approve command: rm -rf node_modules', requestedAt: '2026-09-01T00:00:00.000Z',
+      }],
+    }));
+
+    expect(html).toContain('Run approval needed');
+    expect(html).toContain('Fix the flaky test');
+    expect(html).toContain('Approve command: rm -rf node_modules');
+    expect(html).toContain('Approve');
+    expect(html).toContain('Deny');
+  });
+
+  it('renders an input-kind Run attention card with a text field instead of Approve/Deny', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: null,
+      sessions: [],
+      ws: null,
+      wsReady: false,
+      runAttention: [{
+        runId: 'run-1', attentionId: 'attention-1', objective: 'Fix the flaky test', kind: 'input',
+        reason: 'What test framework should this use?', requestedAt: '2026-09-01T00:00:00.000Z',
+      }],
+    }));
+
+    expect(html).toContain('Run input needed');
+    expect(html).toContain('What test framework should this use?');
+    expect(html).toContain('Clarifying input');
+    expect(html).not.toContain('Run approval needed');
   });
 
   it('filters external sessions and refuses to render a stale external selection', () => {

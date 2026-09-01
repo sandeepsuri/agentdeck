@@ -1,4 +1,5 @@
-import type { AttemptEvent, WorkRun } from '../../work-engine/types.js';
+import { useState } from 'react';
+import type { AttemptEvent, AttentionDecisionInput, WorkRun } from '../../work-engine/types.js';
 import { formatRunLabel } from './runModel.js';
 
 function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: string } {
@@ -9,20 +10,43 @@ function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: st
     case 'usage': return { label: 'Usage', detail: `Input tokens: ${event.inputTokens} · Output tokens: ${event.outputTokens}` };
     case 'completion': return { label: `Completed — ${formatRunLabel(event.outcome)}`, detail: event.summary };
     case 'failure': return { label: 'Failed', detail: event.reason };
+    case 'attention-requested': return { label: `${formatRunLabel(event.attentionKind)} requested`, detail: event.reason };
+    case 'attention-resolved': return { label: formatRunLabel(event.decision), detail: event.input };
     default: return { label: String(event) };
   }
+}
+
+/** Ticket 07: the input-kind attention response — pulled out so its own text-field state doesn't force RunWorkspace itself to be stateful. */
+function AttentionInputForm({ onSubmit }: { onSubmit: (value: string) => void }) {
+  const [value, setValue] = useState('');
+  return (
+    <form
+      className="run-attention-input-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!value.trim()) return;
+        onSubmit(value.trim());
+        setValue('');
+      }}
+    >
+      <input aria-label="Clarifying input" onChange={(event) => setValue(event.target.value)} type="text" value={value} />
+      <button className="button button-primary" disabled={!value.trim()} type="submit">Send</button>
+    </form>
+  );
 }
 
 interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
   onStart?: (run: WorkRun) => void;
+  /** Ticket 07: routes an operator decision for run.pendingAttention through the one Work Engine policy path (App.tsx's resolveRunAttention → POST /api/runs/:id/attention/:attentionId/{approve,deny,input}). */
+  onResolveAttention?: (run: WorkRun, attentionId: string, decision: AttentionDecisionInput) => void;
   /** Ticket 05: the structured Attempt panel is experimental and stays hidden until this feature gate is on. */
   structuredAttemptsEnabled?: boolean;
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, structuredAttemptsEnabled = false,
+  run, onPrepare, onStart, onResolveAttention, structuredAttemptsEnabled = false,
 }: Props) {
   const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
@@ -125,6 +149,27 @@ export function RunWorkspace({
               Start Attempt
             </button>
           )}
+          {run.pendingAttention && (() => {
+            const pending = run.pendingAttention;
+            return (
+              <section aria-labelledby="run-attention-title" className="run-attention-request" data-attention-kind={pending.kind}>
+                <strong id="run-attention-title">{pending.kind === 'approval' ? 'Approval requested' : 'Input requested'}</strong>
+                <p>{pending.reason}</p>
+                {pending.kind === 'approval' ? (
+                  <div className="run-attention-actions" role="group" aria-label="Approval response">
+                    <button className="button" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'deny' })} type="button">
+                      Deny
+                    </button>
+                    <button className="button button-primary" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'approve' })} type="button">
+                      Approve
+                    </button>
+                  </div>
+                ) : (
+                  <AttentionInputForm onSubmit={(value) => onResolveAttention?.(run, pending.id, { kind: 'input', value })} />
+                )}
+              </section>
+            );
+          })()}
           {attempt.state !== 'idle' && (
             <ol className="run-attempt-activity">
               {attempt.events.map((event) => {

@@ -30,6 +30,25 @@ function describeAmbiguousActivity(events: readonly AttemptEvent[]): string | un
     + 'restart — its outcome is unknown and was not assumed.';
 }
 
+/**
+ * Ticket 07 AC4: a Run left waiting on an approval or input request when the
+ * previous process stopped has no live Attempt task to hand a decision to
+ * (DurableWorkEngine.liveAttempts starts empty every boot) — the same "no
+ * live process, no in-memory task" fact recover()'s own header comment
+ * already states for every other 'running' Attempt. This only makes that
+ * fact concrete in the reason text; the request itself is never rewritten
+ * to a guessed outcome, and once this failure event is appended,
+ * deriveOpenAttentionRequest (attempt-projection.ts) stops surfacing it as
+ * pending at all — so resolveAttention() naturally refuses it afterward
+ * (RunAttentionNotPendingError) instead of ever reopening it.
+ */
+function describePendingAttention(events: readonly AttemptEvent[]): string | undefined {
+  const last = events.at(-1);
+  if (last?.kind !== 'attention-requested') return undefined;
+  return `The Attempt was waiting on ${last.attentionKind === 'approval' ? 'an approval' : 'an input'} `
+    + `request (${last.reason}) that was never resolved before the restart.`;
+}
+
 /** Whether the installed runtime's own CLI reports structured continuation support — never, by itself, whether resuming is actually safe (see describeUnrecoverableAttempt). */
 export function isContinuationSupported(readiness: RuntimeReadinessReport, runtime: AgentType): boolean {
   const runtimeReadiness = readiness.runtimes.find((candidate) => candidate.runtime === runtime);
@@ -52,5 +71,7 @@ export function describeUnrecoverableAttempt(
     : `AgentDeck restarted before this Attempt finished, and ${displayName} does not support structured `
       + 'continuation, so it cannot be resumed.';
   const ambiguous = describeAmbiguousActivity(events);
-  return ambiguous ? `${base} ${ambiguous}` : base;
+  if (ambiguous) return `${base} ${ambiguous}`;
+  const pendingAttention = describePendingAttention(events);
+  return pendingAttention ? `${base} ${pendingAttention}` : base;
 }

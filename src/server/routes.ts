@@ -24,7 +24,8 @@ import { AutomationDeniedError, type TerminalRegistry } from '../discovery/termi
 import type { AgentType, LaunchSpec } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
-import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
+import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
+import type { WorkEngine } from '../work-engine/types.js';
 import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
@@ -206,6 +207,8 @@ export interface RouteContext {
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
   /** Ticket 05: the detected Tailscale hostname and IP, feeding classify() for GET /api/connection. Empty/undefined when no tailnet interface was found. */
   remoteHosts?: readonly string[];
+  /** Ticket 07: feeds GET /api/companion's runAttention field. Undefined only in tests that don't exercise Runs — it degrades to an empty runAttention list rather than erroring. */
+  workEngine?: WorkEngine;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -246,6 +249,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       sessions,
       attention,
       agents: deriveCompanionAgents(sessions, events, attention),
+      runAttention: deriveRunAttentionItems(ctx.workEngine?.list() ?? []),
       uiVisible: false,
     };
   });

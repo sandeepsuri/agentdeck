@@ -192,6 +192,27 @@ describe('remote route allowlist (code-review finding: an authenticated remote c
     expect(response.statusCode).toBe(404);
   });
 
+  it('an authenticated remote connection is refused GET /api/runs/some-id/attention — only the static /api/runs/attention list route is allowlisted, not a per-Run one', async () => {
+    app = makeApp({ config: { ...defaultConfig(), tailscaleToken: TOKEN }, remoteHosts: [REMOTE_HOST] });
+    const response = await app.inject({ method: 'GET', url: '/api/runs/some-id/attention', headers: remoteHeaders() });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
+  });
+
+  it.each([
+    ['GET', '/api/runs/attention'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/approve'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/deny'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/input'],
+  ])('an authenticated remote connection reaches %s %s (ticket 07: allowlisted, not blocked at the app gate)', async (method, url) => {
+    app = makeApp({ config: { ...defaultConfig(), tailscaleToken: TOKEN }, remoteHosts: [REMOTE_HOST] });
+    const response = await app.inject({ method: method as 'GET' | 'POST', url, headers: remoteHeaders() });
+    // No work routes are registered on this bare app (see makeApp) — a 404
+    // (route not found) rather than 403 (blocked at the gate) proves this
+    // path isn't blocked by the allowlist, same as the /send test above.
+    expect(response.statusCode).toBe(404);
+  });
+
   it.each([
     ['POST', '/api/sessions'],
     ['POST', '/api/runs'],
@@ -200,6 +221,11 @@ describe('remote route allowlist (code-review finding: an authenticated remote c
     ['POST', '/api/repos/file-action'],
     ['POST', '/api/sessions/some-id/stop'],
     ['PATCH', '/api/sessions/some-id'],
+    ['GET', '/api/runs'],
+    ['GET', '/api/runs/some-id'],
+    ['POST', '/api/runs/some-id/prepare'],
+    ['POST', '/api/runs/some-id/start'],
+    ['POST', '/api/runs/some-id/cancel'],
   ])('an authenticated remote connection is refused %s %s — not on the mobile allowlist, regardless of a valid token', async (method, url) => {
     app = makeApp({ config: { ...defaultConfig(), tailscaleToken: TOKEN }, remoteHosts: [REMOTE_HOST] });
     const response = await app.inject({ method: method as 'POST' | 'PATCH', url, headers: remoteHeaders() });

@@ -151,10 +151,24 @@ export interface AttentionItem {
   branch?: string;
 }
 
+/** Ticket 07: a managed Run's runtime approval/input request awaiting an operator decision. */
+export type RunAttentionKind = 'approval' | 'input';
+
+export interface RunAttentionItem {
+  runId: string;
+  /** The stable correlation every resolve command (REST, WS, local UI, mobile UI) references — see work-engine/types.ts's RunAttentionRequest.id. */
+  attentionId: string;
+  objective: string;
+  kind: RunAttentionKind;
+  reason: string;
+  requestedAt: string;
+}
+
 export interface CompanionSnapshot {
   sessions: Session[];
   attention: AttentionItem[];
   agents: CompanionAgent[];
+  runAttention: RunAttentionItem[];
   uiVisible: boolean;
 }
 

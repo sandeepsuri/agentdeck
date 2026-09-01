@@ -262,6 +262,49 @@ describe('DurableWorkEngine.recover — crash exactly at completion', () => {
   });
 });
 
+describe('DurableWorkEngine.recover — crash while an approval/input request was pending (ticket 07 AC4)', () => {
+  it('ends the Attempt with a precise reason describing the unresolved request, and never lets it be resolved afterward', async () => {
+    const { store, repository, runsRoot } = setUp();
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    const prepared = await engine.prepare((await engine.submit(workSpec(repository))).id);
+    store.startAttempt({
+      id: 'attempt-crash-6', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:00:00.000Z',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-6', {
+      kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-6', {
+      kind: 'attention-requested',
+      sequence: 1,
+      at: '2026-09-01T00:00:02.000Z',
+      attentionId: 'attention-1',
+      attentionKind: 'approval',
+      reason: 'Codex is requesting approval to run: rm -rf node_modules',
+    });
+    expect(store.getRun(prepared.id)?.pendingAttention).toMatchObject({ id: 'attention-1', kind: 'approval' });
+
+    const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    await restarted.recover();
+
+    const recovered = restarted.get(prepared.id)!;
+    expect(recovered.status).toBe('failed');
+    if (recovered.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(recovered.attempt.reason).toContain('AgentDeck restarted before this Attempt finished');
+    expect(recovered.attempt.reason).toContain('waiting on an approval request');
+    expect(recovered.attempt.reason).toContain('rm -rf node_modules');
+    // The dangling request is never surfaced as pending once the Attempt has
+    // a terminal outcome — AC4's "never reopening" guarantee.
+    expect(recovered.pendingAttention).toBeUndefined();
+
+    await expect(restarted.resolveAttention(prepared.id, 'attention-1', { kind: 'approve' }))
+      .rejects.toThrow(/no pending attention request/);
+  });
+
+  function appendEvent(store: Store, runId: string, attemptId: string, event: AttemptEvent): void {
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId, attemptId, event }));
+  }
+});
+
 describe('DurableWorkEngine.recover — reconnect idempotency', () => {
   it('running recover twice appends exactly one terminal failure event, not two', async () => {
     const { store, repository, runsRoot } = setUp();

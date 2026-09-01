@@ -5,7 +5,7 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
-import { deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
+import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
   AttemptEvent, RunEnvelopeState, RunPreparation, WorkRun, WorkSpec,
@@ -363,8 +363,11 @@ export class Store {
       record ? { runtime: record.runtime as AgentType, startedAt: record.started_at } : undefined,
       events,
     );
-    const status = deriveRunStatus(run.status as WorkRun['status'], attempt);
-    return { ...run, status, attempt };
+    const pendingAttention = deriveOpenAttentionRequest(attempt);
+    const status = deriveRunStatus(run.status as WorkRun['status'], attempt, pendingAttention);
+    return {
+      ...run, status, attempt, pendingAttention,
+    };
   }
 
   // -- repos --

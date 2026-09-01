@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveRunStatus, projectAttemptState } from './attempt-projection.js';
+import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from './attempt-projection.js';
 import type { AttemptEvent, AttemptState } from './types.js';
 
 const record = { runtime: 'codex' as const, startedAt: '2026-09-01T00:00:00.000Z' };
@@ -90,5 +90,77 @@ describe('deriveRunStatus', () => {
   it('always reports the Attempt\'s own terminal outcome once it has one', () => {
     expect(deriveRunStatus('running', completed)).toBe('completed');
     expect(deriveRunStatus('running', failed)).toBe('failed');
+  });
+
+  it('reports waiting_approval or waiting_input while a request is open, and plain running once it is not', () => {
+    const approval = { id: 'attention-1', kind: 'approval' as const, reason: 'Approve?', requestedAt: record.startedAt };
+    const input = { id: 'attention-1', kind: 'input' as const, reason: 'What next?', requestedAt: record.startedAt };
+    expect(deriveRunStatus('running', running, approval)).toBe('waiting_approval');
+    expect(deriveRunStatus('running', running, input)).toBe('waiting_input');
+    expect(deriveRunStatus('running', running)).toBe('running');
+  });
+
+  it('never reports waiting_* once the Attempt has a terminal outcome, even with a pending-looking request passed in', () => {
+    const approval = { id: 'attention-1', kind: 'approval' as const, reason: 'Approve?', requestedAt: record.startedAt };
+    expect(deriveRunStatus('running', completed, approval)).toBe('completed');
+    expect(deriveRunStatus('running', failed, approval)).toBe('failed');
+  });
+});
+
+describe('deriveOpenAttentionRequest', () => {
+  it('reports nothing for an idle or non-running Attempt, regardless of any stray events', () => {
+    expect(deriveOpenAttentionRequest({ state: 'idle' })).toBeUndefined();
+  });
+
+  it('reports nothing while running with no attention-requested event', () => {
+    expect(deriveOpenAttentionRequest({
+      state: 'running', runtime: 'codex', startedAt: record.startedAt, events: [],
+    })).toBeUndefined();
+  });
+
+  it('reports an open approval request the instant it is requested', () => {
+    const events: AttemptEvent[] = [
+      { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started' },
+      {
+        kind: 'attention-requested', sequence: 1, at: '2026-09-01T00:00:02.000Z',
+        attentionId: 'attention-1', attentionKind: 'approval', reason: 'Approve: rm -rf node_modules',
+      },
+    ];
+    expect(deriveOpenAttentionRequest({
+      state: 'running', runtime: 'codex', startedAt: record.startedAt, events,
+    })).toEqual({
+      id: 'attention-1', kind: 'approval', reason: 'Approve: rm -rf node_modules', requestedAt: '2026-09-01T00:00:02.000Z',
+    });
+  });
+
+  it('reports nothing once a matching attention-resolved event has landed', () => {
+    const events: AttemptEvent[] = [
+      {
+        kind: 'attention-requested', sequence: 0, at: '2026-09-01T00:00:01.000Z',
+        attentionId: 'attention-1', attentionKind: 'approval', reason: 'Approve?',
+      },
+      {
+        kind: 'attention-resolved', sequence: 1, at: '2026-09-01T00:00:02.000Z', attentionId: 'attention-1', decision: 'approved',
+      },
+    ];
+    expect(deriveOpenAttentionRequest({
+      state: 'running', runtime: 'codex', startedAt: record.startedAt, events,
+    })).toBeUndefined();
+  });
+
+  it('never reopens a resolved request even once the Attempt reaches a terminal outcome', () => {
+    const events: AttemptEvent[] = [
+      {
+        kind: 'attention-requested', sequence: 0, at: '2026-09-01T00:00:01.000Z',
+        attentionId: 'attention-1', attentionKind: 'approval', reason: 'Approve?',
+      },
+      {
+        kind: 'attention-resolved', sequence: 1, at: '2026-09-01T00:00:02.000Z', attentionId: 'attention-1', decision: 'approved',
+      },
+      { kind: 'completion', sequence: 2, at: '2026-09-01T00:00:03.000Z', outcome: 'success' },
+    ];
+    expect(deriveOpenAttentionRequest({
+      state: 'completed', runtime: 'codex', startedAt: record.startedAt, events, completedAt: '2026-09-01T00:00:03.000Z',
+    })).toBeUndefined();
   });
 });

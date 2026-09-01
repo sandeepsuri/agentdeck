@@ -1,7 +1,8 @@
 import path from 'node:path';
 import type {
-  AgentMessage, AttentionItem, CompanionAgent, CompanionAgentStatus, Session,
+  AgentMessage, AttentionItem, CompanionAgent, CompanionAgentStatus, RunAttentionItem, Session,
 } from './types.js';
+import type { WorkRun } from './work-engine/types.js';
 
 type ArchivedMessage = AgentMessage & { eventId?: number };
 
@@ -86,6 +87,27 @@ export function deriveAttentionItems(
   return [...latest.values()]
     .filter((item): item is AttentionItem => item !== null)
     .sort((a, b) => priority[a.kind] - priority[b.kind] || b.occurredAt.localeCompare(a.occurredAt));
+}
+
+/**
+ * Ticket 07: the same minimal, purpose-built read model the mobile REST
+ * endpoint, GET /api/companion, and the WS companion_snapshot push all share
+ * — a managed Run's Repository path, budget, envelope, and full spec never
+ * appear here, only what a human needs to decide an approval or input
+ * request (the objective, the request's own reason, and its correlation).
+ */
+export function deriveRunAttentionItems(runs: readonly WorkRun[]): RunAttentionItem[] {
+  return runs
+    .flatMap((run) => (run.pendingAttention ? [{ run, pending: run.pendingAttention }] : []))
+    .map(({ run, pending }) => ({
+      runId: run.id,
+      attentionId: pending.id,
+      objective: run.spec.objective,
+      kind: pending.kind,
+      reason: pending.reason,
+      requestedAt: pending.requestedAt,
+    }))
+    .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
 }
 
 const companionPriority: Record<CompanionAgentStatus, number> = {

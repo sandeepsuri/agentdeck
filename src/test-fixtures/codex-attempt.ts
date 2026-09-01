@@ -6,11 +6,18 @@
 import { PassThrough } from 'node:stream';
 import type { CodexAttemptProcess, CodexProcessSpawner } from '../work-engine/runtimes/codex.js';
 
-export type CodexAttemptFixtureBehavior = 'success' | 'turn-failure' | 'handshake-failure' | 'missing-usage' | 'silent-exit';
+export type CodexAttemptFixtureBehavior =
+  | 'success' | 'turn-failure' | 'handshake-failure' | 'missing-usage' | 'silent-exit' | 'attention-request';
+
+/** Only used when behavior is 'attention-request' — the JSON-RPC id this fixture sends its one server-to-client request under. */
+export const ATTENTION_REQUEST_ID = 9001;
 
 export interface CreateFakeCodexAppServerOptions {
   readonly threadId?: string;
   readonly behavior?: CodexAttemptFixtureBehavior;
+  /** Only used when behavior is 'attention-request': the JSON-RPC method name Codex "asks" with — defaults to the approval-shaped name the adapter itself infers its method name convention from. */
+  readonly attentionMethod?: string;
+  readonly attentionParams?: Record<string, unknown>;
 }
 
 export interface FakeCodexAppServer {
@@ -19,6 +26,8 @@ export interface FakeCodexAppServer {
   readonly writes: string[];
   /** The env each spawn() call received — for asserting the envelope's environment allowlist was actually applied. */
   readonly envs: Array<Readonly<Record<string, string>>>;
+  /** Populated only when behavior is 'attention-request': the exact JSON-RPC `result` the adapter replied with, once received. */
+  readonly attentionResponses: Array<Record<string, unknown>>;
 }
 
 /**
@@ -32,6 +41,7 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
   const behavior = options.behavior ?? 'success';
   const writes: string[] = [];
   const envs: Array<Readonly<Record<string, string>>> = [];
+  const attentionResponses: Array<Record<string, unknown>> = [];
 
   const spawn: CodexProcessSpawner = (_executable, _args, spawnOptions) => {
     envs.push(spawnOptions.env);
@@ -47,6 +57,18 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
     const playTurn = (): void => {
       if (behavior === 'silent-exit') { finish(); return; }
       send({ jsonrpc: '2.0', method: 'turn/started', params: { threadId } });
+      if (behavior === 'attention-request') {
+        // A server-to-client request instead of the normal script — the
+        // adapter must reply on stdin (see the stdin handler's
+        // ATTENTION_REQUEST_ID branch below) before this fixture continues.
+        send({
+          jsonrpc: '2.0',
+          id: ATTENTION_REQUEST_ID,
+          method: options.attentionMethod ?? 'commandExecution/requestApproval',
+          params: options.attentionParams ?? { threadId, command: 'rm -rf node_modules' },
+        });
+        return;
+      }
       send({
         jsonrpc: '2.0',
         method: 'item/started',
@@ -75,6 +97,17 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
       finish();
     };
 
+    const resumeAfterAttentionResolved = (): void => {
+      send({
+        jsonrpc: '2.0',
+        method: 'item/completed',
+        params: { threadId, item: { id: 'item-2', type: 'agent_message', text: 'Continued after the pending attention request was resolved.' } },
+      });
+      send({ jsonrpc: '2.0', method: 'thread/tokenUsageUpdated', params: { threadId, inputTokens: 500, outputTokens: 120 } });
+      send({ jsonrpc: '2.0', method: 'turn/completed', params: { threadId } });
+      finish();
+    };
+
     let buffer = '';
     stdin.on('data', (chunk: Buffer) => {
       buffer += chunk.toString('utf8');
@@ -85,7 +118,9 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
         index = buffer.indexOf('\n');
         if (!line) continue;
         writes.push(line);
-        const message = JSON.parse(line) as { id?: number; method?: string };
+        const message = JSON.parse(line) as {
+          id?: number; method?: string; result?: Record<string, unknown>; error?: { code?: number; message?: string };
+        };
         if (message.method === 'initialize') {
           send({ jsonrpc: '2.0', id: message.id, result: {} });
         } else if (message.method === 'thread/start') {
@@ -96,6 +131,13 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
           }
         } else if (message.method === 'thread/sendMessage') {
           queueMicrotask(playTurn);
+        } else if (message.id === ATTENTION_REQUEST_ID && (message.result !== undefined || message.error !== undefined)) {
+          // Either a real decision (result) or the adapter's own safe-decline
+          // fallback (error, when no policy path was wired) — both unblock
+          // this fixture's turn identically; only `result` replies are
+          // recorded, since a JSON-RPC error carries no operator decision.
+          if (message.result !== undefined) attentionResponses.push(message.result);
+          resumeAfterAttentionResolved();
         }
       }
     });
@@ -109,5 +151,7 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
     } satisfies CodexAttemptProcess;
   };
 
-  return { spawn, writes, envs };
+  return {
+    spawn, writes, envs, attentionResponses,
+  };
 }
