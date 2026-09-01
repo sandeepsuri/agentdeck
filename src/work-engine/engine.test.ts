@@ -517,6 +517,29 @@ describe('DurableWorkEngine.start', () => {
     store.close();
   });
 
+  it('never leaves a Run permanently running when Codex rejects the objective-start request', async () => {
+    // The app-server double answers 'turn/start' with a JSON-RPC error and
+    // then stays alive and silent forever — no notification, no exit. Before
+    // the objective was tracked with request(), that error was dropped and
+    // the Run sat in 'running' with only 'attempt-started' recorded, with
+    // nothing left that could ever settle it.
+    const fake = createFakeCodexAppServer({ behavior: 'objective-start-unsupported' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    const started = await engine.start(prepared.id);
+    expect(started.status).toBe('running');
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed');
+    expect(settled.attempt).toMatchObject({
+      state: 'failed', reason: expect.stringContaining('Method not found: turn/start'),
+    });
+    store.close();
+  });
+
   it('refuses to start a second Attempt once one has already been started', async () => {
     const fake = createFakeCodexAppServer({ behavior: 'success' });
     const { store, repository, engine } = setUp({

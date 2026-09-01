@@ -295,8 +295,11 @@ async function generateCodexProtocolEvidence(
   };
   try {
     await run(executable, ['app-server', 'generate-json-schema', '--out', directory, '--experimental']);
-    const [notifications, resumeParams, resumeResponse, approvalParams, approvalResponse, usage, threadStart] = await Promise.all([
+    const [
+      notifications, clientRequests, resumeParams, resumeResponse, approvalParams, approvalResponse, usage, threadStart,
+    ] = await Promise.all([
       read('ServerNotification.json'),
+      read('ClientRequest.json'),
       read('v2/ThreadResumeParams.json'),
       read('v2/ThreadResumeResponse.json'),
       read('CommandExecutionRequestApprovalParams.json'),
@@ -305,8 +308,15 @@ async function generateCodexProtocolEvidence(
       read('v2/ThreadStartParams.json'),
     ]);
     return {
+      // A structured Attempt needs both halves of the transport: the
+      // notification stream it reads progress from, and the client request
+      // it hands the objective to. 'turn/start' is that request (the
+      // adapter in work-engine/runtimes/codex.ts sends exactly it) — an
+      // installed CLI that does not expose it cannot run a managed Attempt,
+      // however complete its notification schema looks.
       'structured-events': ['turn/started', 'turn/completed', 'item/started', 'item/completed']
-        .every((method) => notifications.includes(method)),
+        .every((method) => notifications.includes(method))
+        && clientRequests.includes('"turn/start"'),
       continuation: Boolean(resumeParams && resumeResponse),
       approvals: Boolean(approvalParams && approvalResponse),
       'usage-reporting': usage.includes('inputTokens') && usage.includes('outputTokens'),

@@ -134,9 +134,44 @@ describe('createCodexAttemptAdapter', () => {
 
     const threadStart = fake.writes.map((line) => JSON.parse(line)).find((message) => message.method === 'thread/start');
     expect(threadStart.params).toMatchObject({ cwd: context.worktreePath, runtimeWorkspaceRoots: [context.worktreePath] });
-    const sendMessage = fake.writes.map((line) => JSON.parse(line)).find((message) => message.method === 'thread/sendMessage');
-    expect(sendMessage.params.text).toContain(context.objective);
-    expect(sendMessage.params.text).toContain(context.acceptanceCriteria[0]);
+    const turnStart = fake.writes.map((line) => JSON.parse(line)).find((message) => message.method === 'turn/start');
+    expect(turnStart.params.threadId).toBe('thread-fixture-1');
+    expect(turnStart.params.input).toHaveLength(1);
+    expect(turnStart.params.input[0].type).toBe('text');
+    expect(turnStart.params.input[0].text).toContain(context.objective);
+    expect(turnStart.params.input[0].text).toContain(context.acceptanceCriteria[0]);
+  });
+
+  it('launches a plain `codex app-server` and opts into the experimental API through initialize, not a CLI flag', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const args: string[][] = [];
+    await run({
+      resolveExecutable: () => '/usr/bin/fake-codex',
+      spawn: (executable, spawnArgs, spawnOptions) => {
+        args.push([...spawnArgs]);
+        return fake.spawn(executable, spawnArgs, spawnOptions);
+      },
+    });
+
+    // `codex app-server` exposes no --experimental flag; thread/start's
+    // runtimeWorkspaceRoots is unlocked by the handshake capability instead.
+    expect(args).toEqual([['app-server']]);
+    const initialize = fake.writes.map((line) => JSON.parse(line)).find((message) => message.method === 'initialize');
+    expect(initialize.params.capabilities).toEqual({ experimentalApi: true });
+  });
+
+  it('fails the Attempt when the objective-start request is rejected, instead of leaving it running forever', async () => {
+    // The fixture answers 'turn/start' with a JSON-RPC error and then stays
+    // alive and completely silent: no notification, no stream end, no exit.
+    // Ignoring that error (the old send()-and-forget) left the Attempt — and
+    // so the Run — stuck on 'attempt-started' with nothing able to end it.
+    const fake = createFakeCodexAppServer({ behavior: 'objective-start-unsupported' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    expect(events).toEqual([
+      { kind: 'lifecycle', sequence: 0, at: expect.any(String), phase: 'attempt-started' },
+      { kind: 'failure', sequence: 1, at: expect.any(String), reason: expect.stringContaining('Method not found: turn/start') },
+    ]);
   });
 
   it('lets Codex ask for approval now that a policy path can resolve it (approvalPolicy is on-request, not never)', async () => {

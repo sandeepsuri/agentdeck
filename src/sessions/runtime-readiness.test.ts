@@ -289,6 +289,42 @@ describe('createRuntimeReadinessSource', () => {
     });
   });
 
+  it('refuses managed status when the generated protocol exposes no turn/start for the objective', async () => {
+    // A CLI whose notification schema looks complete but whose client-request
+    // schema has no objective-carrying request cannot run a managed Attempt —
+    // the adapter would have nothing to hand the objective to.
+    const source = createRuntimeReadinessSource({
+      resolveExecutable: (runtime) => runtime === 'codex' ? '/private/bin/codex' : undefined,
+      execute: async (_executable, args) => {
+        if (args[0] === '--version') return { stdout: 'codex-cli 0.152.0', stderr: '' };
+        if (args.join(' ') === 'app-server --help') return { stdout: 'Run the app server\nstdio://', stderr: '' };
+        if (args.join(' ') === 'app-server generate-json-schema --help') {
+          return { stdout: 'Generate JSON Schema\n--out <DIR>', stderr: '' };
+        }
+        const outIndex = args.indexOf('--out');
+        if (outIndex >= 0) {
+          const directory = args[outIndex + 1]!;
+          fs.mkdirSync(path.join(directory, 'v2'), { recursive: true });
+          fs.writeFileSync(path.join(directory, 'ServerNotification.json'), 'turn/started turn/completed item/started item/completed');
+          fs.writeFileSync(path.join(directory, 'ClientRequest.json'), '"thread/start" "thread/resume"');
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    const report = await source.get();
+
+    expect(report.runtimes[0]).toMatchObject({
+      runtime: 'codex',
+      status: 'compatibility-only',
+      capabilities: expect.arrayContaining([{
+        capability: 'structured-events',
+        supported: false,
+        reason: expect.any(String),
+      }]),
+    });
+  });
+
   it('derives the Codex contract from generated protocol schemas without starting a Run', async () => {
     const commands: string[] = [];
     const source = createRuntimeReadinessSource({
@@ -307,6 +343,7 @@ describe('createRuntimeReadinessSource', () => {
           const directory = args[outIndex + 1]!;
           fs.mkdirSync(path.join(directory, 'v2'), { recursive: true });
           fs.writeFileSync(path.join(directory, 'ServerNotification.json'), 'turn/started turn/completed item/started item/completed');
+          fs.writeFileSync(path.join(directory, 'ClientRequest.json'), '"turn/start"');
           fs.writeFileSync(path.join(directory, 'CommandExecutionRequestApprovalParams.json'), '{}');
           fs.writeFileSync(path.join(directory, 'CommandExecutionRequestApprovalResponse.json'), '{}');
           fs.writeFileSync(path.join(directory, 'v2/ThreadResumeParams.json'), '{}');

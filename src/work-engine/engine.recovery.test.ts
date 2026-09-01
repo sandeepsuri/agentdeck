@@ -84,7 +84,7 @@ function silentAfterHandshakeSpawn(): CodexProcessSpawner {
           stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} })}\n`);
         } else if (message.method === 'thread/start') {
           stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { threadId: 'thread-crash-1' } })}\n`);
-        } else if (message.method === 'thread/sendMessage') {
+        } else if (message.method === 'turn/start') {
           stdout.write(`${JSON.stringify({
             jsonrpc: '2.0',
             method: 'item/started',

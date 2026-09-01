@@ -7,7 +7,11 @@ import { PassThrough } from 'node:stream';
 import type { CodexAttemptProcess, CodexProcessSpawner } from '../work-engine/runtimes/codex.js';
 
 export type CodexAttemptFixtureBehavior =
-  | 'success' | 'turn-failure' | 'handshake-failure' | 'missing-usage' | 'silent-exit' | 'attention-request';
+  | 'success' | 'turn-failure' | 'handshake-failure' | 'missing-usage' | 'silent-exit' | 'attention-request'
+  // An app-server that rejects the objective-carrying request itself and
+  // then stays alive and silent — never a notification, never an exit — so
+  // the only thing that can end the Attempt is the rejection.
+  | 'objective-start-unsupported';
 
 /** Only used when behavior is 'attention-request' — the JSON-RPC id this fixture sends its one server-to-client request under. */
 export const ATTENTION_REQUEST_ID = 9001;
@@ -51,8 +55,18 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
     let resolveExited: (result: { code: number | null; signal: NodeJS.Signals | null }) => void;
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => { resolveExited = resolve; });
 
+    let turnStartRequestId: number | undefined;
     const send = (message: unknown): void => { stdout.write(`${JSON.stringify(message)}\n`); };
-    const finish = (): void => { stdout.end(); resolveExited({ code: 0, signal: null }); };
+    // The real app-server answers 'turn/start' only once the turn is over —
+    // its TurnStartResponse carries completedAt/durationMs/error — so this
+    // fixture answers it here, after the notification stream has played out.
+    const finish = (): void => {
+      if (turnStartRequestId !== undefined) {
+        send({ jsonrpc: '2.0', id: turnStartRequestId, result: { turn: { id: 'turn-fixture-1', items: [], status: 'completed' } } });
+      }
+      stdout.end();
+      resolveExited({ code: 0, signal: null });
+    };
 
     const playTurn = (): void => {
       if (behavior === 'silent-exit') { finish(); return; }
@@ -129,8 +143,13 @@ export function createFakeCodexAppServer(options: CreateFakeCodexAppServerOption
           } else {
             send({ jsonrpc: '2.0', id: message.id, result: { threadId } });
           }
-        } else if (message.method === 'thread/sendMessage') {
-          queueMicrotask(playTurn);
+        } else if (message.method === 'turn/start') {
+          if (behavior === 'objective-start-unsupported') {
+            send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found: turn/start' } });
+          } else {
+            turnStartRequestId = message.id;
+            queueMicrotask(playTurn);
+          }
         } else if (message.id === ATTENTION_REQUEST_ID && (message.result !== undefined || message.error !== undefined)) {
           // Either a real decision (result) or the adapter's own safe-decline
           // fallback (error, when no policy path was wired) — both unblock

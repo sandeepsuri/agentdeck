@@ -205,6 +205,11 @@ export function createCodexAttemptAdapter(
     }
 
     const env = filterEnvironment(context.profile, process.env);
+    // `codex app-server` itself takes no --experimental flag (only its
+    // generate-json-schema subcommand does — see the readiness probe in
+    // sessions/runtime-readiness.ts). The experimental surface thread/start
+    // needs for runtimeWorkspaceRoots is opted into over the wire instead,
+    // by the initialize handshake below declaring experimentalApi.
     const proc = spawnProcess(executable, ['app-server'], { cwd: context.worktreePath, env });
 
     const queue = new AsyncEventQueue<AttemptEvent>();
@@ -380,7 +385,14 @@ export function createCodexAttemptAdapter(
     })().finally(() => queue.close());
 
     try {
-      await request('initialize', { clientInfo: { name: 'agentdeck', version: '1' } });
+      await request('initialize', {
+        clientInfo: { name: 'agentdeck', version: '1' },
+        // InitializeCapabilities.experimentalApi: opts this connection into
+        // the experimental methods and fields a managed Attempt depends on
+        // (thread/start's runtimeWorkspaceRoots above all). Without it the
+        // app-server rejects those params rather than starting the thread.
+        capabilities: { experimentalApi: true },
+      });
       const threadStart = await request('thread/start', {
         cwd: context.worktreePath,
         // Ticket 07: now that a real policy path exists to resolve one
@@ -395,7 +407,22 @@ export function createCodexAttemptAdapter(
       });
       const threadId = typeof threadStart.threadId === 'string' ? threadStart.threadId : undefined;
       if (!threadId) throw new Error('Codex app-server did not return a thread id.');
-      send('thread/sendMessage', { threadId, text: buildPrompt(context) });
+      // 'turn/start' is the objective-carrying request the installed
+      // app-server actually exposes (ClientRequest.json lists turn/start,
+      // turn/steer and turn/interrupt; there is no thread/sendMessage).
+      // It is tracked with request() rather than fired with send() so a
+      // rejection — an unsupported method, rejected params, a refused
+      // sandbox — becomes a structured Attempt failure instead of silently
+      // leaving the Attempt Running with nothing after 'attempt-started'.
+      // Its response carries the *finished* Turn (completedAt, durationMs,
+      // error), so it must never be awaited inline: the notification stream
+      // below is what reports progress while the turn is still in flight.
+      request('turn/start', {
+        threadId,
+        input: [{ type: 'text', text: buildPrompt(context) }],
+      }).catch((error: unknown) => emitFailure(
+        `Codex app-server rejected the objective: ${error instanceof Error ? error.message : String(error)}`,
+      ));
     } catch (error) {
       emitFailure(error instanceof Error ? error.message : String(error));
     }
