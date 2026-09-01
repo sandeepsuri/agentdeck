@@ -5,6 +5,7 @@ import path from 'node:path';
 import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Store } from '../store/index.js';
+import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import type { WorkSpec } from '../work-engine/types.js';
 import { registerWorkRoutes } from './work-routes.js';
@@ -39,7 +40,7 @@ function makeApp() {
   const app = Fastify();
   const store = new Store(':memory:');
   store.upsertRepo({ id: repoPath, name: 'example', path: repoPath });
-  registerWorkRoutes(app, new DurableWorkEngine(store, path.join(root, 'runs')));
+  registerWorkRoutes(app, new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource()));
   apps.push(app);
   stores.push(store);
   return { app, repoPath };
@@ -118,6 +119,10 @@ describe('run preparation routes', () => {
     expect(body.status).toBe('preparing');
     expect(body.preparation).toMatchObject({ state: 'ready', baseCommit: headSha });
     expect(fs.existsSync(body.preparation.worktreePath)).toBe(true);
+    expect(body.envelope).toMatchObject({
+      state: 'ready',
+      capabilityEnvelope: { runtime: 'codex', profile: { writableWorktree: body.preparation.worktreePath } },
+    });
   });
 
   it('reports an unknown run and a Git failure precisely', async () => {

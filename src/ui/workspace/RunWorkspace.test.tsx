@@ -21,6 +21,7 @@ function baseRun(): WorkRun {
       requestedDeliveryResult: 'local-commit',
     },
     preparation: { state: 'pending' },
+    envelope: { state: 'pending' },
   };
 }
 
@@ -79,5 +80,49 @@ describe('RunWorkspace', () => {
 
     expect(html).not.toContain('Prepare worktree');
     expect(html).not.toContain('Retry worktree preparation');
+  });
+
+  it('shows the effective capability envelope once frozen', () => {
+    const run: WorkRun = {
+      ...baseRun(),
+      envelope: {
+        state: 'ready',
+        capabilityEnvelope: {
+          runtime: 'codex',
+          profile: {
+            writableWorktree: '/repos/example-runs/run-durable-123',
+            readableRoots: ['/repos/example-runs/run-durable-123'],
+            allowedNetworkDomains: ['api.openai.com', 'chatgpt.com'],
+            environmentAllowlist: ['PATH', 'HOME'],
+            processCeiling: 16,
+            childRunCeiling: 0,
+          },
+          secretGrants: [{ name: 'github-token', reference: 'secret-ref:github-token-1' }],
+        },
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run }));
+
+    for (const expected of [
+      'Capability envelope', 'Codex', '/repos/example-runs/run-durable-123',
+      'api.openai.com', 'chatgpt.com', 'PATH', 'HOME', '16', 'github-token', 'secret-ref:github-token-1',
+    ]) expect(html).toContain(expected);
+  });
+
+  it('shows a human-readable reason when the envelope is refused', () => {
+    const run: WorkRun = {
+      ...baseRun(),
+      envelope: {
+        state: 'refused',
+        reason: 'No preferred runtime can satisfy the managed capability envelope. Claude Code: '
+          + 'cannot enforce the managed capability envelope (execution restrictions unsupported).',
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run }));
+
+    expect(html).toContain('Refused');
+    expect(html).toContain('execution restrictions unsupported');
   });
 });

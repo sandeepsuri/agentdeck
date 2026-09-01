@@ -2,7 +2,7 @@ import type { WorkRun } from '../../work-engine/types.js';
 import { formatRunLabel } from './runModel.js';
 
 export function RunWorkspace({ run, onPrepare }: { run: WorkRun; onPrepare?: (run: WorkRun) => void }) {
-  const { preparation } = run;
+  const { preparation, envelope } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
   return (
     <article className="run-workspace">
@@ -35,6 +35,44 @@ export function RunWorkspace({ run, onPrepare }: { run: WorkRun; onPrepare?: (ru
             {preparation.state === 'failed' ? 'Retry worktree preparation' : 'Prepare worktree'}
           </button>
         )}
+      </section>
+      <section className="run-envelope">
+        <h2>Capability envelope</h2>
+        <dl className="run-intent-grid">
+          <div>
+            <dt>Status</dt>
+            <dd><span className={`work-run-status status-${envelope.state}`}>{formatRunLabel(envelope.state)}</span></dd>
+          </div>
+          {envelope.state === 'refused' && <div><dt>Refusal reason</dt><dd>{envelope.reason}</dd></div>}
+          {envelope.state === 'ready' && (() => {
+            const { runtime, profile, secretGrants } = envelope.capabilityEnvelope;
+            return (
+              <>
+                <div><dt>Runtime</dt><dd>{formatRunLabel(runtime)}</dd></div>
+                <div><dt>Writable worktree</dt><dd><code>{profile.writableWorktree}</code></dd></div>
+                <div><dt>Readable roots</dt><dd>{profile.readableRoots.map((root) => <code key={root}>{root}</code>)}</dd></div>
+                <div>
+                  <dt>Allowed network domains</dt>
+                  <dd>{profile.allowedNetworkDomains.length > 0
+                    ? profile.allowedNetworkDomains.map((domain) => <code key={domain}>{domain}</code>)
+                    : 'None (denied by default)'}</dd>
+                </div>
+                <div>
+                  <dt>Inherited environment variables</dt>
+                  <dd>{profile.environmentAllowlist.map((name) => <code key={name}>{name}</code>)}</dd>
+                </div>
+                <div><dt>Process ceiling</dt><dd>{profile.processCeiling}</dd></div>
+                <div><dt>Child-Run ceiling</dt><dd>{profile.childRunCeiling}</dd></div>
+                <div>
+                  <dt>Secret grants</dt>
+                  <dd>{secretGrants.length > 0
+                    ? secretGrants.map((grant) => <span key={grant.name}>{grant.name}: <code>{grant.reference}</code></span>)
+                    : 'None'}</dd>
+                </div>
+              </>
+            );
+          })()}
+        </dl>
       </section>
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>

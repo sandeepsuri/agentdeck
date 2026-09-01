@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import { Store } from '../store/index.js';
+import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
+import { CHILD_RUN_CEILING, TRUSTED_RUNTIME_PROVIDER_DOMAINS } from './envelope.js';
 import { DurableWorkEngine, InvalidRunStateError, RunNotFoundError } from './engine.js';
 import { runBranchName, runWorktreePath } from './prepare.js';
 import type { RunRepository, WorkSpec } from './types.js';
@@ -160,14 +163,14 @@ describe('DurableWorkEngine', () => {
 });
 
 describe('DurableWorkEngine.prepare', () => {
-  function setUp() {
+  function setUp(runtimeReadiness: RuntimeReadinessSource = stubRuntimeReadinessSource()) {
     const root = tempDir();
     const repoPath = path.join(root, 'repo');
     initGitRepo(repoPath);
     const store = new Store(':memory:');
     const repository = registerGitRepository(store, repoPath);
     const runsRoot = path.join(root, 'runs');
-    const engine = new DurableWorkEngine(store, runsRoot);
+    const engine = new DurableWorkEngine(store, runsRoot, runtimeReadiness);
     return { root, repoPath, store, repository, runsRoot, engine };
   }
 
@@ -193,6 +196,65 @@ describe('DurableWorkEngine.prepare', () => {
     expect(git(prepared.preparation.worktreePath!, 'rev-parse', 'HEAD')).toBe(headSha);
     expect(engine.get(submitted.id)).toEqual(prepared);
     store.close();
+  });
+
+  it('freezes a ready capability envelope pinned to the first eligible preferred runtime once the worktree exists', async () => {
+    const { store, repository, runsRoot, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.envelope).toEqual({
+      state: 'ready',
+      capabilityEnvelope: {
+        runtime: 'codex',
+        profile: {
+          writableWorktree: runWorktreePath(runsRoot, submitted.id),
+          readableRoots: [runWorktreePath(runsRoot, submitted.id)],
+          allowedNetworkDomains: TRUSTED_RUNTIME_PROVIDER_DOMAINS.codex,
+          environmentAllowlist: expect.any(Array),
+          processCeiling: expect.any(Number),
+          childRunCeiling: CHILD_RUN_CEILING,
+        },
+        secretGrants: [],
+      },
+    });
+    store.close();
+  });
+
+  it('refuses managed envelope status when no preferred runtime can enforce execution restrictions', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository, { runtimePreference: ['claude'] });
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.preparation.state).toBe('ready');
+    expect(prepared.envelope.state).toBe('refused');
+    if (prepared.envelope.state !== 'refused') throw new Error('expected refused');
+    expect(prepared.envelope.reason).toContain('Claude Code');
+    store.close();
+  });
+
+  it('reopens a prepared run with its frozen envelope intact after restart', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const submitted = await new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource()).submit(
+      { ...workSpec(), repository, requestedBaseReference: 'main' },
+    );
+    const prepared = await new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource()).prepare(submitted.id);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(submitted.id);
+
+    expect(reopened?.envelope).toEqual(prepared.envelope);
+    reopenedStore.close();
   });
 
   it('creates a clean worktree even when the source checkout has untracked files and dirty tracked files', async () => {

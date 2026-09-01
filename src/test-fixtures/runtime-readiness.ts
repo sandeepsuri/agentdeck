@@ -1,4 +1,5 @@
 import type { RuntimeReadinessReport } from '../sessions/runtime-readiness-contract.js';
+import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 
 export const runtimeReadinessReportFixture: RuntimeReadinessReport = {
   checkedAt: '2026-09-01T14:00:00.000Z',
@@ -37,3 +38,10 @@ export const runtimeReadinessReportFixture: RuntimeReadinessReport = {
     },
   ],
 };
+
+/** A RuntimeReadinessSource that resolves to the fixture above (or an override), for tests that need one without spawning real CLI processes. */
+export function stubRuntimeReadinessSource(
+  report: RuntimeReadinessReport = runtimeReadinessReportFixture,
+): RuntimeReadinessSource {
+  return { get: async () => report };
+}

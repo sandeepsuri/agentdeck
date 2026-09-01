@@ -32,6 +32,7 @@ const run: WorkRun = {
     requestedDeliveryResult: 'local-commit',
   },
   preparation: { state: 'pending' },
+  envelope: { state: 'pending' },
 };
 
 describe('SessionSidebar', () => {

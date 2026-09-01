@@ -12,7 +12,7 @@
 .work-run-status.status-queued,.work-run-status.status-pending { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
 .work-run-status.status-preparing,.work-run-status.status-in_progress { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
 .work-run-status.status-ready,.work-run-status.status-completed { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
-.work-run-status.status-failed { border-color: var(--status-error); color: var(--status-error); background: var(--status-error-bg); }
+.work-run-status.status-failed,.work-run-status.status-refused { border-color: var(--status-error); color: var(--status-error); background: var(--status-error-bg); }
 .work-run-status.status-cancelled { border-color: var(--status-exited); color: var(--status-exited); }
 .sidebar-create-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 12px 12px; }
 .sidebar-create-actions > button { min-width: 0; margin: 0; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }

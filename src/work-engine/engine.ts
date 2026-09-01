@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defaultDataDir } from '../config.js';
+import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import type { Task } from '../types.js';
+import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
 import type { WorkEngine, WorkRun, WorkSpec } from './types.js';
 
@@ -90,9 +92,15 @@ const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set(['completed', 
 /** Durable entry point for submitting and reopening managed work. */
 export class DurableWorkEngine implements WorkEngine {
   private readonly runsRoot: string;
+  private readonly runtimeReadiness: RuntimeReadinessSource;
 
-  constructor(private readonly store: Store, runsRoot: string = path.join(defaultDataDir(), 'runs')) {
+  constructor(
+    private readonly store: Store,
+    runsRoot: string = path.join(defaultDataDir(), 'runs'),
+    runtimeReadiness: RuntimeReadinessSource = createRuntimeReadinessSource(),
+  ) {
     this.runsRoot = runsRoot;
+    this.runtimeReadiness = runtimeReadiness;
   }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
@@ -111,6 +119,7 @@ export class DurableWorkEngine implements WorkEngine {
       spec,
       submittedAt: new Date().toISOString(),
       preparation: { state: 'pending' },
+      envelope: { state: 'pending' },
     });
     const task: Task = {
       id: taskId,
@@ -153,8 +162,15 @@ export class DurableWorkEngine implements WorkEngine {
       const prepared = await prepareRunWorktree(
         existing.spec.repository, existing.spec.requestedBaseReference, existing.id, this.runsRoot,
       );
+      // Ticket 04: freeze the capability envelope the instant the worktree
+      // it's scoped to exists, before any runtime can receive authority.
+      const envelope = buildRunEnvelope({
+        runtimePreference: existing.spec.runtimePreference,
+        readiness: await this.runtimeReadiness.get(),
+        worktreePath: prepared.worktreePath,
+      });
       const ready = frozenCopy<WorkRun>({
-        ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared },
+        ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared }, envelope,
       });
       this.store.updateRun(ready);
       return ready;

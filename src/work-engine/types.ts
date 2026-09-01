@@ -66,6 +66,36 @@ export interface RunPreparation {
   readonly error?: string;
 }
 
+/** A redacted pointer to secret material held in external secret storage. Never the secret value itself (ticket 04). */
+export interface SecretGrant {
+  readonly name: string;
+  readonly reference: string;
+}
+
+/** The admin-approved capability boundary enforced for one Run's chosen runtime, before it receives authority (ticket 04). */
+export interface EnvelopeProfile {
+  readonly writableWorktree: string;
+  readonly readableRoots: readonly string[];
+  /** Empty by default — tool network access is denied unless a domain is explicitly granted here. */
+  readonly allowedNetworkDomains: readonly string[];
+  /** Only these variable names may be copied from the host shell; every other variable is dropped. */
+  readonly environmentAllowlist: readonly string[];
+  readonly processCeiling: number;
+  readonly childRunCeiling: number;
+}
+
+export interface CapabilityEnvelope {
+  readonly runtime: AgentType;
+  readonly profile: EnvelopeProfile;
+  readonly secretGrants: readonly SecretGrant[];
+}
+
+export type RunEnvelopeState =
+  | { readonly state: 'pending' }
+  | { readonly state: 'ready'; readonly capabilityEnvelope: CapabilityEnvelope }
+  /** Set when no preferred runtime can satisfy the envelope — refused rather than silently degraded. */
+  | { readonly state: 'refused'; readonly reason: string };
+
 export interface WorkRun {
   readonly id: string;
   readonly taskId: string;
@@ -73,6 +103,7 @@ export interface WorkRun {
   readonly spec: WorkSpec;
   readonly submittedAt: string;
   readonly preparation: RunPreparation;
+  readonly envelope: RunEnvelopeState;
 }
 
 export interface WorkEngine {
