@@ -31,6 +31,7 @@ const run: WorkRun = {
     verificationIntent: { required: true, commands: ['npm test'] },
     requestedDeliveryResult: 'local-commit',
   },
+  preparation: { state: 'pending' },
 };
 
 describe('SessionSidebar', () => {

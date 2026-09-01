@@ -29,7 +29,7 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
-  const workEngine = new DurableWorkEngine(store);
+  const workEngine = new DurableWorkEngine(store, path.join(config.dataDir, 'runs'));
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than

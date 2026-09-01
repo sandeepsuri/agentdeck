@@ -288,6 +288,13 @@ export function App() {
   const selectRun = (run: WorkRun) => { setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
   const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
 
+  const prepareRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/prepare`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Run preparation failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
     const body = await response.json() as Session & { error?: string };
@@ -385,7 +392,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace run={selectedRun} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} run={selectedRun} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>

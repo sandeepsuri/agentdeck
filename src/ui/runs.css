@@ -9,7 +9,11 @@
 .work-run-content strong { font-size: 11px; }
 .work-run-content small { margin-top: 5px; color: var(--text-muted); font: 8.5px var(--font-mono); }
 .work-run-status { padding: 4px 6px; border: 1px solid var(--border-muted); border-radius: 999px; color: var(--text-secondary); font: 8px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
-.work-run-status.status-queued { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
+.work-run-status.status-queued,.work-run-status.status-pending { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
+.work-run-status.status-preparing,.work-run-status.status-in_progress { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
+.work-run-status.status-ready,.work-run-status.status-completed { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
+.work-run-status.status-failed { border-color: var(--status-error); color: var(--status-error); background: var(--status-error-bg); }
+.work-run-status.status-cancelled { border-color: var(--status-exited); color: var(--status-exited); }
 .sidebar-create-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 12px 12px; }
 .sidebar-create-actions > button { min-width: 0; margin: 0; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
 .new-run-button { border: 1px solid var(--status-waiting); background: var(--status-waiting-bg); color: var(--status-waiting); }
@@ -25,6 +29,7 @@
 .run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font: 11px/1.45 var(--font-mono); }
 .run-intent-grid code { padding: 5px 7px; border-radius: 5px; background: var(--surface-code); }
 .run-workspace > footer { padding-top: 18px; border-top: 1px solid var(--border-muted); }
+.run-preparation .button { margin-top: 4px; }
 
 .run-submission-modal { width: min(760px,calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 24px 80px rgba(0,0,0,.38); }
 .run-submission-modal > header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }

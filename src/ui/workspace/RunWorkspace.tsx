@@ -1,7 +1,9 @@
 import type { WorkRun } from '../../work-engine/types.js';
 import { formatRunLabel } from './runModel.js';
 
-export function RunWorkspace({ run }: { run: WorkRun }) {
+export function RunWorkspace({ run, onPrepare }: { run: WorkRun; onPrepare?: (run: WorkRun) => void }) {
+  const { preparation } = run;
+  const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
   return (
     <article className="run-workspace">
       <header>
@@ -17,6 +19,23 @@ export function RunWorkspace({ run }: { run: WorkRun }) {
         <div><dt>Budget</dt><dd>{Object.entries(run.spec.budget).map(([name, value]) => <span key={name}>{formatRunLabel(name)}: {value}</span>)}</dd></div>
         <div><dt>Verification intent</dt><dd><strong>{run.spec.verificationIntent.required ? 'Required' : 'Optional'}</strong>{run.spec.verificationIntent.commands.map((command) => <code key={command}>{command}</code>)}</dd></div>
       </dl>
+      <section className="run-preparation">
+        <h2>Worktree preparation</h2>
+        <dl className="run-intent-grid">
+          <div>
+            <dt>Preparation state</dt>
+            <dd><span className={`work-run-status status-${preparation.state}`}>{formatRunLabel(preparation.state)}</span></dd>
+          </div>
+          <div><dt>Resolved base commit</dt><dd>{preparation.baseCommit ? <code>{preparation.baseCommit}</code> : 'Not yet resolved'}</dd></div>
+          <div><dt>Worktree</dt><dd>{preparation.worktreePath ? <code>{preparation.worktreePath}</code> : 'Not yet created'}</dd></div>
+          {preparation.error && <div><dt>Last error</dt><dd>{preparation.error}</dd></div>}
+        </dl>
+        {canPrepare && (
+          <button className="button button-primary" onClick={() => onPrepare(run)} type="button">
+            {preparation.state === 'failed' ? 'Retry worktree preparation' : 'Prepare worktree'}
+          </button>
+        )}
+      </section>
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>
   );

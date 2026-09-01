@@ -1,12 +1,33 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { defaultDataDir } from '../config.js';
 import type { Store } from '../store/index.js';
 import type { Task } from '../types.js';
+import { prepareRunWorktree, RunPreparationError } from './prepare.js';
 import type { WorkEngine, WorkRun, WorkSpec } from './types.js';
+
+// Re-exported so callers (e.g. the REST adapter) reach every error prepare()
+// can throw through this one module, keeping prepare.ts an internal detail.
+export { RunPreparationError };
 
 export class InvalidWorkSpecError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidWorkSpecError';
+  }
+}
+
+export class RunNotFoundError extends Error {
+  constructor(runId: string) {
+    super(`no such run: ${runId}`);
+    this.name = 'RunNotFoundError';
+  }
+}
+
+export class InvalidRunStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidRunStateError';
   }
 }
 
@@ -64,9 +85,15 @@ function frozenCopy<T>(value: T): T {
   return deepFreeze(structuredClone(value));
 }
 
+const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set(['completed', 'failed', 'cancelled']);
+
 /** Durable entry point for submitting and reopening managed work. */
 export class DurableWorkEngine implements WorkEngine {
-  constructor(private readonly store: Store) {}
+  private readonly runsRoot: string;
+
+  constructor(private readonly store: Store, runsRoot: string = path.join(defaultDataDir(), 'runs')) {
+    this.runsRoot = runsRoot;
+  }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
     validateWorkSpec(input);
@@ -83,6 +110,7 @@ export class DurableWorkEngine implements WorkEngine {
       status: 'queued',
       spec,
       submittedAt: new Date().toISOString(),
+      preparation: { state: 'pending' },
     });
     const task: Task = {
       id: taskId,
@@ -105,5 +133,53 @@ export class DurableWorkEngine implements WorkEngine {
 
   list(): WorkRun[] {
     return this.store.listRuns().map(frozenCopy);
+  }
+
+  async prepare(runId: string): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    if (TERMINAL_STATUSES.has(existing.status)) {
+      throw new InvalidRunStateError(`cannot prepare a Run in terminal status: ${existing.status}`);
+    }
+    // Ready worktrees are never recreated (their path/branch would collide
+    // with themselves) — a repeated call, e.g. after a restart, is a no-op.
+    if (existing.preparation.state === 'ready') return frozenCopy(existing);
+
+    this.store.updateRun(frozenCopy<WorkRun>({
+      ...existing, status: 'preparing', preparation: { state: 'in_progress' },
+    }));
+
+    try {
+      const prepared = await prepareRunWorktree(
+        existing.spec.repository, existing.spec.requestedBaseReference, existing.id, this.runsRoot,
+      );
+      const ready = frozenCopy<WorkRun>({
+        ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared },
+      });
+      this.store.updateRun(ready);
+      return ready;
+    } catch (error) {
+      // The failure stays recoverable: status remains 'preparing' (not the
+      // terminal 'failed') so a later prepare() call can retry once the
+      // reported collision or Git failure is addressed.
+      const failed = frozenCopy<WorkRun>({
+        ...existing,
+        status: 'preparing',
+        preparation: { state: 'failed', error: error instanceof Error ? error.message : String(error) },
+      });
+      this.store.updateRun(failed);
+      throw error;
+    }
+  }
+
+  async cancel(runId: string): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    // Cancellation never touches a prepared worktree — it is only a status
+    // change, and stays that way regardless of what preparation recorded.
+    if (TERMINAL_STATUSES.has(existing.status)) return frozenCopy(existing);
+    const cancelled = frozenCopy<WorkRun>({ ...existing, status: 'cancelled' });
+    this.store.updateRun(cancelled);
+    return cancelled;
   }
 }

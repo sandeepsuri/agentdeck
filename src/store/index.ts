@@ -5,7 +5,7 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
-import type { WorkRun, WorkSpec } from '../work-engine/types.js';
+import type { RunPreparation, WorkRun, WorkSpec } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../../migrations');
@@ -83,6 +83,7 @@ function rowToTask(r: TaskRow): Task {
 
 interface RunRow {
   id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
+  preparation: string;
 }
 
 function rowToRun(r: RunRow): WorkRun {
@@ -92,6 +93,7 @@ function rowToRun(r: RunRow): WorkRun {
     status: r.status as WorkRun['status'],
     spec: JSON.parse(r.work_spec) as WorkSpec,
     submittedAt: r.submitted_at,
+    preparation: JSON.parse(r.preparation) as RunPreparation,
   };
 }
 
@@ -256,14 +258,15 @@ export class Store {
     this.db.transaction(() => {
       this.saveTask(task);
       this.db.prepare(
-        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at)
-         VALUES (@id, @taskId, @status, @workSpec, @submittedAt)`,
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation)`,
       ).run({
         id: run.id,
         taskId: run.taskId,
         status: run.status,
         workSpec: JSON.stringify(run.spec),
         submittedAt: run.submittedAt,
+        preparation: JSON.stringify(run.preparation),
       });
     })();
   }
@@ -276,6 +279,15 @@ export class Store {
   listRuns(): WorkRun[] {
     return (this.db.prepare('SELECT * FROM runs ORDER BY submitted_at DESC').all() as RunRow[])
       .map(rowToRun);
+  }
+
+  /** Updates a Run's status and preparation record. The frozen spec never changes. */
+  updateRun(run: WorkRun): void {
+    this.db.prepare('UPDATE runs SET status = @status, preparation = @preparation WHERE id = @id').run({
+      id: run.id,
+      status: run.status,
+      preparation: JSON.stringify(run.preparation),
+    });
   }
 
   // -- repos --
