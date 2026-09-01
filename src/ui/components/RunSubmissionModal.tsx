@@ -1,7 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import type {
+  RuntimeReadinessReport, RuntimeReadinessStatus,
+} from '../../sessions/runtime-readiness-contract.js';
 import type { AgentType, Repo } from '../../types.js';
 import type { RequestedDeliveryResult, WorkRun, WorkSpec } from '../../work-engine/types.js';
 import { apiFetch } from '../apiFetch.js';
+
+// Mirrors LaunchModal's READINESS_LABELS — kept local rather than shared
+// since each modal renders it at a different level of detail.
+const READINESS_LABELS: Record<RuntimeReadinessStatus, string> = {
+  managed: 'Managed runs ready',
+  'compatibility-only': 'Compatibility only',
+  unavailable: 'Unavailable',
+};
 
 type RunFetcher = (path: string, init: RequestInit) => Promise<Response>;
 
@@ -40,6 +51,16 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
   const [verificationCommands, setVerificationCommands] = useState('npm test\nnpm run typecheck');
   const [delivery, setDelivery] = useState<RequestedDeliveryResult>('local-commit');
   const [submitting, setSubmitting] = useState(false);
+  const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadinessReport | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    apiFetch('/api/runtime-readiness')
+      .then((response) => response.ok ? response.json() as Promise<RuntimeReadinessReport> : null)
+      .then((body) => { if (!disposed && body) setRuntimeReadiness(body); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, []);
 
   const toggleRuntime = (runtime: AgentType) => {
     setRuntimePreference((current) => current.includes(runtime)
@@ -88,7 +109,16 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
             }} required value={repositoryId}><option disabled value="">Choose a repository</option>{repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label>
             <label>Requested base reference<input onChange={(event) => setRequestedBaseReference(event.target.value)} required value={requestedBaseReference} /></label>
           </div>
-          <fieldset><legend>Runtime preference</legend><div className="run-choice-row">{(['codex', 'claude'] as const).map((runtime) => <label key={runtime}><input checked={runtimePreference.includes(runtime)} onChange={() => toggleRuntime(runtime)} type="checkbox" />{runtime === 'codex' ? 'Codex' : 'Claude'}</label>)}</div></fieldset>
+          <fieldset><legend>Runtime preference</legend><div className="run-choice-row">{(['codex', 'claude'] as const).map((runtime) => {
+            const readiness = runtimeReadiness?.runtimes.find((item) => item.runtime === runtime);
+            return (
+              <label key={runtime}>
+                <input checked={runtimePreference.includes(runtime)} onChange={() => toggleRuntime(runtime)} type="checkbox" />
+                {runtime === 'codex' ? 'Codex' : 'Claude'}
+                {readiness && <small className={`run-runtime-readiness status-${readiness.status}`}> {READINESS_LABELS[readiness.status]}</small>}
+              </label>
+            );
+          })}</div></fieldset>
           <fieldset><legend>Budget</legend><div className="run-form-grid"><label>Wall-clock minutes<input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} required type="number" value={wallClockMinutes} /></label><label>Model turns<input min="1" onChange={(event) => setModelTurns(event.target.value)} required type="number" value={modelTurns} /></label></div></fieldset>
           <fieldset><legend>Verification intent</legend><label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Verification is required</label><label>Commands<textarea onChange={(event) => setVerificationCommands(event.target.value)} value={verificationCommands} /></label></fieldset>
           <label>Requested delivery result<select onChange={(event) => setDelivery(event.target.value as RequestedDeliveryResult)} value={delivery}><option value="working-tree">Working tree</option><option value="local-commit">Local commit</option><option value="pull-request">Pull request</option></select></label>
