@@ -14,6 +14,11 @@ import {
 } from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
+import {
+  createRuntimeReadinessSource,
+  publicRuntimeReadinessReport,
+  type RuntimeReadinessSource,
+} from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
 import type { AgentType, LaunchSpec } from '../types.js';
@@ -195,6 +200,8 @@ export interface RouteContext {
   publish?: GitPublishService;
   /** Ticket 12: the runtime-fetched, allowlist-filtered, cached model catalog. Undefined only in tests that don't exercise it — GET /api/models degrades to an empty list rather than erroring. */
   modelCatalog?: ModelCatalog;
+  /** Capability-only probe used by GET /api/runtime-readiness. It never starts a managed Run. */
+  runtimeReadiness?: RuntimeReadinessSource;
   /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
   /** Ticket 05: the detected Tailscale hostname and IP, feeding classify() for GET /api/connection. Empty/undefined when no tailnet interface was found. */
@@ -203,6 +210,7 @@ export interface RouteContext {
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
+  const runtimeReadiness = ctx.runtimeReadiness ?? createRuntimeReadinessSource();
   const requestTrust = (req: FastifyRequest) => classify(
     {
       host: req.headers.host,
@@ -221,6 +229,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const trust = requestTrust(req);
     return { kind: trust.kind, capabilities: [...trust.capabilities] };
   });
+
+  app.get('/api/runtime-readiness', async () => publicRuntimeReadinessReport(await runtimeReadiness.get()));
 
   app.get('/api/sessions', async (req) => {
     const sessions = manager.listSessions();
