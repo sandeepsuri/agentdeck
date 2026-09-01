@@ -1,7 +1,8 @@
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
-import type { RuntimeReadinessReport } from '../../sessions/runtime-readiness.js';
+// @vitest-environment jsdom
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { runtimeReadinessReportFixture } from '../../test-fixtures/runtime-readiness.js';
 import type { Repo } from '../../types.js';
 import { LaunchModal } from './LaunchModal.js';
 
@@ -12,61 +13,74 @@ const repo: Repo = {
   currentBranch: 'main',
 };
 
-const readiness: RuntimeReadinessReport = {
-  checkedAt: '2026-09-01T14:00:00.000Z',
-  runtimes: [
-    {
-      runtime: 'codex',
-      displayName: 'Codex CLI',
-      status: 'managed',
-      version: '0.152.0',
-      reason: 'All managed-run capabilities are available.',
-      capabilities: [
-        { capability: 'structured-events', supported: true },
-        { capability: 'continuation', supported: true },
-        { capability: 'approvals', supported: true },
-        { capability: 'usage-reporting', supported: true },
-        { capability: 'execution-restrictions', supported: true },
-      ],
-    },
-    {
-      runtime: 'claude',
-      displayName: 'Claude Code',
-      status: 'compatibility-only',
-      version: '2.0.0',
-      reason: 'Missing managed-run capabilities: execution restrictions.',
-      capabilities: [
-        { capability: 'structured-events', supported: true },
-        { capability: 'continuation', supported: true },
-        { capability: 'approvals', supported: true },
-        { capability: 'usage-reporting', supported: true },
-        {
-          capability: 'execution-restrictions',
-          supported: false,
-          reason: 'The installed CLI does not expose restricted execution controls.',
-        },
-      ],
-    },
-  ],
-};
-
 describe('LaunchModal runtime readiness', () => {
-  it('shows independent status and the selected runtime capability explanation at the chooser', () => {
-    const html = renderToStaticMarkup(createElement(LaunchModal, {
-      onClose: () => undefined,
-      onLaunched: () => undefined,
-      repos: [repo],
-      runtimeReadiness: readiness,
-    }));
+  let container: HTMLDivElement;
+  let root: Root;
 
-    expect(html).toContain('Managed runs ready');
-    expect(html).toContain('Compatibility sessions only');
-    expect(html).toContain('Missing managed-run capabilities: execution restrictions.');
-    expect(html).toContain('Structured events');
-    expect(html).toContain('Continuation');
-    expect(html).toContain('Approvals');
-    expect(html).toContain('Usage reporting');
-    expect(html).toContain('Execution restrictions');
-    expect(html).toContain('The installed CLI does not expose restricted execution controls.');
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  });
+
+  async function renderWithReadiness(body: unknown) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) !== '/api/runtime-readiness') throw new Error(`Unexpected request: ${String(input)}`);
+      return { ok: true, status: 200, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await act(async () => {
+      root.render(createElement(LaunchModal, {
+        onClose: () => undefined,
+        onLaunched: () => undefined,
+        repos: [repo],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    return fetchMock;
+  }
+
+  it('fetches and shows independent status plus the selected runtime capability explanation', async () => {
+    const fetchMock = await renderWithReadiness(runtimeReadinessReportFixture);
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/runtime-readiness', expect.any(Object));
+    expect(container.textContent).toContain('Managed runs ready');
+    expect(container.textContent).toContain('Compatibility sessions only');
+    expect(container.textContent).toContain('Missing managed-run capabilities: execution restrictions.');
+    expect(container.textContent).toContain('Structured events');
+    expect(container.textContent).toContain('Continuation');
+    expect(container.textContent).toContain('Approvals');
+    expect(container.textContent).toContain('Usage reporting');
+    expect(container.textContent).toContain('Execution restrictions');
+    expect(container.textContent).toContain('The installed CLI does not expose restricted execution controls.');
+  });
+
+  it('renders an unavailable runtime and its precise reason from the fetched report', async () => {
+    const unavailable = {
+      ...runtimeReadinessReportFixture,
+      runtimes: runtimeReadinessReportFixture.runtimes.map((runtime) => runtime.runtime === 'claude' ? {
+        ...runtime,
+        status: 'unavailable' as const,
+        reason: 'Claude Code was found but its readiness probe timed out.',
+        capabilities: runtime.capabilities.map((item) => ({
+          ...item,
+          supported: false,
+          reason: `Could not verify ${item.capability}.`,
+        })),
+      } : runtime),
+    };
+
+    await renderWithReadiness(unavailable);
+
+    expect(container.textContent).toContain('Unavailable');
+    expect(container.textContent).toContain('Claude Code was found but its readiness probe timed out.');
+    expect(container.textContent).toContain('Could not verify approvals.');
   });
 });

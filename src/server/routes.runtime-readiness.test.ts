@@ -4,47 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig } from '../config.js';
-import type { RuntimeReadinessReport } from '../sessions/runtime-readiness.js';
+import { runtimeReadinessReportFixture as report } from '../test-fixtures/runtime-readiness.js';
 import type { Session } from '../types.js';
 import { registerRoutes, type RouteContext } from './routes.js';
-
-const report: RuntimeReadinessReport = {
-  checkedAt: '2026-09-01T14:00:00.000Z',
-  runtimes: [
-    {
-      runtime: 'codex',
-      displayName: 'Codex CLI',
-      status: 'managed',
-      version: '0.152.0',
-      reason: 'All managed-run capabilities are available.',
-      capabilities: [
-        { capability: 'structured-events', supported: true },
-        { capability: 'continuation', supported: true },
-        { capability: 'approvals', supported: true },
-        { capability: 'usage-reporting', supported: true },
-        { capability: 'execution-restrictions', supported: true },
-      ],
-    },
-    {
-      runtime: 'claude',
-      displayName: 'Claude Code',
-      status: 'compatibility-only',
-      version: '2.0.0',
-      reason: 'Missing managed-run capabilities: execution restrictions.',
-      capabilities: [
-        { capability: 'structured-events', supported: true },
-        { capability: 'continuation', supported: true },
-        { capability: 'approvals', supported: true },
-        { capability: 'usage-reporting', supported: true },
-        {
-          capability: 'execution-restrictions',
-          supported: false,
-          reason: 'The installed CLI does not expose restricted execution controls.',
-        },
-      ],
-    },
-  ],
-};
 
 describe('GET /api/runtime-readiness', () => {
   const apps: ReturnType<typeof Fastify>[] = [];

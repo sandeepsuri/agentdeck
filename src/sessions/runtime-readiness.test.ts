@@ -1,5 +1,34 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createRuntimeReadinessSource, probeRuntimeReadiness } from './runtime-readiness.js';
+
+const fullCodexProtocol = {
+  'structured-events': true,
+  continuation: true,
+  approvals: true,
+  'usage-reporting': true,
+  'execution-restrictions': true,
+} as const;
+
+const fullClaudeHelp = [
+  '--print',
+  '--verbose',
+  '--output-format <format> stream-json',
+  '--input-format <format> stream-json',
+  '--include-hook-events',
+  '--resume <session-id>',
+  '--session-id <uuid>',
+  '--permission-mode <mode>',
+  '--max-budget-usd <amount>',
+  '--restricted',
+  '--allowedTools <tools>',
+  '--disallowedTools <tools>',
+  '--strict-mcp-config',
+  '--setting-sources <sources>',
+  '--bare',
+  '--safe-mode',
+].join('\n');
 
 const unavailableCapabilities = [
   {
@@ -66,15 +95,14 @@ describe('probeRuntimeReadiness', () => {
   it('reports Codex as managed when its non-running CLI surfaces the full contract', async () => {
     const outputs: Record<string, string> = {
       '--version': 'codex-cli 0.152.0',
-      '--help': 'Commands: exec app-server\n--sandbox <MODE>\n--ask-for-approval <POLICY>\n--add-dir <DIR>',
-      'exec --help': '--json\n--sandbox <MODE>\n--ask-for-approval <POLICY>\n--ignore-user-config',
-      'exec resume --help': 'Resume a previous session\n--json\nSESSION_ID',
       'app-server --help': 'Run the app server\n--listen <URL>\nstdio://',
+      'app-server generate-json-schema --help': 'Generate JSON Schema\n--out <DIR>',
     };
 
     const report = await probeRuntimeReadiness({
       now: () => new Date('2026-09-01T14:00:00.000Z'),
       resolveExecutable: (runtime) => runtime === 'codex' ? '/private/bin/codex' : undefined,
+      inspectCodexProtocol: async () => fullCodexProtocol,
       run: vi.fn(async (_executable: string, args: readonly string[]) => ({
         stdout: outputs[args.join(' ')] ?? '',
         stderr: '',
@@ -110,27 +138,11 @@ describe('probeRuntimeReadiness', () => {
   });
 
   it('reports Claude as managed when its non-running CLI surfaces the full contract', async () => {
-    const help = [
-      '--print',
-      '--output-format <format> stream-json',
-      '--input-format <format> stream-json',
-      '--include-hook-events',
-      '--resume <session-id>',
-      '--session-id <uuid>',
-      '--permission-mode <mode>',
-      '--max-budget-usd <amount>',
-      '--restricted',
-      '--allowedTools <tools>',
-      '--disallowedTools <tools>',
-      '--strict-mcp-config',
-      '--setting-sources <sources>',
-    ].join('\n');
-
     const report = await probeRuntimeReadiness({
       now: () => new Date('2026-09-01T14:00:00.000Z'),
       resolveExecutable: (runtime) => runtime === 'claude' ? '/private/bin/claude' : undefined,
       run: vi.fn(async (_executable: string, args: readonly string[]) => ({
-        stdout: args[0] === '--version' ? '2.1.251 (Claude Code)' : help,
+        stdout: args[0] === '--version' ? '2.1.251 (Claude Code)' : fullClaudeHelp,
         stderr: '',
       })),
     });
@@ -151,17 +163,39 @@ describe('probeRuntimeReadiness', () => {
     });
   });
 
+  it('keeps pre-baseline Claude installations compatibility-only with a precise version reason', async () => {
+    const report = await probeRuntimeReadiness({
+      resolveExecutable: (runtime) => runtime === 'claude' ? '/private/bin/claude' : undefined,
+      run: vi.fn(async (_executable: string, args: readonly string[]) => ({
+        stdout: args[0] === '--version' ? '2.1.207 (Claude Code)' : fullClaudeHelp,
+        stderr: '',
+      })),
+    });
+
+    expect(report.runtimes[1]).toMatchObject({
+      runtime: 'claude',
+      status: 'compatibility-only',
+      reason: 'Missing managed-run capabilities: approvals, usage reporting. Managed approval and usage protocols require Claude Code 2.1.208 or newer.',
+      capabilities: [
+        { capability: 'structured-events', supported: true },
+        { capability: 'continuation', supported: true },
+        { capability: 'approvals', supported: false },
+        { capability: 'usage-reporting', supported: false },
+        { capability: 'execution-restrictions', supported: true },
+      ],
+    });
+  });
+
   it('reports an installed but unsupported runtime as compatibility-only with exact missing capabilities', async () => {
     const outputs: Record<string, string> = {
       '--version': 'codex-cli 0.99.0',
-      '--help': 'Commands: exec app-server\n--sandbox <MODE>\n--ask-for-approval <POLICY>\n--add-dir <DIR>',
-      'exec --help': '--json\n--sandbox <MODE>\n--ask-for-approval <POLICY>',
-      'exec resume --help': 'Resume a previous session\n--json\nSESSION_ID',
       'app-server --help': 'Run the app server\n--listen <URL>\nstdio://',
+      'app-server generate-json-schema --help': 'Generate JSON Schema\n--out <DIR>',
     };
 
     const report = await probeRuntimeReadiness({
       resolveExecutable: (runtime) => runtime === 'codex' ? '/private/bin/codex' : undefined,
+      inspectCodexProtocol: async () => ({ ...fullCodexProtocol, 'execution-restrictions': false }),
       run: vi.fn(async (_executable: string, args: readonly string[]) => ({
         stdout: outputs[args.join(' ')] ?? '',
         stderr: '',
@@ -185,6 +219,22 @@ describe('probeRuntimeReadiness', () => {
       ],
     });
   });
+
+  it('reports an installed runtime as unavailable with a precise sanitized probe failure', async () => {
+    const timedOut = Object.assign(new Error('raw error with /private/config'), { code: 'ETIMEDOUT' });
+
+    const report = await probeRuntimeReadiness({
+      resolveExecutable: (runtime) => runtime === 'claude' ? '/private/bin/claude' : undefined,
+      run: vi.fn(async () => { throw timedOut; }),
+    });
+
+    expect(report.runtimes[1]).toMatchObject({
+      runtime: 'claude',
+      status: 'unavailable',
+      reason: expect.stringContaining('Inspection failures: claude --version timed out; claude --help timed out.'),
+    });
+    expect(JSON.stringify(report.runtimes[1])).not.toContain('/private/config');
+  });
 });
 
 describe('createRuntimeReadinessSource', () => {
@@ -200,6 +250,7 @@ describe('createRuntimeReadinessSource', () => {
       },
       now: () => new Date('2026-09-01T14:00:00.000Z'),
       resolveExecutable: (runtime) => `/private/bin/${runtime}`,
+      inspectCodexProtocol: async () => fullCodexProtocol,
       execute: async (executable, args, options) => {
         calls.push({ executable, args, options });
         return {
@@ -218,20 +269,75 @@ describe('createRuntimeReadinessSource', () => {
     }).toEqual({
       commands: [
         'codex --version',
-        'codex --help',
-        'codex exec --help',
-        'codex exec resume --help',
         'codex app-server --help',
+        'codex app-server generate-json-schema --help',
         'claude --version',
         'claude --help',
       ],
-      options: Array.from({ length: 7 }, () => ({
+      options: Array.from({ length: 5 }, () => ({
         encoding: 'utf8',
-        env: { PATH: '/safe/bin', LANG: 'C', LC_ALL: 'C', NO_COLOR: '1' },
+        env: {
+          PATH: ['/private/bin', path.dirname(process.execPath), '/safe/bin'].join(path.delimiter),
+          LANG: 'C',
+          LC_ALL: 'C',
+          NO_COLOR: '1',
+        },
         maxBuffer: 1024 * 1024,
         timeout: 5000,
       })),
       exposesSensitiveOutput: false,
+    });
+  });
+
+  it('derives the Codex contract from generated protocol schemas without starting a Run', async () => {
+    const commands: string[] = [];
+    const source = createRuntimeReadinessSource({
+      resolveExecutable: (runtime) => runtime === 'codex' ? '/private/bin/codex' : undefined,
+      execute: async (_executable, args) => {
+        commands.push(args.join(' '));
+        if (args[0] === '--version') return { stdout: 'codex-cli 0.152.0', stderr: '' };
+        if (args.join(' ') === 'app-server --help') {
+          return { stdout: 'Run the app server\nstdio://', stderr: '' };
+        }
+        if (args.join(' ') === 'app-server generate-json-schema --help') {
+          return { stdout: 'Generate JSON Schema\n--out <DIR>', stderr: '' };
+        }
+        const outIndex = args.indexOf('--out');
+        if (outIndex >= 0) {
+          const directory = args[outIndex + 1]!;
+          fs.mkdirSync(path.join(directory, 'v2'), { recursive: true });
+          fs.writeFileSync(path.join(directory, 'ServerNotification.json'), 'turn/started turn/completed item/started item/completed');
+          fs.writeFileSync(path.join(directory, 'CommandExecutionRequestApprovalParams.json'), '{}');
+          fs.writeFileSync(path.join(directory, 'CommandExecutionRequestApprovalResponse.json'), '{}');
+          fs.writeFileSync(path.join(directory, 'v2/ThreadResumeParams.json'), '{}');
+          fs.writeFileSync(path.join(directory, 'v2/ThreadResumeResponse.json'), '{}');
+          fs.writeFileSync(path.join(directory, 'v2/ThreadTokenUsageUpdatedNotification.json'), 'inputTokens outputTokens');
+          fs.writeFileSync(path.join(directory, 'v2/ThreadStartParams.json'), '"cwd" "sandbox" "approvalPolicy" "runtimeWorkspaceRoots" "environments"');
+        }
+        return { stdout: '', stderr: '' };
+      },
+    });
+
+    const report = await source.get();
+
+    expect({ runtime: report.runtimes[0], commands }).toMatchObject({
+      runtime: {
+        runtime: 'codex',
+        status: 'managed',
+        capabilities: [
+          { capability: 'structured-events', supported: true },
+          { capability: 'continuation', supported: true },
+          { capability: 'approvals', supported: true },
+          { capability: 'usage-reporting', supported: true },
+          { capability: 'execution-restrictions', supported: true },
+        ],
+      },
+      commands: [
+        '--version',
+        'app-server --help',
+        'app-server generate-json-schema --help',
+        expect.stringMatching(/^app-server generate-json-schema --out .* --experimental$/),
+      ],
     });
   });
 });
