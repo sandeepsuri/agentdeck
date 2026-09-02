@@ -225,8 +225,8 @@ describe('DurableWorkEngine.recover — crash mid-Attempt, after durable events 
   });
 });
 
-describe('DurableWorkEngine.recover — crash exactly at completion', () => {
-  it('leaves an already-completed Attempt untouched', async () => {
+describe('DurableWorkEngine.recover — crash exactly at completion, before verification (ticket 08)', () => {
+  it('ends the Attempt as failed rather than silently accepting an unverified outcome', async () => {
     const { store, repository, runsRoot } = setUp();
     const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
     const prepared = await engine.prepare((await engine.submit(workSpec(repository))).id);
@@ -249,16 +249,25 @@ describe('DurableWorkEngine.recover — crash exactly at completion', () => {
     }));
     // Even though the run's own status column was never separately written
     // (a real crash right after the completion event persisted, before any
-    // such write), the derived projection already reads 'completed'.
-    expect(store.getRun(prepared.id)?.status).toBe('completed');
+    // such write), the derived projection already reads 'verifying' — the
+    // runtime finished, but no verification-outcome event exists yet, so
+    // this is not a real terminal outcome (ticket 08 AC8).
+    expect(store.getRun(prepared.id)?.status).toBe('verifying');
 
     const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
     await restarted.recover();
 
+    // No live process survives the restart to run the gate commands that
+    // would have concluded verification — recover() (ticket 06) treats this
+    // exactly like any other Attempt abandoned mid-flight, appending one
+    // terminal failure event rather than ever assuming an unverified success.
     const recovered = restarted.get(prepared.id)!;
-    expect(recovered.status).toBe('completed');
-    if (recovered.attempt.state !== 'completed') throw new Error('expected completed');
-    expect(recovered.attempt.events).toHaveLength(2);
+    expect(recovered.status).toBe('failed');
+    if (recovered.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(recovered.attempt.reason).toContain('AgentDeck restarted before this Attempt finished');
+    expect(recovered.attempt.reason).toContain('runtime reported completion');
+    expect(recovered.attempt.reason).toContain('restarted before its changes could be verified');
+    expect(recovered.attempt.events).toHaveLength(3);
   });
 });
 

@@ -7,7 +7,7 @@
 // long-lived one would show.
 import type { AgentType } from '../types.js';
 import type {
-  AttemptEvent, AttemptState, RunAttentionRequest, WorkRun,
+  AttemptEvent, AttemptState, RunAttentionRequest, VerificationOutcome, WorkRun,
 } from './types.js';
 
 export interface AttemptRecordMeta {
@@ -18,10 +18,24 @@ export interface AttemptRecordMeta {
 /**
  * `record` is undefined when no Attempt has ever been started for the Run —
  * projects to 'idle'. Otherwise the ordered `events` (already durable,
- * already deduplicated) decide the rest: no terminal event yet means
- * 'running'; a trailing completion or failure event freezes the matching
- * terminal state, exactly as the runtime adapter contract guarantees at
- * most one such event, and only ever last.
+ * already deduplicated) decide the rest:
+ *
+ * - a trailing 'failure' event freezes 'failed' — a runtime failure never
+ *   goes through verification (ticket 08 AC6);
+ * - a trailing 'verification-outcome' event (ticket 08) freezes 'completed'
+ *   — the runtime itself always finished normally for one to exist at all,
+ *   whichever gate outcome it records; RunStatus (deriveRunStatus below) is
+ *   where that outcome (verified/unverified/failed_verification) actually
+ *   surfaces;
+ * - anything else — including a trailing 'completion' event with no
+ *   verification-outcome yet, or a 'verification-check' evidence event mid
+ *   repair cycle — means the Attempt has not truly settled: verification or
+ *   a repair round is still in progress (or, after a restart with no live
+ *   process left to finish it, permanently unresolved — see recovery.ts's
+ *   describeUnverifiedCompletion). Reporting 'running' here, not 'completed',
+ *   is what lets DurableWorkEngine.recover() (ticket 06) still treat it as
+ *   abandoned mid-flight instead of silently accepting an unverified outcome
+ *   (ticket 08 AC8).
  */
 export function projectAttemptState(
   record: AttemptRecordMeta | undefined,
@@ -30,14 +44,15 @@ export function projectAttemptState(
   if (!record) return { state: 'idle' };
   const { runtime, startedAt } = record;
   const last = events.at(-1);
-  if (last?.kind === 'completion') {
-    return {
-      state: 'completed', runtime, startedAt, events, completedAt: last.at,
-    };
-  }
   if (last?.kind === 'failure') {
     return {
       state: 'failed', runtime, startedAt, events, failedAt: last.at, reason: last.reason,
+    };
+  }
+  if (last?.kind === 'verification-outcome') {
+    const completedAt = [...events].reverse().find((event) => event.kind === 'completion')?.at ?? last.at;
+    return {
+      state: 'completed', runtime, startedAt, events, completedAt,
     };
   }
   return { state: 'running', runtime, startedAt, events };
@@ -71,19 +86,40 @@ export function deriveOpenAttentionRequest(attempt: AttemptState): RunAttentionR
   return open.values().next().value;
 }
 
+const VERIFICATION_OUTCOME_STATUS: Readonly<Record<VerificationOutcome, WorkRun['status']>> = {
+  verified: 'completed',
+  unverified: 'completed_unverified',
+  failed_verification: 'failed_verification',
+};
+
 /**
- * The other half of ticket 06 AC4: once an Attempt exists, its own terminal
- * state is a Run's `status` for exactly the running/completed/failed values
- * — never written separately, so the two can never be found disagreeing
- * after a crash (see Store.attachAttempt, the only caller).
+ * Ticket 08: while an Attempt's own AttemptState reads 'running', its
+ * trailing event tells the finer-grained story RunStatus surfaces —
+ * 'verifying' once the runtime finished and gates are being run or a repair
+ * round decided on, back to plain 'running' the instant a repair round's own
+ * 'attempt-started' lifecycle event lands (it is doing runtime work again,
+ * not waiting on verification).
+ */
+function isVerifying(events: readonly AttemptEvent[]): boolean {
+  const last = events.at(-1);
+  return last?.kind === 'completion' || last?.kind === 'verification-check';
+}
+
+/**
+ * The other half of ticket 06 AC4 (extended by ticket 08): once an Attempt
+ * exists, its own terminal state is a Run's `status` — never written
+ * separately, so the two can never be found disagreeing after a crash (see
+ * Store.attachAttempt, the only caller).
  *
  * A raw `status` of 'cancelled' still takes priority over a merely-'running'
  * Attempt: cancel() writes it precisely so that intent stays visible while
  * the Attempt has not yet reached a real terminal state (ticket 06 doesn't
- * stop the underlying process — that's ticket 09's "safe controls"). But a
- * definitive completion or failure event always wins over it: the real
- * outcome, once known, is never hidden behind a stale cancellation request
- * that lost the race.
+ * stop the underlying process — that's ticket 09's "safe controls"; ticket
+ * 08's verification/repair loop does check for it between rounds, so a
+ * cancellation made during verification actually stops further repair work,
+ * not just this cosmetic read). But a definitive failure or verification
+ * outcome always wins over it: the real outcome, once known, is never hidden
+ * behind a stale cancellation request that lost the race.
  *
  * Ticket 07: a still-open attention request reports 'waiting_approval' or
  * 'waiting_input' instead of the bare 'running' those statuses already
@@ -95,11 +131,19 @@ export function deriveRunStatus(
   attempt: AttemptState,
   pendingAttention?: RunAttentionRequest,
 ): WorkRun['status'] {
-  if (attempt.state === 'completed' || attempt.state === 'failed') return attempt.state;
+  if (attempt.state === 'failed') return 'failed';
+  if (attempt.state === 'completed') {
+    const outcome = attempt.events.at(-1);
+    // projectAttemptState only ever freezes 'completed' from a trailing
+    // verification-outcome event — see its own doc comment.
+    if (outcome?.kind !== 'verification-outcome') throw new Error('expected a trailing verification-outcome event');
+    return VERIFICATION_OUTCOME_STATUS[outcome.outcome];
+  }
   if (rawStatus === 'cancelled') return 'cancelled';
   if (attempt.state === 'running') {
     if (pendingAttention?.kind === 'approval') return 'waiting_approval';
     if (pendingAttention?.kind === 'input') return 'waiting_input';
+    if (isVerifying(attempt.events)) return 'verifying';
     return 'running';
   }
   return rawStatus;

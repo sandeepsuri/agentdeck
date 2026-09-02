@@ -8,7 +8,7 @@ describe('classifyEventDurability', () => {
   it('classifies every current AttemptEvent kind as durable', () => {
     const kinds: AttemptEvent['kind'][] = [
       'lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure',
-      'attention-requested', 'attention-resolved',
+      'attention-requested', 'attention-resolved', 'verification-check', 'verification-outcome',
     ];
     for (const kind of kinds) expect(classifyEventDurability(kind)).toBe('durable');
   });
@@ -63,6 +63,26 @@ describe('buildAttemptEventEnvelope', () => {
     const second = buildAttemptEventEnvelope({ runId: 'run-1', attemptId: 'attempt-2', event });
 
     expect(second.dedupeKey).not.toBe(first.dedupeKey);
+  });
+
+  it('scopes the dedupe key to an explicit dedupeScope, so a repair round\'s structurally identical event never collides with an earlier round\'s (ticket 08)', () => {
+    const startedEvent: AttemptEvent = { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:00.000Z', phase: 'attempt-started' };
+
+    const initialRound = buildAttemptEventEnvelope({ runId: 'run-1', attemptId: 'attempt-1', event: startedEvent });
+    const repairRound = buildAttemptEventEnvelope({
+      runId: 'run-1', attemptId: 'attempt-1', event: startedEvent, dedupeScope: 'attempt-1:repair-1',
+    });
+
+    expect(repairRound.dedupeKey).not.toBe(initialRound.dedupeKey);
+  });
+
+  it('defaults dedupeScope to attemptId, exactly ticket 06/07\'s original behavior, when none is given', () => {
+    const withoutScope = buildAttemptEventEnvelope({ runId: 'run-1', attemptId: 'attempt-1', event });
+    const withDefaultScope = buildAttemptEventEnvelope({
+      runId: 'run-1', attemptId: 'attempt-1', event, dedupeScope: 'attempt-1',
+    });
+
+    expect(withoutScope.dedupeKey).toBe(withDefaultScope.dedupeKey);
   });
 
   it('strips any field outside the shared AttemptEvent shape before it reaches the envelope (ticket 06 AC8 defense in depth)', () => {

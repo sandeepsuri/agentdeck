@@ -8,7 +8,7 @@ import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
-  AttemptEvent, RunEnvelopeState, RunPreparation, WorkRun, WorkSpec,
+  AttemptEvent, RepositoryVerificationPolicy, RunEnvelopeState, RunPreparation, RunVerificationPolicyState, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
@@ -87,7 +87,7 @@ function rowToTask(r: TaskRow): Task {
 
 interface RunRow {
   id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
-  preparation: string; envelope: string;
+  preparation: string; envelope: string; verification_policy: string;
 }
 
 interface AttemptRow {
@@ -112,6 +112,7 @@ function rowToRun(r: RunRow): RawRun {
     submittedAt: r.submitted_at,
     preparation: JSON.parse(r.preparation) as RunPreparation,
     envelope: JSON.parse(r.envelope) as RunEnvelopeState,
+    verificationPolicy: JSON.parse(r.verification_policy) as RunVerificationPolicyState,
   };
 }
 
@@ -276,8 +277,8 @@ export class Store {
     this.db.transaction(() => {
       this.saveTask(task);
       this.db.prepare(
-        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope)
-         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope)`,
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, verification_policy)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @verificationPolicy)`,
       ).run({
         id: run.id,
         taskId: run.taskId,
@@ -286,6 +287,7 @@ export class Store {
         submittedAt: run.submittedAt,
         preparation: JSON.stringify(run.preparation),
         envelope: JSON.stringify(run.envelope),
+        verificationPolicy: JSON.stringify(run.verificationPolicy),
       });
     })();
   }
@@ -300,15 +302,17 @@ export class Store {
       .map((row) => this.attachAttempt(rowToRun(row)));
   }
 
-  /** Updates a Run's status, preparation, and envelope. The frozen spec never changes; Attempt state is durable elsewhere (see appendAttemptEvent). */
-  updateRun(run: Pick<WorkRun, 'id' | 'status' | 'preparation' | 'envelope'>): void {
+  /** Updates a Run's status, preparation, envelope, and verification policy. The frozen spec never changes; Attempt state is durable elsewhere (see appendAttemptEvent). */
+  updateRun(run: Pick<WorkRun, 'id' | 'status' | 'preparation' | 'envelope' | 'verificationPolicy'>): void {
     this.db.prepare(
-      'UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope WHERE id = @id',
+      `UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope,
+         verification_policy = @verificationPolicy WHERE id = @id`,
     ).run({
       id: run.id,
       status: run.status,
       preparation: JSON.stringify(run.preparation),
       envelope: JSON.stringify(run.envelope),
+      verificationPolicy: JSON.stringify(run.verificationPolicy),
     });
   }
 
@@ -395,6 +399,28 @@ export class Store {
 
   listRepos(): Repo[] {
     return (this.db.prepare('SELECT * FROM repos ORDER BY name').all() as RepoRow[]).map(rowToRepo);
+  }
+
+  // -- repository verification policy (ticket 08) --
+  //
+  // Deliberately its own table, not a column on `repos`: that table is
+  // rewritten wholesale by periodic filesystem discovery (git/scan.ts),
+  // which knows nothing about verification and would otherwise silently
+  // drop an admin's approved policy on the next scan.
+
+  /** Sets (or replaces) the admin-approved verification policy for a Repository. */
+  setRepositoryVerificationPolicy(repoId: string, policy: RepositoryVerificationPolicy): void {
+    this.db.prepare(
+      `INSERT INTO repo_verification_policy (repo_id, policy) VALUES (@repoId, @policy)
+       ON CONFLICT(repo_id) DO UPDATE SET policy = excluded.policy`,
+    ).run({ repoId, policy: JSON.stringify(policy) });
+  }
+
+  /** Undefined means no policy has ever been approved for this Repository — never conflated with an explicit no-verification declaration. */
+  getRepositoryVerificationPolicy(repoId: string): RepositoryVerificationPolicy | undefined {
+    const row = this.db.prepare('SELECT policy FROM repo_verification_policy WHERE repo_id = ?')
+      .get(repoId) as { policy: string } | undefined;
+    return row ? (JSON.parse(row.policy) as RepositoryVerificationPolicy) : undefined;
   }
 
   // -- events archive --

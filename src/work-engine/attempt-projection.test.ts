@@ -25,14 +25,58 @@ describe('projectAttemptState', () => {
     });
   });
 
-  it('freezes completed from a trailing completion event', () => {
+  it('reports running (not completed) from a trailing completion event with no verification-outcome yet (ticket 08: verification is still pending)', () => {
     const events: AttemptEvent[] = [
       { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started' },
       { kind: 'completion', sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'success' },
     ];
     expect(projectAttemptState(record, events)).toEqual({
+      state: 'running', runtime: 'codex', startedAt: record.startedAt, events,
+    });
+  });
+
+  it('reports running while a verification-check evidence event is the trailing event, mid repair cycle', () => {
+    const events: AttemptEvent[] = [
+      { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started' },
+      { kind: 'completion', sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'success' },
+      {
+        kind: 'verification-check', sequence: 2, at: '2026-09-01T00:01:01.000Z', gate: 'tests', command: 'npm test',
+        required: true, passed: false, exitCode: 1, evidence: 'boom',
+      },
+    ];
+    expect(projectAttemptState(record, events)).toEqual({
+      state: 'running', runtime: 'codex', startedAt: record.startedAt, events,
+    });
+  });
+
+  it('freezes completed from a trailing verification-outcome event, using the last completion event\'s timestamp', () => {
+    const events: AttemptEvent[] = [
+      { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started' },
+      { kind: 'completion', sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'success' },
+      {
+        kind: 'verification-outcome', sequence: 2, at: '2026-09-01T00:01:05.000Z', outcome: 'verified', repairAttempts: 0,
+      },
+    ];
+    expect(projectAttemptState(record, events)).toEqual({
       state: 'completed', runtime: 'codex', startedAt: record.startedAt, events, completedAt: '2026-09-01T00:01:00.000Z',
     });
+  });
+
+  it('uses the most recent completion event\'s timestamp when a repair round produced a second one', () => {
+    const events: AttemptEvent[] = [
+      { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started' },
+      { kind: 'completion', sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'success' },
+      {
+        kind: 'verification-check', sequence: 2, at: '2026-09-01T00:01:01.000Z', gate: 'tests', command: 'npm test',
+        required: true, passed: false, exitCode: 1, evidence: 'boom',
+      },
+      { kind: 'lifecycle', sequence: 3, at: '2026-09-01T00:02:00.000Z', phase: 'attempt-started' },
+      { kind: 'completion', sequence: 4, at: '2026-09-01T00:03:00.000Z', outcome: 'success' },
+      {
+        kind: 'verification-outcome', sequence: 5, at: '2026-09-01T00:03:05.000Z', outcome: 'verified', repairAttempts: 1,
+      },
+    ];
+    expect(projectAttemptState(record, events)).toMatchObject({ state: 'completed', completedAt: '2026-09-01T00:03:00.000Z' });
   });
 
   it('freezes failed with the precise reason from a trailing failure event', () => {
@@ -61,9 +105,20 @@ describe('projectAttemptState', () => {
 
 describe('deriveRunStatus', () => {
   const running: AttemptState = { state: 'running', runtime: 'codex', startedAt: record.startedAt, events: [] };
-  const completed: AttemptState = {
-    state: 'completed', runtime: 'codex', startedAt: record.startedAt, events: [], completedAt: '2026-09-01T00:01:00.000Z',
-  };
+  function completedWith(outcome: AttemptEvent & { kind: 'verification-outcome' }): AttemptState {
+    return {
+      state: 'completed', runtime: 'codex', startedAt: record.startedAt, events: [outcome], completedAt: '2026-09-01T00:01:00.000Z',
+    };
+  }
+  const completed = completedWith({
+    kind: 'verification-outcome', sequence: 0, at: '2026-09-01T00:01:05.000Z', outcome: 'verified', repairAttempts: 0,
+  });
+  const completedUnverified = completedWith({
+    kind: 'verification-outcome', sequence: 0, at: '2026-09-01T00:01:05.000Z', outcome: 'unverified', repairAttempts: 0,
+  });
+  const failedVerification = completedWith({
+    kind: 'verification-outcome', sequence: 0, at: '2026-09-01T00:01:05.000Z', outcome: 'failed_verification', repairAttempts: 2,
+  });
   const failed: AttemptState = {
     state: 'failed', runtime: 'codex', startedAt: record.startedAt, events: [], failedAt: '2026-09-01T00:01:00.000Z', reason: 'boom',
   };
@@ -90,6 +145,47 @@ describe('deriveRunStatus', () => {
   it('always reports the Attempt\'s own terminal outcome once it has one', () => {
     expect(deriveRunStatus('running', completed)).toBe('completed');
     expect(deriveRunStatus('running', failed)).toBe('failed');
+  });
+
+  it('maps each verification outcome to its own distinct RunStatus (ticket 08 AC6/AC7)', () => {
+    expect(deriveRunStatus('running', completed)).toBe('completed');
+    expect(deriveRunStatus('running', completedUnverified)).toBe('completed_unverified');
+    expect(deriveRunStatus('running', failedVerification)).toBe('failed_verification');
+  });
+
+  it('never hides a concluded verification outcome behind a stale cancellation request either', () => {
+    expect(deriveRunStatus('cancelled', completedUnverified)).toBe('completed_unverified');
+    expect(deriveRunStatus('cancelled', failedVerification)).toBe('failed_verification');
+  });
+
+  it('reports verifying once the runtime finished and gate evidence is being produced, distinct from plain running', () => {
+    const justCompleted: AttemptState = {
+      state: 'running',
+      runtime: 'codex',
+      startedAt: record.startedAt,
+      events: [{ kind: 'completion', sequence: 0, at: '2026-09-01T00:01:00.000Z', outcome: 'success' }],
+    };
+    const midCheck: AttemptState = {
+      state: 'running',
+      runtime: 'codex',
+      startedAt: record.startedAt,
+      events: [{
+        kind: 'verification-check', sequence: 1, at: '2026-09-01T00:01:01.000Z', gate: 'tests', command: 'npm test',
+        required: true, passed: false, exitCode: 1, evidence: 'boom',
+      }],
+    };
+    expect(deriveRunStatus('running', justCompleted)).toBe('verifying');
+    expect(deriveRunStatus('running', midCheck)).toBe('verifying');
+  });
+
+  it('reports running (not verifying) once a repair round starts doing runtime work again', () => {
+    const repairing: AttemptState = {
+      state: 'running',
+      runtime: 'codex',
+      startedAt: record.startedAt,
+      events: [{ kind: 'lifecycle', sequence: 2, at: '2026-09-01T00:01:02.000Z', phase: 'attempt-started' }],
+    };
+    expect(deriveRunStatus('running', repairing)).toBe('running');
   });
 
   it('reports waiting_approval or waiting_input while a request is open, and plain running once it is not', () => {

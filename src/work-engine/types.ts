@@ -46,6 +46,10 @@ export type RunStatus =
   | 'verifying'
   | 'reviewing'
   | 'completed'
+  /** Ticket 08 AC7: the Repository explicitly declares no verification — never conflated with ordinary success. */
+  | 'completed_unverified'
+  /** Ticket 08 AC6: required verification gates never passed within the bounded repair cycle — distinct from a plain runtime 'failed' and from 'cancelled'. */
+  | 'failed_verification'
   | 'failed'
   | 'cancelled';
 
@@ -65,6 +69,48 @@ export interface RunPreparation {
   /** Precise, recoverable explanation set only when state is 'failed'. */
   readonly error?: string;
 }
+
+// Ticket 08: verification gates. A VerificationGate is a durable-evidence
+// unit — a name and the exact shell command that decides pass/fail. Required
+// gates come from a Repository's admin-approved RepositoryVerificationPolicy,
+// resolved and frozen onto a Run before its Attempt executes (see
+// RunVerificationPolicyState); the runtime can never redefine them because
+// the Run only ever reads its own already-frozen copy again, never the
+// policy source. Supplemental gates come from the requester's own
+// WorkSpec.verificationIntent.commands and may only add checks, never stand
+// in for a required one.
+export interface VerificationGate {
+  readonly name: string;
+  readonly command: string;
+}
+
+/**
+ * The admin-approved verification declaration for one Repository — resolved
+ * from AgentDeck's own store, never from anything inside the Repository's
+ * working tree, so a runtime with write access to the worktree structurally
+ * cannot influence it (ticket 08 AC2). 'required' lists at least one gate
+ * every Run against this Repository must pass; 'no-verification' is an
+ * explicit admin declaration that this Repository is not verified — distinct
+ * from no policy having been configured at all (see RunVerificationPolicyState's
+ * 'missing', which is never inferred from this type).
+ */
+export type RepositoryVerificationPolicy =
+  | { readonly kind: 'required'; readonly gates: readonly VerificationGate[] }
+  | { readonly kind: 'no-verification' };
+
+/**
+ * The Repository verification policy resolved and frozen onto a Run once,
+ * during prepare() — alongside RunPreparation and RunEnvelopeState — and
+ * never re-read afterward. A later change to the Repository's approved
+ * policy (an admin edit, or a hostile one) can never retroactively alter an
+ * already-frozen Run (ticket 08 AC1/AC2).
+ */
+export type RunVerificationPolicyState =
+  | { readonly state: 'pending' }
+  | { readonly state: 'ready'; readonly requiredGates: readonly VerificationGate[] }
+  | { readonly state: 'declared-unverified' }
+  /** No RepositoryVerificationPolicy is configured at all — surfaced explicitly rather than silently treated as 'declared-unverified' (ticket 08 AC8). */
+  | { readonly state: 'missing'; readonly reason: string };
 
 /** A redacted pointer to secret material held in external secret storage. Never the secret value itself (ticket 04). */
 export interface SecretGrant {
@@ -169,6 +215,39 @@ export interface AttemptAttentionResolvedEvent extends AttemptEventBase {
   readonly input?: string;
 }
 
+// Ticket 08: durable, per-gate command-and-result evidence (AC4/AC5) — one
+// event per gate, per verification pass, whether it was a required gate from
+// the frozen RepositoryVerificationPolicy or a supplemental one the
+// requester selected. `evidence` is deliberately concise (bounded output,
+// never a raw unbounded log) so a runaway command can't blow up durable
+// storage, and so it stays "concise failure evidence" when handed back to
+// the runtime for a repair attempt.
+export interface AttemptVerificationCheckEvent extends AttemptEventBase {
+  readonly kind: 'verification-check';
+  readonly gate: string;
+  readonly command: string;
+  readonly required: boolean;
+  readonly passed: boolean;
+  readonly exitCode: number;
+  readonly evidence: string;
+}
+
+export type VerificationOutcome = 'verified' | 'unverified' | 'failed_verification';
+
+/**
+ * The single event that concludes verification for one Attempt — always
+ * exactly one, always last, exactly like completion/failure conclude an
+ * Attempt's own runtime execution (see projectAttemptState). `repairAttempts`
+ * is how many repair rounds ran before this outcome was reached (0 for a
+ * first-pass pass, an immediate 'unverified', or a 'failed_verification'
+ * from missing configuration with nothing to repair).
+ */
+export interface AttemptVerificationOutcomeEvent extends AttemptEventBase {
+  readonly kind: 'verification-outcome';
+  readonly outcome: VerificationOutcome;
+  readonly repairAttempts: number;
+}
+
 export type AttemptEvent =
   | AttemptLifecycleEvent
   | AttemptMessageEvent
@@ -177,7 +256,9 @@ export type AttemptEvent =
   | AttemptCompletionEvent
   | AttemptFailureEvent
   | AttemptAttentionRequestedEvent
-  | AttemptAttentionResolvedEvent;
+  | AttemptAttentionResolvedEvent
+  | AttemptVerificationCheckEvent
+  | AttemptVerificationOutcomeEvent;
 
 /**
  * The one canonical field list per AttemptEvent kind — the single source of
@@ -195,6 +276,8 @@ export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonl
   failure: ['kind', 'sequence', 'at', 'reason'],
   'attention-requested': ['kind', 'sequence', 'at', 'attentionId', 'attentionKind', 'reason'],
   'attention-resolved': ['kind', 'sequence', 'at', 'attentionId', 'decision', 'input'],
+  'verification-check': ['kind', 'sequence', 'at', 'gate', 'command', 'required', 'passed', 'exitCode', 'evidence'],
+  'verification-outcome': ['kind', 'sequence', 'at', 'outcome', 'repairAttempts'],
 };
 
 interface AttemptRunBase {
@@ -237,6 +320,8 @@ export interface WorkRun {
   readonly submittedAt: string;
   readonly preparation: RunPreparation;
   readonly envelope: RunEnvelopeState;
+  /** Ticket 08: the Repository's admin-approved verification policy, resolved and frozen once preparation completes. */
+  readonly verificationPolicy: RunVerificationPolicyState;
   readonly attempt: AttemptState;
   /**
    * Optional rather than always-present so existing WorkRun literals across

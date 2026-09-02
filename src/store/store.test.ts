@@ -188,6 +188,7 @@ describe('durable Attempt events (ticket 06)', () => {
         submittedAt: '2026-09-01T00:00:00.000Z',
         preparation: { state: 'pending' },
         envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
         attempt: { state: 'idle' },
       },
     );
@@ -216,7 +217,7 @@ describe('durable Attempt events (ticket 06)', () => {
     });
   });
 
-  it('derives status from a completed Attempt even though the raw runs.status column was never separately written', () => {
+  it('derives verifying (not completed) from a bare completion event — verification (ticket 08) has not concluded yet', () => {
     createRun('run-3');
     // No updateRun('running'/'completed') call ever happens here — the raw
     // column stays exactly 'queued' from createRun, exactly as a crash
@@ -232,7 +233,30 @@ describe('durable Attempt events (ticket 06)', () => {
       },
     }));
 
-    expect(store.getRun('run-3')?.status).toBe('completed');
+    expect(store.getRun('run-3')?.status).toBe('verifying');
+  });
+
+  it('derives status from a verification-outcome event even though the raw runs.status column was never separately written', () => {
+    createRun('run-3b');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-3b', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3b',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3b',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: '2026-09-01T00:06:05.000Z', outcome: 'verified', repairAttempts: 0,
+      },
+    }));
+
+    expect(store.getRun('run-3b')?.status).toBe('completed');
   });
 
   it('is idempotent: appending the same logical event twice never duplicates durable history', () => {
@@ -289,6 +313,7 @@ describe('durable Attempt events (ticket 06)', () => {
         submittedAt: '2026-09-01T00:00:00.000Z',
         preparation: { state: 'pending' },
         envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
         attempt: { state: 'idle' },
       },
     );
@@ -300,6 +325,13 @@ describe('durable Attempt events (ticket 06)', () => {
       attemptId: 'attempt-1',
       event: {
         kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+    firstStore.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-6',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: '2026-09-01T00:06:05.000Z', outcome: 'verified', repairAttempts: 0,
       },
     }));
     firstStore.close();

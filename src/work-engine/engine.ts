@@ -9,6 +9,10 @@ import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
 import { describeUnrecoverableAttempt } from './recovery.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
+import {
+  buildRepairObjective, createShellVerificationGateRunner, freezeVerificationPolicy, MAX_VERIFICATION_REPAIR_ATTEMPTS,
+} from './verification.js';
+import type { FailingGateEvidence, VerificationGateRunner } from './verification.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
   AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
@@ -115,7 +119,9 @@ function frozenCopy<T>(value: T): T {
   return deepFreeze(structuredClone(value));
 }
 
-const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set(['completed', 'failed', 'cancelled']);
+const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set([
+  'completed', 'completed_unverified', 'failed_verification', 'failed', 'cancelled',
+]);
 
 /** Durable entry point for submitting and reopening managed work. */
 export class DurableWorkEngine implements WorkEngine {
@@ -136,15 +142,20 @@ export class DurableWorkEngine implements WorkEngine {
     deliverDecision(attentionId: string, decision: AttentionDecisionInput): boolean;
   }>();
 
+  /** Ticket 08: runs one verification gate's exact command — injected so tests can stand in a fast, deterministic fake instead of the real shell/timeout implementation. */
+  private readonly verificationGateRunner: VerificationGateRunner;
+
   constructor(
     private readonly store: Store,
     runsRoot: string = path.join(defaultDataDir(), 'runs'),
     runtimeReadiness: RuntimeReadinessSource = createRuntimeReadinessSource(),
     runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = { codex: createCodexAttemptAdapter() },
+    verificationGateRunner: VerificationGateRunner = createShellVerificationGateRunner(),
   ) {
     this.runsRoot = runsRoot;
     this.runtimeReadiness = runtimeReadiness;
     this.runtimeAdapters = runtimeAdapters;
+    this.verificationGateRunner = verificationGateRunner;
   }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
@@ -164,6 +175,7 @@ export class DurableWorkEngine implements WorkEngine {
       submittedAt: new Date().toISOString(),
       preparation: { state: 'pending' },
       envelope: { state: 'pending' },
+      verificationPolicy: { state: 'pending' },
       attempt: { state: 'idle' },
     });
     const task: Task = {
@@ -214,8 +226,16 @@ export class DurableWorkEngine implements WorkEngine {
         readiness: await this.runtimeReadiness.get(),
         worktreePath: prepared.worktreePath,
       });
+      // Ticket 08 AC1/AC2: freeze the Repository's admin-approved
+      // verification policy at the same instant — resolved once, from
+      // AgentDeck's own store, never the Repository's working tree. A later
+      // change to the approved policy (an admin edit, or a hostile one)
+      // never reaches this already-frozen Run again.
+      const verificationPolicy = freezeVerificationPolicy(
+        this.store.getRepositoryVerificationPolicy(existing.spec.repository.id),
+      );
       const ready = frozenCopy<WorkRun>({
-        ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared }, envelope,
+        ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared }, envelope, verificationPolicy,
       });
       this.store.updateRun(ready);
       return ready;
@@ -303,21 +323,26 @@ export class DurableWorkEngine implements WorkEngine {
     // this one synchronous function, and JS never interleaves two
     // synchronous call stacks, centralizing assignment here instead makes
     // collision structurally impossible.
-    const persistEvent = (event: AttemptEvent): AttemptEvent => {
+    // `dedupeScope` defaults to `attemptId` in buildAttemptEventEnvelope —
+    // exactly ticket 06/07's original behavior for this Attempt's one
+    // adapter invocation. Ticket 08's repair rounds and verification passes
+    // pass their own scope (see runAdapterRound/runVerification) so a
+    // structurally-identical event from a *different* round or pass (a
+    // repeated 'attempt-started', or a gate that fails with the same
+    // evidence twice) is never mistaken for the same provider notification
+    // redelivered and silently dropped.
+    const persistEvent = (event: AttemptEvent, dedupeScope?: string): AttemptEvent => {
       const sequenced = { ...event, sequence: lastSequence + 1 };
       lastSequence = sequenced.sequence;
-      const eventEnvelope = buildAttemptEventEnvelope({ runId: base.id, attemptId, event: sequenced });
+      const eventEnvelope = buildAttemptEventEnvelope({
+        runId: base.id, attemptId, event: sequenced, dedupeScope,
+      });
       // No AttemptEvent kind is transient today (durable-events.ts) — this
       // guard is where a future message-delta or raw-output kind would be
       // dropped rather than persisted as source-of-truth history (ticket 06
       // AC3), so it stays even though it can never trigger yet.
       if (eventEnvelope.durability === 'durable') this.store.appendAttemptEvent(eventEnvelope);
       return sequenced;
-    };
-    const persistSynthesizedFailure = (reason: string, at: string = new Date().toISOString()): void => {
-      persistEvent({
-        kind: 'failure', sequence: 0, at, reason,
-      });
     };
 
     // Ticket 07: registered before the adapter ever runs so a decision made
@@ -357,18 +382,158 @@ export class DurableWorkEngine implements WorkEngine {
     };
 
     try {
-      for await (const event of adapter.run(context)) {
-        persistEvent(event);
-        if (event.kind === 'completion' || event.kind === 'failure') return;
+      const outcome = await this.runAdapterRound(adapter, context, persistEvent);
+      // Ticket 08: a plain runtime failure never goes through verification —
+      // it already ended the Run in 'failed' (AC6's "distinct from a
+      // runtime failure"). Only a real completion earns a verification pass.
+      if (outcome === 'completion') {
+        await this.runVerification(base, adapter, context, envelope, persistEvent);
       }
-      // The adapter contract (adapter.contract.ts) requires exactly one
-      // terminal event; an adapter that violates it still ends the Run in a
-      // precise, recoverable failure rather than leaving it stuck running.
-      persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
-    } catch (error) {
-      persistSynthesizedFailure(error instanceof Error ? error.message : String(error));
     } finally {
       this.liveAttempts.delete(base.id);
+    }
+  }
+
+  /**
+   * Runs one adapter invocation to its own terminal event — the initial
+   * Attempt round, or (ticket 08) one repair round handed a fresh, evidence-
+   * carrying `context.objective` — appending every event it yields through
+   * `persistEvent` unchanged. An adapter that violates its own contract
+   * (ends with no terminal event) or throws still ends the round in a
+   * precise, recoverable failure rather than leaving it stuck running.
+   */
+  private async runAdapterRound(
+    adapter: RuntimeAttemptAdapter,
+    context: AttemptLaunchContext,
+    persistEvent: (event: AttemptEvent, dedupeScope?: string) => AttemptEvent,
+    // Ticket 08: distinguishes a repair round's events (its own
+    // 'attempt-started', etc.) from the initial round's structurally
+    // identical ones — see persistEvent's own comment. undefined for the
+    // initial round preserves ticket 06/07's original dedupe scope exactly.
+    dedupeScope?: string,
+  ): Promise<'completion' | 'failure'> {
+    const persistSynthesizedFailure = (reason: string): void => {
+      persistEvent({
+        kind: 'failure', sequence: 0, at: new Date().toISOString(), reason,
+      }, dedupeScope);
+    };
+    try {
+      for await (const event of adapter.run(context)) {
+        persistEvent(event, dedupeScope);
+        if (event.kind === 'completion') return 'completion';
+        if (event.kind === 'failure') return 'failure';
+      }
+      persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
+      return 'failure';
+    } catch (error) {
+      persistSynthesizedFailure(error instanceof Error ? error.message : String(error));
+      return 'failure';
+    }
+  }
+
+  /**
+   * Ticket 08: runs the Run's frozen required gates (plus, unconditionally,
+   * any supplemental checks the requester selected — AC3, never a
+   * replacement for a required gate) against the Attempt's completed work,
+   * with a bounded repair cycle for a runtime that leaves any gate failing.
+   * Always ends by persisting exactly one 'verification-outcome' event,
+   * except when a cancellation is observed between rounds — the Run is then
+   * left exactly as it is, so deriveRunStatus (attempt-projection.ts)
+   * surfaces the cancellation instead of a fabricated outcome.
+   */
+  private async runVerification(
+    base: WorkRun,
+    adapter: RuntimeAttemptAdapter,
+    context: AttemptLaunchContext,
+    envelope: CapabilityEnvelope,
+    persistEvent: (event: AttemptEvent, dedupeScope?: string) => AttemptEvent,
+  ): Promise<void> {
+    const now = (): string => new Date().toISOString();
+    const isCancelled = (): boolean => this.store.getRun(base.id)?.status === 'cancelled';
+    const policy = base.verificationPolicy;
+
+    if (policy.state === 'missing') {
+      // AC8: never silently treated as success — a Repository with no
+      // approved policy at all cannot reach a verified outcome.
+      persistEvent({
+        kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'failed_verification', repairAttempts: 0,
+      });
+      return;
+    }
+    if (policy.state === 'declared-unverified') {
+      persistEvent({
+        kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'unverified', repairAttempts: 0,
+      });
+      return;
+    }
+    // 'pending' cannot happen here: start() only ever begins an Attempt once
+    // preparation is 'ready', which freezes verificationPolicy in the same
+    // step (see prepare()) — left as a documented no-op rather than an
+    // assertion so a future storage bug fails safe instead of throwing
+    // mid-Attempt.
+    if (policy.state !== 'ready') return;
+
+    const gates: readonly { gate: { name: string; command: string }; required: boolean }[] = [
+      ...policy.requiredGates.map((gate) => ({ gate, required: true as const })),
+      ...base.spec.verificationIntent.commands.map((command) => ({ gate: { name: command, command }, required: false as const })),
+    ];
+
+    let repairAttempts = 0;
+    for (;;) {
+      if (isCancelled()) return;
+
+      // Ticket 08: each verification pass gets its own dedupe scope — a gate
+      // that fails with byte-identical evidence on this pass and the last
+      // one is a distinct, newly-observed fact, not the same event
+      // redelivered (see persistEvent's own comment).
+      const passScope = `verify-${repairAttempts}`;
+      const failing: FailingGateEvidence[] = [];
+      // Gates run sequentially, in the order the frozen policy lists them,
+      // so evidence stays deterministic run to run.
+      for (const { gate, required } of gates) {
+        const result = await this.verificationGateRunner(gate, envelope.profile.writableWorktree);
+        persistEvent({
+          kind: 'verification-check',
+          sequence: 0,
+          at: now(),
+          gate: gate.name,
+          command: gate.command,
+          required,
+          passed: result.passed,
+          exitCode: result.exitCode,
+          evidence: result.evidence,
+        }, passScope);
+        if (!result.passed) failing.push({ gate, required, result });
+      }
+
+      if (failing.length === 0) {
+        persistEvent({
+          kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'verified', repairAttempts,
+        });
+        return;
+      }
+      if (isCancelled()) return;
+      if (repairAttempts >= MAX_VERIFICATION_REPAIR_ATTEMPTS) {
+        persistEvent({
+          kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'failed_verification', repairAttempts,
+        });
+        return;
+      }
+
+      repairAttempts += 1;
+      const repairContext: AttemptLaunchContext = {
+        ...context,
+        objective: buildRepairObjective(base.spec.objective, failing),
+      };
+      // Each repair round must finish (and its gates re-checked) before
+      // deciding on the next one. Its own scope (see runAdapterRound's own
+      // comment) keeps its 'attempt-started' event from colliding with an
+      // earlier round's structurally-identical one.
+      const outcome = await this.runAdapterRound(adapter, repairContext, persistEvent, `repair-${repairAttempts}`);
+      // A repair round that itself fails is a runtime failure, not a
+      // verification failure (AC6) — runAdapterRound already persisted the
+      // terminal 'failure' event, so there is nothing left to conclude here.
+      if (outcome === 'failure') return;
     }
   }
 

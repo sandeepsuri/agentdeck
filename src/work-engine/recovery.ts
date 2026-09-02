@@ -49,6 +49,22 @@ function describePendingAttention(events: readonly AttemptEvent[]): string | und
     + `request (${last.reason}) that was never resolved before the restart.`;
 }
 
+/**
+ * Ticket 08 AC8, extended to restart: a trailing 'completion' event (the
+ * runtime finished) or 'verification-check' event (a repair round's gates
+ * are being re-checked) with no matching 'verification-outcome' means
+ * verification never concluded — no live process survives the restart to
+ * finish running gate commands, so this is stated plainly rather than ever
+ * assumed to have passed (see projectAttemptState, which reports these same
+ * Attempts as still 'running' for exactly this reason).
+ */
+function describeUnverifiedCompletion(events: readonly AttemptEvent[]): string | undefined {
+  const last = events.at(-1);
+  if (last?.kind !== 'completion' && last?.kind !== 'verification-check') return undefined;
+  return 'The runtime reported completion, but AgentDeck restarted before its changes could be verified — no '
+    + 'live process remains to finish that check, so the outcome is not assumed.';
+}
+
 /** Whether the installed runtime's own CLI reports structured continuation support — never, by itself, whether resuming is actually safe (see describeUnrecoverableAttempt). */
 export function isContinuationSupported(readiness: RuntimeReadinessReport, runtime: AgentType): boolean {
   const runtimeReadiness = readiness.runtimes.find((candidate) => candidate.runtime === runtime);
@@ -73,5 +89,7 @@ export function describeUnrecoverableAttempt(
   const ambiguous = describeAmbiguousActivity(events);
   if (ambiguous) return `${base} ${ambiguous}`;
   const pendingAttention = describePendingAttention(events);
-  return pendingAttention ? `${base} ${pendingAttention}` : base;
+  if (pendingAttention) return `${base} ${pendingAttention}`;
+  const unverifiedCompletion = describeUnverifiedCompletion(events);
+  return unverifiedCompletion ? `${base} ${unverifiedCompletion}` : base;
 }

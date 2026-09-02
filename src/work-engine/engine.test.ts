@@ -16,7 +16,9 @@ import {
 } from './engine.js';
 import { runBranchName, runWorktreePath } from './prepare.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
-import type { RunRepository, WorkSpec } from './types.js';
+import { createShellVerificationGateRunner, MAX_VERIFICATION_REPAIR_ATTEMPTS } from './verification.js';
+import type { GateExecutionResult, VerificationGateRunner } from './verification.js';
+import type { RunRepository, WorkRun, WorkSpec } from './types.js';
 
 const tempDirectories: string[] = [];
 
@@ -48,6 +50,13 @@ function initGitRepo(dir: string): void {
 function registerGitRepository(store: Store, repoPath: string): RunRepository {
   const repository: RunRepository = { id: repoPath, name: path.basename(repoPath), path: repoPath };
   store.upsertRepo(repository);
+  // Ticket 08: these tests are about preparation/envelope/Attempt behavior,
+  // not verification — an explicit no-verification declaration keeps a
+  // successful Attempt reaching 'completed_unverified' instead of the
+  // 'failed_verification' a Repository with no approved policy at all would
+  // now correctly produce (AC8). Verification/repair behavior itself is
+  // covered by its own describe block below.
+  store.setRepositoryVerificationPolicy(repository.id, { kind: 'no-verification' });
   return repository;
 }
 
@@ -80,6 +89,7 @@ function workSpec(): WorkSpec {
 
 function registerRepository(store: Store): void {
   store.upsertRepo({ id: '/repos/agentdeck', name: 'agentdeck', path: '/repos/agentdeck' });
+  store.setRepositoryVerificationPolicy('/repos/agentdeck', { kind: 'no-verification' });
 }
 
 afterEach(() => {
@@ -477,11 +487,12 @@ describe('DurableWorkEngine.start', () => {
     expect(started.attempt).toMatchObject({ state: 'running', runtime: 'codex' });
 
     const settled = await waitForSettled(engine, prepared.id);
-    expect(settled.status).toBe('completed');
+    expect(settled.status).toBe('completed_unverified');
     expect(settled.attempt.state).toBe('completed');
     if (settled.attempt.state !== 'completed') throw new Error('expected completed');
     expect(settled.attempt.events.map((event) => event.kind)).toEqual([
       'lifecycle', 'lifecycle', 'tool-activity', 'tool-activity', 'message', 'usage', 'lifecycle', 'completion',
+      'verification-outcome',
     ]);
     expect(settled.attempt.events[0]).toMatchObject({ kind: 'lifecycle', phase: 'attempt-started' });
     expect(fake.writes.some((line) => line.includes(prepared.preparation.worktreePath!))).toBe(true);
@@ -573,7 +584,7 @@ describe('DurableWorkEngine.start', () => {
     const reopenedStore = new Store(dbPath);
     const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id);
 
-    expect(reopened?.status).toBe('completed');
+    expect(reopened?.status).toBe('completed_unverified');
     expect(reopened?.attempt.state).toBe('completed');
     reopenedStore.close();
   });
@@ -601,8 +612,19 @@ describe('DurableWorkEngine.start', () => {
         kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success',
       },
     }));
+    // A completion event with no verification-outcome yet is not a real
+    // terminal outcome (ticket 08) — the stale cancellation still surfaces.
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
 
-    expect(engine.get(prepared.id)?.status).toBe('completed');
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id,
+      attemptId: 'attempt-cancel-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'unverified', repairAttempts: 0,
+      },
+    }));
+
+    expect(engine.get(prepared.id)?.status).toBe('completed_unverified');
     store.close();
   });
 });
@@ -665,7 +687,7 @@ describe('DurableWorkEngine.resolveAttention', () => {
       .rejects.toThrow(RunAttentionNotPendingError);
 
     const settled = await waitForSettled(engine, started.id);
-    expect(settled.status).toBe('completed');
+    expect(settled.status).toBe('completed_unverified');
     if (settled.attempt.state !== 'completed') throw new Error('expected completed');
     const resolvedEvents = settled.attempt.events.filter((event) => event.kind === 'attention-resolved');
     expect(resolvedEvents).toHaveLength(1);
@@ -693,7 +715,8 @@ describe('DurableWorkEngine.resolveAttention', () => {
     expect(settled.attempt.events).toContainEqual(
       expect.objectContaining({ kind: 'message', text: 'Continued after the pending attention request was resolved.' }),
     );
-    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'completion', outcome: 'success' });
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({ kind: 'completion', outcome: 'success' }));
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'unverified' });
     store.close();
   });
 
@@ -774,4 +797,260 @@ describe('DurableWorkEngine.resolveAttention', () => {
     await waitForSettled(engine, started.id);
     store.close();
   });
+});
+
+describe('DurableWorkEngine verification and repair (ticket 08)', () => {
+  function setUp(
+    runtimeAdapters: ConstructorParameters<typeof DurableWorkEngine>[3],
+    verificationGateRunner?: VerificationGateRunner,
+  ) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters, verificationGateRunner);
+    return { store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    return engine.get(runId)!;
+  }
+
+  function attemptStartCount(run: WorkRun): number {
+    if (run.attempt.state === 'idle') return 0;
+    return run.attempt.events.filter((event) => event.kind === 'lifecycle' && event.phase === 'attempt-started').length;
+  }
+
+  function codexAdapter(fake: ReturnType<typeof createFakeCodexAppServer>) {
+    return { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+  }
+
+  it('resolves required gates from the frozen Repository policy and reaches completed with durable command-and-result evidence once they pass (AC1/AC4)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async (gate) => ({ passed: true, exitCode: 0, evidence: `ok: ${gate.command}` });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'tests', command: 'npm test' }] });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', gate: 'tests', command: 'npm test', required: true, passed: true, exitCode: 0, evidence: 'ok: npm test',
+    }));
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'verified', repairAttempts: 0 });
+    store.close();
+  });
+
+  it('runs the requester\'s supplemental checks alongside required gates, never in place of them (AC3)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const seen: string[] = [];
+    const gateRunner: VerificationGateRunner = async (gate) => {
+      seen.push(gate.command);
+      return { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: ['npm run lint'] },
+    });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(seen).toEqual(['npm test', 'npm run lint']);
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', gate: 'npm run lint', required: false, passed: true,
+    }));
+    store.close();
+  });
+
+  it('hands concise failure evidence back to the same runtime and re-verifies once a repair round fixes the failing gate (AC5)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let call = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      call += 1;
+      return call === 1 ? { passed: false, exitCode: 1, evidence: 'expected 2 to equal 3' } : { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'verified', repairAttempts: 1 });
+    // A second 'attempt-started' lifecycle event proves the same runtime ran
+    // a fresh repair round in the same worktree, not that nothing happened.
+    expect(attemptStartCount(settled)).toBe(2);
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', passed: false, evidence: 'expected 2 to equal 3',
+    }));
+    store.close();
+  });
+
+  it('produces failed_verification once repairs are exhausted, distinct from a runtime failure or a cancellation (AC6)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    expect(settled.status).not.toBe('failed');
+    expect(settled.status).not.toBe('cancelled');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({
+      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: MAX_VERIFICATION_REPAIR_ATTEMPTS,
+    });
+    expect(attemptStartCount(settled)).toBe(MAX_VERIFICATION_REPAIR_ATTEMPTS + 1);
+    store.close();
+  });
+
+  it('produces completed_unverified for an explicit no-verification declaration, never plain success (AC7)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake));
+    // registerGitRepository already declares no-verification by default.
+    const prepared = await submitAndPrepare(engine, repository);
+    expect(prepared.verificationPolicy).toEqual({ state: 'declared-unverified' });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'unverified', repairAttempts: 0 });
+    store.close();
+  });
+
+  it('surfaces missing verification configuration as failed_verification rather than silently succeeding (AC8)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    // Deliberately no setRepositoryVerificationPolicy call — no admin
+    // approval exists for this Repository at all.
+    const repository: RunRepository = { id: repoPath, name: path.basename(repoPath), path: repoPath };
+    store.upsertRepo(repository);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), codexAdapter(fake));
+    const prepared = await submitAndPrepare(engine, repository);
+    expect(prepared.verificationPolicy.state).toBe('missing');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({
+      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: 0,
+    });
+    // No gates exist to check at all — nothing to repair, so no repair round runs.
+    expect(attemptStartCount(settled)).toBe(1);
+    store.close();
+  });
+
+  it('never lets a later change to the Repository\'s approved policy affect an already-frozen Run — "hostile configuration change" (AC1/AC2)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const seen: string[] = [];
+    const gateRunner: VerificationGateRunner = async (gate) => {
+      seen.push(gate.command);
+      return { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'original', command: 'echo original' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'original', command: 'echo original' }] });
+
+    // A later (or hostile) change to the Repository's approved policy — even
+    // weakening it to no-verification — must never reach a Run whose policy
+    // was already frozen at prepare() time.
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'no-verification' });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'original', command: 'echo original' }] });
+    expect(seen).toEqual(['echo original']);
+    expect(settled.status).toBe('completed');
+    store.close();
+  });
+
+  it('stops the repair loop the moment a cancellation is observed, never fabricating a verification outcome afterward (AC9: cancellation)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let checkCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      checkCalls += 1;
+      if (runId && engineHandle) await engineHandle.cancel(runId);
+      return { passed: false, exitCode: 1, evidence: 'still broken' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'cancelled');
+    // Give the in-flight verification loop's own cancellation check a chance
+    // to observe it and return, rather than racing the assertions below.
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+
+    expect(checkCalls).toBe(1);
+    const run = engine.get(prepared.id)!;
+    expect(run.status).toBe('cancelled');
+    if (run.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(run.attempt.events.some((event) => event.kind === 'verification-outcome')).toBe(false);
+    expect(attemptStartCount(run)).toBe(1);
+    store.close();
+  });
+
+  it('kills a hung required gate after its timeout and reports it as a failing gate, eventually reaching failed_verification (AC9: timeout)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), createShellVerificationGateRunner(50));
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'hang', command: 'sleep 5' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const checks = settled.attempt.events.filter((event) => event.kind === 'verification-check');
+    expect(checks.length).toBeGreaterThan(0);
+    for (const check of checks) {
+      expect(check).toMatchObject({ passed: false, evidence: expect.stringContaining('Timed out after 50ms') });
+    }
+    store.close();
+  }, 15000);
 });

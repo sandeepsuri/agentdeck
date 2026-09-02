@@ -44,6 +44,11 @@ function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngin
   const app = Fastify();
   const store = new Store(':memory:');
   store.upsertRepo({ id: repoPath, name: 'example', path: repoPath });
+  // These tests are about the REST surface, not verification (ticket 08) —
+  // an explicit no-verification declaration keeps a successful Attempt
+  // reaching 'completed_unverified' instead of the 'failed_verification' a
+  // Repository with no approved policy at all would now correctly produce.
+  store.setRepositoryVerificationPolicy(repoPath, { kind: 'no-verification' });
   const engine = runtimeAdapters
     ? new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), runtimeAdapters)
     : new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource());
@@ -194,10 +199,10 @@ describe('run Attempt start route', () => {
 
     await vi.waitUntil(async () => {
       const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
-      return polled.json().status === 'completed';
+      return polled.json().status === 'completed_unverified';
     });
     const settled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
-    expect(settled.json()).toMatchObject({ status: 'completed', attempt: { state: 'completed', runtime: 'codex' } });
+    expect(settled.json()).toMatchObject({ status: 'completed_unverified', attempt: { state: 'completed', runtime: 'codex' } });
   });
 
   it('refuses to start a second Attempt for the same Run', async () => {
@@ -215,7 +220,7 @@ describe('run Attempt start route', () => {
 
     await vi.waitUntil(async () => {
       const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
-      return polled.json().status === 'completed';
+      return polled.json().status === 'completed_unverified';
     });
   });
 });
@@ -260,7 +265,7 @@ describe('run attention routes (ticket 07)', () => {
 
     expect(approved.statusCode).toBe(200);
     expect(approved.json().pendingAttention).toBeUndefined();
-    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed');
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed_unverified');
   });
 
   it('denies a pending request through .../deny, and reports an already-resolved request precisely on a repeat call', async () => {
@@ -294,7 +299,7 @@ describe('run attention routes (ticket 07)', () => {
       headers: { 'content-type': 'application/json' }, payload: { value: 'Use TypeScript strict mode.' },
     });
     expect(provided.statusCode).toBe(200);
-    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed');
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed_unverified');
   });
 
   it('refuses to resolve an approval-kind request with input, reporting 400', async () => {
