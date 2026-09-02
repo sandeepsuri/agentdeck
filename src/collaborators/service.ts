@@ -28,6 +28,7 @@ export interface CollaboratorRow {
   displayName: string;
   createdAt: string;
   grantedRepositoryIds: string[];
+  grantedProfileIds: string[];
 }
 
 export interface InvitationRow {
@@ -51,7 +52,7 @@ export interface CollaboratorStore {
   createCollaborator(row: CollaboratorRow): void;
   getCollaborator(id: string): CollaboratorRow | undefined;
   listCollaborators(): CollaboratorRow[];
-  updateCollaboratorGrants(id: string, grantedRepositoryIds: string[]): void;
+  updateCollaboratorGrants(id: string, grants: { repositoryIds: string[]; profileIds: string[] }): void;
 
   createInvitation(row: InvitationRow, codeHash: string): void;
   getInvitationByCodeHash(codeHash: string): InvitationRow | undefined;
@@ -75,7 +76,7 @@ function randomBearer(bytes: number): string {
 function toCollaborator(row: CollaboratorRow): Collaborator {
   return {
     id: row.id, displayName: row.displayName, createdAt: row.createdAt,
-    grantedRepositoryIds: row.grantedRepositoryIds,
+    grantedRepositoryIds: row.grantedRepositoryIds, grantedProfileIds: row.grantedProfileIds,
   };
 }
 
@@ -125,10 +126,16 @@ export class CollaboratorService {
     return this.store.listDevices(collaboratorId).map(toDevice);
   }
 
-  updateGrants(collaboratorId: string, grantedRepositoryIds: readonly string[]): Collaborator {
-    if (!this.store.getCollaborator(collaboratorId)) throw new CollaboratorNotFoundError();
-    const unique = [...new Set(grantedRepositoryIds)];
-    this.store.updateCollaboratorGrants(collaboratorId, unique);
+  updateGrants(
+    collaboratorId: string,
+    grants: { repositoryIds?: readonly string[]; profileIds?: readonly string[] },
+  ): Collaborator {
+    const existing = this.store.getCollaborator(collaboratorId);
+    if (!existing) throw new CollaboratorNotFoundError();
+    this.store.updateCollaboratorGrants(collaboratorId, {
+      repositoryIds: [...new Set(grants.repositoryIds ?? existing.grantedRepositoryIds)],
+      profileIds: [...new Set(grants.profileIds ?? existing.grantedProfileIds)],
+    });
     return toCollaborator(this.store.getCollaborator(collaboratorId)!);
   }
 
@@ -143,6 +150,7 @@ export class CollaboratorService {
     displayName?: string;
     collaboratorId?: string;
     grantedRepositoryIds?: readonly string[];
+    grantedProfileIds?: readonly string[];
     ttlMs?: number;
   }): { invitation: Invitation; code: string; collaborator: Collaborator } {
     const now = this.now();
@@ -160,6 +168,7 @@ export class CollaboratorService {
         displayName: input.displayName.trim(),
         createdAt: now.toISOString(),
         grantedRepositoryIds: [...new Set(input.grantedRepositoryIds ?? [])],
+        grantedProfileIds: [...new Set(input.grantedProfileIds ?? [])],
       };
       this.store.createCollaborator(collaboratorRow);
     }
@@ -224,8 +233,10 @@ export class CollaboratorService {
     if (!collaboratorRow) return undefined;
     return {
       id: deviceRow.id,
+      label: deviceRow.deviceLabel,
       principal: { id: collaboratorRow.id, displayName: collaboratorRow.displayName },
       grantedRepositoryIds: collaboratorRow.grantedRepositoryIds,
+      grantedProfileIds: collaboratorRow.grantedProfileIds,
     };
   };
 

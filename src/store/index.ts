@@ -8,8 +8,8 @@ import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
-  AttemptEvent, RepositoryVerificationPolicy, RunEnvelopeState, RunPreparation, RunPrincipal, RunVerificationPolicyState,
-  WorkRun, WorkSpec,
+  AttemptEvent, Profile, RepositoryVerificationPolicy, RunActivity, RunActivityKind, RunActorDevice, RunEnvelopeState,
+  RunPreparation, RunPrincipal, RunVerificationPolicyState, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 import type {
@@ -138,13 +138,14 @@ function rowToRepo(r: RepoRow): Repo {
 }
 
 interface CollaboratorTableRow {
-  id: string; display_name: string; created_at: string; granted_repository_ids: string;
+  id: string; display_name: string; created_at: string; granted_repository_ids: string; granted_profile_ids: string;
 }
 
 function rowToCollaborator(r: CollaboratorTableRow): CollaboratorRow {
   return {
     id: r.id, displayName: r.display_name, createdAt: r.created_at,
     grantedRepositoryIds: fromJson<string[]>(r.granted_repository_ids) ?? [],
+    grantedProfileIds: fromJson<string[]>(r.granted_profile_ids) ?? [],
   };
 }
 
@@ -170,6 +171,39 @@ function rowToDevice(r: DeviceTableRow): DeviceRow {
   };
   if (r.revoked_at !== null) device.revokedAt = r.revoked_at;
   return device;
+}
+
+interface ProfileTableRow {
+  id: string; name: string; runtime_preference: string; budget: string; verification_intent: string;
+  requested_delivery_result: string; created_at: string;
+}
+
+function rowToProfile(r: ProfileTableRow): Profile {
+  return {
+    id: r.id,
+    name: r.name,
+    runtimePreference: JSON.parse(r.runtime_preference) as Profile['runtimePreference'],
+    budget: JSON.parse(r.budget) as Profile['budget'],
+    verificationIntent: JSON.parse(r.verification_intent) as Profile['verificationIntent'],
+    requestedDeliveryResult: r.requested_delivery_result as Profile['requestedDeliveryResult'],
+    createdAt: r.created_at,
+  };
+}
+
+interface RunActivityTableRow {
+  id: string; run_id: string; kind: string; principal: string; device: string | null; at: string;
+}
+
+function rowToRunActivity(r: RunActivityTableRow): RunActivity {
+  const activity: RunActivity = {
+    id: r.id,
+    runId: r.run_id,
+    kind: r.kind as RunActivityKind,
+    principal: JSON.parse(r.principal) as RunPrincipal,
+    at: r.at,
+  };
+  const device = fromJson<RunActorDevice>(r.device);
+  return device !== undefined ? { ...activity, device } : activity;
 }
 
 // --- store -------------------------------------------------------------------
@@ -514,9 +548,13 @@ export class Store implements CollaboratorStore {
 
   createCollaborator(row: CollaboratorRow): void {
     this.db.prepare(
-      `INSERT INTO collaborators (id, display_name, created_at, granted_repository_ids)
-       VALUES (@id, @displayName, @createdAt, @grantedRepositoryIds)`,
-    ).run({ ...row, grantedRepositoryIds: JSON.stringify(row.grantedRepositoryIds) });
+      `INSERT INTO collaborators (id, display_name, created_at, granted_repository_ids, granted_profile_ids)
+       VALUES (@id, @displayName, @createdAt, @grantedRepositoryIds, @grantedProfileIds)`,
+    ).run({
+      ...row,
+      grantedRepositoryIds: JSON.stringify(row.grantedRepositoryIds),
+      grantedProfileIds: JSON.stringify(row.grantedProfileIds),
+    });
   }
 
   getCollaborator(id: string): CollaboratorRow | undefined {
@@ -529,9 +567,9 @@ export class Store implements CollaboratorStore {
       .map(rowToCollaborator);
   }
 
-  updateCollaboratorGrants(id: string, grantedRepositoryIds: string[]): void {
-    this.db.prepare('UPDATE collaborators SET granted_repository_ids = ? WHERE id = ?')
-      .run(JSON.stringify(grantedRepositoryIds), id);
+  updateCollaboratorGrants(id: string, grants: { repositoryIds: string[]; profileIds: string[] }): void {
+    this.db.prepare('UPDATE collaborators SET granted_repository_ids = ?, granted_profile_ids = ? WHERE id = ?')
+      .run(JSON.stringify(grants.repositoryIds), JSON.stringify(grants.profileIds), id);
   }
 
   createInvitation(row: InvitationRow, codeHash: string): void {
@@ -579,6 +617,53 @@ export class Store implements CollaboratorStore {
 
   revokeDevice(id: string, revokedAt: string): void {
     this.db.prepare('UPDATE collaborator_devices SET revoked_at = ? WHERE id = ?').run(revokedAt, id);
+  }
+
+  // -- profiles (ticket 12) --
+  //
+  // Immutable once created — no update method, only a new row — exactly
+  // like a Run's own frozen work_spec.
+
+  createProfile(profile: Profile): void {
+    this.db.prepare(
+      `INSERT INTO profiles (id, name, runtime_preference, budget, verification_intent, requested_delivery_result, created_at)
+       VALUES (@id, @name, @runtimePreference, @budget, @verificationIntent, @requestedDeliveryResult, @createdAt)`,
+    ).run({
+      ...profile,
+      runtimePreference: JSON.stringify(profile.runtimePreference),
+      budget: JSON.stringify(profile.budget),
+      verificationIntent: JSON.stringify(profile.verificationIntent),
+    });
+  }
+
+  getProfile(id: string): Profile | undefined {
+    const row = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(id) as ProfileTableRow | undefined;
+    return row ? rowToProfile(row) : undefined;
+  }
+
+  listProfiles(): Profile[] {
+    return (this.db.prepare('SELECT * FROM profiles ORDER BY created_at').all() as ProfileTableRow[]).map(rowToProfile);
+  }
+
+  // -- Run activity (ticket 12 AC2) --
+  //
+  // Append-only audit trail of who did what to a Run — never updated or
+  // deleted, exactly like the events/attempt_events archives.
+
+  appendRunActivity(activity: RunActivity): void {
+    this.db.prepare(
+      `INSERT INTO run_activity (id, run_id, kind, principal, device, at)
+       VALUES (@id, @runId, @kind, @principal, @device, @at)`,
+    ).run({
+      id: activity.id, runId: activity.runId, kind: activity.kind, at: activity.at,
+      principal: JSON.stringify(activity.principal),
+      device: toJson(activity.device),
+    });
+  }
+
+  listRunActivity(runId: string): RunActivity[] {
+    return (this.db.prepare('SELECT * FROM run_activity WHERE run_id = ? ORDER BY at').all(runId) as RunActivityTableRow[])
+      .map(rowToRunActivity);
   }
 }
 

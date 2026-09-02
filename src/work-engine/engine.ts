@@ -11,6 +11,8 @@ import { buildAttemptEventEnvelope } from './durable-events.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
 import { resolveLocalPrincipal } from './principal.js';
+import { decidePolicy } from './policy.js';
+import type { PolicyAction } from './policy.js';
 import { describeUnrecoverableAttempt } from './recovery.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import {
@@ -19,8 +21,8 @@ import {
 import type { FailingGateEvidence, VerificationGateRunner } from './verification.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
-  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, RunPrincipal, WorkEngine, WorkRun,
-  WorkSpec,
+  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, RunActivity, RunActivityKind,
+  RunActor, RunPrincipal, WorkEngine, WorkRun, WorkSpec,
 } from './types.js';
 
 /**
@@ -98,6 +100,14 @@ export class RunAttentionNotPendingError extends Error {
   constructor(runId: string, attentionId: string) {
     super(`Run ${runId} has no pending attention request ${attentionId} to resolve.`);
     this.name = 'RunAttentionNotPendingError';
+  }
+}
+
+/** Ticket 12 AC1/AC4/AC7: policy.ts's decidePolicy() refused a RunActor's action — the one enforcement point every transport (REST, WebSocket, a direct engine call) shares. `rule` is decidePolicy's stable rule identifier (CONTEXT.md's Policy decision). */
+export class PolicyDeniedError extends Error {
+  constructor(public readonly rule: string, reason: string) {
+    super(reason);
+    this.name = 'PolicyDeniedError';
   }
 }
 
@@ -258,14 +268,60 @@ export class DurableWorkEngine implements WorkEngine {
     this.principalSource = principalSource;
   }
 
-  async submit(input: WorkSpec): Promise<WorkRun> {
-    validateWorkSpec(input);
-    const knownRepository = this.store.listRepos().find((repository) => repository.id === input.repository.id);
-    if (!knownRepository || knownRepository.path !== input.repository.path
-      || knownRepository.name !== input.repository.name) {
+  /** Ticket 12: every mutating method's `actor?` param resolves through here — omitted means the engine's own principalSource, unrestricted (`grants` absent), exactly pre-ticket-12 behavior. */
+  private resolveActor(actor?: RunActor): RunActor {
+    return actor ?? { principal: this.principalSource() };
+  }
+
+  /** Ticket 12 AC1/AC4/AC7: the one enforcement point policy.ts's decidePolicy() reaches from every mutating method below — see PolicyDeniedError's own doc comment. */
+  private enforcePolicy(actor: RunActor, action: PolicyAction): void {
+    const decision = decidePolicy(actor, action);
+    if (!decision.allowed) throw new PolicyDeniedError(decision.rule, decision.reason);
+  }
+
+  /** Ticket 12 AC2: appends one durable RunActivity row — never thrown on, since a failure to record attribution must not itself fail the action it's attributing. */
+  private recordActivity(runId: string, kind: RunActivityKind, actor: RunActor): void {
+    const activity: RunActivity = {
+      id: randomUUID(), runId, kind, principal: actor.principal, at: new Date().toISOString(),
+    };
+    this.store.appendRunActivity(actor.device ? { ...activity, device: actor.device } : activity);
+  }
+
+  listActivity(runId: string): RunActivity[] {
+    return this.store.listRunActivity(runId);
+  }
+
+  async submit(input: WorkSpec, actor?: RunActor): Promise<WorkRun> {
+    const resolvedActor = this.resolveActor(actor);
+    let input2 = input;
+    if (resolvedActor.grants) {
+      // AC1/AC4: a collaborator must name an admin-approved, granted
+      // Profile — checked (and the runtime/budget/verification/delivery
+      // fields overwritten from it, never trusted from the submitter's own
+      // request) *before* validateWorkSpec below, so a collaborator's
+      // placeholder values for those Profile-controlled fields can never
+      // even reach validation, let alone the frozen spec.
+      this.enforcePolicy(resolvedActor, {
+        kind: 'submit', repositoryId: input.repository?.id ?? '', profileId: input.profileId,
+      });
+      const profile = this.store.getProfile(input.profileId!);
+      if (!profile) throw new InvalidWorkSpecError(`no such Profile: ${input.profileId}`);
+      input2 = {
+        ...input,
+        runtimePreference: [...profile.runtimePreference],
+        budget: { ...profile.budget },
+        verificationIntent: { ...profile.verificationIntent, commands: [...profile.verificationIntent.commands] },
+        requestedDeliveryResult: profile.requestedDeliveryResult,
+        profileId: profile.id,
+      };
+    }
+    validateWorkSpec(input2);
+    const knownRepository = this.store.listRepos().find((repository) => repository.id === input2.repository.id);
+    if (!knownRepository || knownRepository.path !== input2.repository.path
+      || knownRepository.name !== input2.repository.name) {
       throw new InvalidWorkSpecError('repository is not known to AgentDeck');
     }
-    const spec = frozenCopy(input);
+    const spec = frozenCopy(input2);
     const taskId = randomUUID();
     const run = frozenCopy<WorkRun>({
       id: randomUUID(),
@@ -273,7 +329,7 @@ export class DurableWorkEngine implements WorkEngine {
       status: 'queued',
       spec,
       submittedAt: new Date().toISOString(),
-      principal: this.principalSource(),
+      principal: resolvedActor.principal,
       preparation: { state: 'pending' },
       envelope: { state: 'pending' },
       verificationPolicy: { state: 'pending' },
@@ -290,6 +346,7 @@ export class DurableWorkEngine implements WorkEngine {
     };
 
     this.store.createTaskAndRun(task, run);
+    this.recordActivity(run.id, 'submitted', resolvedActor);
     return run;
   }
 
@@ -302,9 +359,10 @@ export class DurableWorkEngine implements WorkEngine {
     return this.store.listRuns().map(frozenCopy);
   }
 
-  async prepare(runId: string): Promise<WorkRun> {
+  async prepare(runId: string, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    this.enforcePolicy(this.resolveActor(actor), { kind: 'guide', repositoryId: existing.spec.repository.id });
     if (TERMINAL_STATUSES.has(existing.status)) {
       throw new InvalidRunStateError(`cannot prepare a Run in terminal status: ${existing.status}`);
     }
@@ -355,9 +413,11 @@ export class DurableWorkEngine implements WorkEngine {
     }
   }
 
-  async cancel(runId: string): Promise<WorkRun> {
+  async cancel(runId: string, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
     // Cancellation never touches a prepared worktree, its durable events, or
     // any result already produced — it is only a status change (plus, per
     // ticket 09 AC5 below, stopping a still-live process), and stays that
@@ -371,13 +431,16 @@ export class DurableWorkEngine implements WorkEngine {
     // live (already terminal, or a different process instance), exactly
     // like resolveAttention's own liveAttempts lookup.
     this.liveAttempts.get(runId)?.triggerCancel();
+    this.recordActivity(runId, 'cancelled', resolvedActor);
     return cancelled;
   }
 
   /** See WorkEngine.pause's doc comment. */
-  async pause(runId: string): Promise<WorkRun> {
+  async pause(runId: string, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
     if (existing.status === 'pause_requested' || existing.status === 'paused') return frozenCopy(existing);
     if (existing.attempt.state !== 'running') {
       throw new InvalidRunStateError(`cannot pause a Run whose Attempt is not running (${existing.status})`);
@@ -388,25 +451,30 @@ export class DurableWorkEngine implements WorkEngine {
     // to ask to pause.
     if (!live) throw new InvalidRunStateError('no live Attempt is running for this Run in this process');
     live.requestPause();
+    this.recordActivity(runId, 'paused', resolvedActor);
     return this.get(runId)!;
   }
 
   /** See WorkEngine.resume's doc comment. */
-  async resume(runId: string): Promise<WorkRun> {
+  async resume(runId: string, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
     if (existing.status !== 'pause_requested' && existing.status !== 'paused') {
       throw new InvalidRunStateError(`cannot resume a Run that is not paused (${existing.status})`);
     }
     const live = this.liveAttempts.get(runId);
     if (!live) throw new InvalidRunStateError('no live Attempt is running for this Run in this process');
     live.requestResume();
+    this.recordActivity(runId, 'resumed', resolvedActor);
     return this.get(runId)!;
   }
 
-  async start(runId: string): Promise<WorkRun> {
+  async start(runId: string, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    this.enforcePolicy(this.resolveActor(actor), { kind: 'guide', repositoryId: existing.spec.repository.id });
     if (TERMINAL_STATUSES.has(existing.status)) {
       throw new InvalidRunStateError(`cannot start an Attempt for a Run in terminal status: ${existing.status}`);
     }
@@ -842,9 +910,11 @@ export class DurableWorkEngine implements WorkEngine {
   }
 
   /** See WorkEngine.resolveAttention's doc comment. */
-  async resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput): Promise<WorkRun> {
+  async resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput, actor?: RunActor): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
     const pending = existing.pendingAttention;
     if (!pending || pending.id !== attentionId) throw new RunAttentionNotPendingError(runId, attentionId);
     if (pending.kind === 'approval' && decision.kind === 'input') {
@@ -870,6 +940,7 @@ export class DurableWorkEngine implements WorkEngine {
     // the Attempt forever with no signal back to the caller.
     if (!live.deliverDecision(attentionId, decision)) throw new RunAttentionNotPendingError(runId, attentionId);
     live.persistResolution(attentionId, decision);
+    this.recordActivity(runId, decision.kind === 'approve' ? 'approved' : decision.kind === 'deny' ? 'denied' : 'input', resolvedActor);
     return this.get(runId)!;
   }
 

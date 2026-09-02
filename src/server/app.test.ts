@@ -147,20 +147,23 @@ describe('named collaborator device credentials (ticket 11)', () => {
     expect(body.token.length).toBeGreaterThan(20);
   });
 
-  it('an exchanged device token authenticates subsequent /api/connection requests as remote+authenticated', async () => {
+  it('an exchanged device token authenticates subsequent /api/connection requests as remote+authenticated, naming the collaborator Principal (ticket 12 AC6)', async () => {
     build();
     const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
     const exchanged = (await app.inject({
       method: 'POST', url: '/api/collaborators/exchange',
       headers: { host: `${REMOTE_HOST}:4040`, 'content-type': 'application/json' },
       payload: JSON.stringify({ code, deviceLabel: 'phone' }),
-    })).json() as { token: string };
+    })).json() as { token: string; principal: { id: string } };
 
     const connection = await app.inject({
       method: 'GET', url: '/api/connection',
       headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: exchanged.token },
     });
-    expect(connection.json()).toEqual({ kind: 'remote', capabilities: ['view', 'compose', 'control-keys'] });
+    expect(connection.json()).toEqual({
+      kind: 'remote', capabilities: ['view', 'compose', 'control-keys'],
+      principal: { id: exchanged.principal.id, displayName: 'Alice' },
+    });
   });
 
   it('a collaborator device can view GET /api/repos, filtered to its grants (AC4) — never reachable by the legacy shared token alone', async () => {
@@ -197,12 +200,9 @@ describe('named collaborator device credentials (ticket 11)', () => {
   it.each([
     ['GET', '/api/sessions'],
     ['POST', '/api/sessions/some-id/send'],
-    ['GET', '/api/runs/attention'],
-    ['POST', '/api/runs/some-id/attention/some-attention-id/approve'],
-    ['POST', '/api/runs/some-id/attention/some-attention-id/deny'],
-    ['POST', '/api/runs/some-id/attention/some-attention-id/input'],
+    ['GET', '/api/runs/some-id/activity'],
   ])(
-    'a collaborator device gets ONLY the view-only allowlist — %s %s (on the legacy shared-token allowlist) stays refused (AC4: view only, never guide)',
+    'a collaborator device stays refused %s %s — session terminals and the admin-only activity audit trail are never in scope, only grant-checked Run/Repository/Profile routes (ticket 12 AC1/AC5)',
     async (method, url) => {
       build();
       const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
@@ -216,6 +216,52 @@ describe('named collaborator device credentials (ticket 11)', () => {
       expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
     },
   );
+
+  it.each([
+    ['GET', '/api/runs/attention'],
+    ['POST', '/api/runs'],
+    ['POST', '/api/runs/some-id/prepare'],
+    ['POST', '/api/runs/some-id/start'],
+    ['POST', '/api/runs/some-id/cancel'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/approve'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/deny'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/input'],
+  ])(
+    'a collaborator device reaches %s %s (ticket 12 AC1: allowlisted at the gate — no work routes are registered on this bare app, so 404 "not found" rather than 403 "blocked at the gate" proves that)',
+    async (method, url) => {
+      build();
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+      const response = await app.inject({
+        method: method as 'GET' | 'POST', url,
+        headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
+        payload: method === 'GET' ? undefined : '{}',
+      });
+      expect(response.statusCode).toBe(404);
+    },
+  );
+
+  it('a collaborator device reaches GET /api/profiles, filtered to its grantedProfileIds (ticket 12 AC1) — registered directly on buildApp, unlike the work routes above', async () => {
+    build();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedProfileIds: ['profile-1'] });
+    const { token } = collaborators.exchangeInvitation(code, 'phone');
+    store.createProfile({
+      id: 'profile-1', name: 'Granted', runtimePreference: ['codex'],
+      budget: { maxWallClockMs: 900_000 }, verificationIntent: { required: false, commands: [] },
+      requestedDeliveryResult: 'local-commit', createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    store.createProfile({
+      id: 'profile-2', name: 'Ungranted', runtimePreference: ['codex'],
+      budget: { maxWallClockMs: 900_000 }, verificationIntent: { required: false, commands: [] },
+      requestedDeliveryResult: 'local-commit', createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const response = await app.inject({
+      method: 'GET', url: '/api/profiles', headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token },
+    });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { id: string }[]).map((p) => p.id)).toEqual(['profile-1']);
+  });
 
   it('the legacy shared token keeps its own pre-ticket allowlist (GET /api/sessions) even when collaborators are configured on the same app', async () => {
     build({

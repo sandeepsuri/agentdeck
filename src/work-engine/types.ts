@@ -11,13 +11,72 @@ export interface RunRepository {
  * identity that requested this Run (CONTEXT.md's "Principal") — recorded so
  * a commit AgentDeck makes on their behalf can say who asked for it,
  * distinct from the commit's own author identity (always AgentDeck's own —
- * see work-engine/commit.ts). Named collaborators with real device
- * credentials are tickets 11/12's job; until then every Run's Principal is
- * the single local operator running AgentDeck.
+ * see work-engine/commit.ts). Ticket 11 gave named collaborators real
+ * device credentials; ticket 12 lets that Principal (not just the single
+ * local operator) submit and guide a Run — see RunActor below.
  */
 export interface RunPrincipal {
   readonly id: string;
   readonly displayName: string;
+}
+
+/** The device a RunActor's request was authenticated through (ticket 11's collaborator device credentials), when it wasn't the local desktop. */
+export interface RunActorDevice {
+  readonly id: string;
+  readonly label: string;
+}
+
+/**
+ * Ticket 12: who is asking the Work Engine to submit or guide a Run, and
+ * under what authority. `grants` absent means unrestricted admin authority
+ * — the local operator, or a request authenticated by the legacy shared
+ * tailnet token (ticket 11's connection-trust.ts never resolves a `device`
+ * for that path) — exactly today's behavior, unchanged. `grants` present
+ * means a named collaborator device: every WorkEngine method that accepts
+ * a RunActor enforces it via policy.ts's decidePolicy() before doing
+ * anything, and records this Principal/device on the resulting RunActivity
+ * (AC2) — the same enforcement and attribution regardless of whether the
+ * caller is REST, WebSocket, or a direct Work Engine call (AC7).
+ */
+export interface RunActor {
+  readonly principal: RunPrincipal;
+  readonly device?: RunActorDevice;
+  readonly grants?: {
+    readonly repositoryIds: readonly string[];
+    readonly profileIds: readonly string[];
+  };
+}
+
+/**
+ * CONTEXT.md's "Profile": a reusable, admin-approved configuration for how
+ * work may run. Immutable once created — there is no update, only a new
+ * Profile — exactly like a Run's own frozen WorkSpec. A collaborator names
+ * one by id when submitting (WorkSpec.profileId); the Work Engine derives
+ * the Run's runtime/budget/verification/delivery fields from the Profile
+ * itself, never from whatever the submitter's own request body says for
+ * those fields (see engine.ts's submit()) — the concrete mechanism behind
+ * AC4's "cannot expand capabilities, select an unapproved runtime."
+ */
+export interface Profile {
+  readonly id: string;
+  readonly name: string;
+  readonly runtimePreference: readonly AgentType[];
+  readonly budget: RunBudget;
+  readonly verificationIntent: VerificationIntent;
+  readonly requestedDeliveryResult: RequestedDeliveryResult;
+  readonly createdAt: string;
+}
+
+/** One row of the durable Run activity trail (ticket 12 AC2) — never mutated, only appended. */
+export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled';
+
+export interface RunActivity {
+  readonly id: string;
+  readonly runId: string;
+  readonly kind: RunActivityKind;
+  readonly principal: RunPrincipal;
+  readonly device?: RunActorDevice;
+  readonly at: string;
 }
 
 export interface RunBudget {
@@ -57,6 +116,16 @@ export interface WorkSpec {
   budget: RunBudget;
   verificationIntent: VerificationIntent;
   requestedDeliveryResult: RequestedDeliveryResult;
+  /**
+   * Ticket 12: the admin-approved Profile this Run was submitted against.
+   * Required (and enforced) only for a collaborator RunActor — submit()
+   * overwrites runtimePreference/budget/verificationIntent/
+   * requestedDeliveryResult above from the named Profile's own frozen
+   * values in that case, ignoring whatever this WorkSpec's own fields say.
+   * Optional and purely informational for the admin/local path, which
+   * every existing WorkSpec literal across the test suite already omits.
+   */
+  profileId?: string;
 }
 
 export type RunStatus =
@@ -486,12 +555,23 @@ export interface RunResult {
   readonly recoveryNotes?: string;
 }
 
+/**
+ * Ticket 12: every mutating WorkEngine method below takes an optional
+ * trailing `actor`. Omitted (every pre-ticket-12 call site, and every
+ * existing test) means exactly today's behavior — unrestricted local
+ * authority, principal from the engine's own principalSource. Passed with
+ * `grants` set (a named collaborator device, per RunActor's doc comment)
+ * means the SAME policy.ts decision and RunActivity recording apply
+ * whether the caller is REST, WebSocket, or a direct engine call like this
+ * one (AC7) — there is no separate, REST-only authorization layer to drift
+ * out of sync with it.
+ */
 export interface WorkEngine {
-  submit(spec: WorkSpec): Promise<WorkRun>;
+  submit(spec: WorkSpec, actor?: RunActor): Promise<WorkRun>;
   get(runId: string): WorkRun | undefined;
   list(): WorkRun[];
   /** Resolves the exact base commit and creates a dedicated worktree. Idempotent once ready. */
-  prepare(runId: string): Promise<WorkRun>;
+  prepare(runId: string, actor?: RunActor): Promise<WorkRun>;
   /**
    * Marks a Run cancelled without touching any worktree it already
    * prepared, its durable events, or any result already produced. Ticket 09
@@ -499,14 +579,14 @@ export interface WorkEngine {
    * runtime authority — the live adapter round is aborted (its own process
    * killed) rather than left running to a natural completion.
    */
-  cancel(runId: string): Promise<WorkRun>;
+  cancel(runId: string, actor?: RunActor): Promise<WorkRun>;
   /**
    * Starts the Run's one Attempt in its prepared worktree, inside its frozen
    * capability envelope (ticket 05). Resolves once the Attempt has begun
    * (status 'running'); the Attempt itself keeps progressing in the
    * background and is observed by rereading the Run (get/list).
    */
-  start(runId: string): Promise<WorkRun>;
+  start(runId: string, actor?: RunActor): Promise<WorkRun>;
   /**
    * Called once at boot (ticket 06), before any caller can reach this
    * engine: every Run left 'running' when the previous process stopped has
@@ -526,7 +606,7 @@ export interface WorkEngine {
    * (including via recover()) — so a decision can never reopen or double-
    * apply to a request that is no longer waiting.
    */
-  resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput): Promise<WorkRun>;
+  resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput, actor?: RunActor): Promise<WorkRun>;
   /**
    * Ticket 09 AC4: asks a live Attempt to stop starting new work at its next
    * supported safe boundary — never mid-flight — and durably records the
@@ -535,7 +615,9 @@ export interface WorkEngine {
    * 'paused' (not just 'pause_requested') only once it actually reaches
    * that boundary.
    */
-  pause(runId: string): Promise<WorkRun>;
+  pause(runId: string, actor?: RunActor): Promise<WorkRun>;
   /** Ticket 09 AC4: lets a paused (or pause-requested) Attempt proceed past the safe boundary it was waiting at. */
-  resume(runId: string): Promise<WorkRun>;
+  resume(runId: string, actor?: RunActor): Promise<WorkRun>;
+  /** Ticket 12 AC2/AC5: the durable, append-only trail of every recorded action against this Run, oldest first — empty (not thrown) for an unknown Run id. */
+  listActivity(runId: string): RunActivity[];
 }

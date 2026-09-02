@@ -10,8 +10,10 @@ export interface Collaborator {
   readonly id: string;
   readonly displayName: string;
   readonly createdAt: string;
-  /** Repository ids this Principal may view. Empty until the admin grants one. */
+  /** Repository ids this Principal may view (ticket 11) and, together with grantedProfileIds, launch and guide Runs on (ticket 12). Empty until the admin grants one. */
   readonly grantedRepositoryIds: readonly string[];
+  /** Ticket 12 AC1: admin-approved Profile ids this Principal may submit a Run against. Empty until the admin grants one. */
+  readonly grantedProfileIds: readonly string[];
 }
 
 /** A one-time code the bootstrap admin hands a collaborator out of band, exchanged for a DeviceCredential. Never carries the raw code. */
@@ -41,8 +43,11 @@ export interface DeviceCredential {
  */
 export interface ResolvedDevice {
   readonly id: string;
+  readonly label: string;
   readonly principal: { readonly id: string; readonly displayName: string };
   readonly grantedRepositoryIds: readonly string[];
+  /** Ticket 12 AC1. */
+  readonly grantedProfileIds: readonly string[];
 }
 
 export class InvitationExpiredError extends Error {

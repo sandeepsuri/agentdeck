@@ -13,6 +13,7 @@ import type { WorkEngine } from '../work-engine/types.js';
 import type { CollaboratorService } from '../collaborators/service.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 import { registerCollaboratorRoutes } from './collaborator-routes.js';
+import { registerProfileRoutes } from './profile-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -71,25 +72,41 @@ function isRemoteAllowedRoute(method: string, pathname: string): boolean {
 }
 
 /**
- * Ticket 11 AC4: a named collaborator, authenticated via their own device
- * credential (never the legacy shared tailnet token — see classify()'s
- * `device` field), may additionally view Repositories and Runs. This is
- * deliberately its own allowlist rather than added to isRemoteAllowedRoute
- * above: those routes stay open to any authenticated remote connection
- * (including the single shared token every admin's own phone still uses),
- * while these two only ever open for a resolved collaborator device — the
- * route handlers (routes.ts's GET /api/repos, work-routes.ts's GET
- * /api/runs*) then filter to exactly `device.grantedRepositoryIds`.
+ * Ticket 11 AC4 / ticket 12 AC1: a named collaborator, authenticated via
+ * their own device credential (never the legacy shared tailnet token — see
+ * classify()'s `device` field), may view Repositories and Profiles, and
+ * submit and guide Runs. This is deliberately its own allowlist rather
+ * than added to isRemoteAllowedRoute above: those routes stay open to any
+ * authenticated remote connection (including the single shared token
+ * every admin's own phone still uses), while these only ever open for a
+ * resolved collaborator device. Every one of them still enforces its own
+ * fine-grained check past this coarse pathname-shape gate — GET routes
+ * filter to `device.grantedRepositoryIds`/`grantedProfileIds`
+ * (routes.ts/work-routes.ts), and every mutating Work Engine call
+ * (work-routes.ts's resolveActor) reaches the exact same
+ * DurableWorkEngine policy enforcement REST, WebSocket, and a direct
+ * engine call all share (policy.ts) — this gate only decides which
+ * pathnames are shaped like something a collaborator could ever be
+ * authorized for, never who is.
  */
-function isCollaboratorViewRoute(method: string, pathname: string): boolean {
-  if (method !== 'GET') return false;
-  if (pathname === '/api/repos' || pathname === '/api/runs') return true;
-  // Excludes /api/runs/attention explicitly: it would otherwise match the
-  // per-Run-id pattern below (no slash in "attention") and let a
-  // collaborator device through to work-routes.ts's *unfiltered*,
-  // system-wide attention queue — a grant-scoping leak, not the
-  // grant-filtered GET /api/runs/:id this pattern exists for.
-  return pathname !== '/api/runs/attention' && /^\/api\/runs\/[^/]+$/.test(pathname);
+function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
+  if (method === 'GET') {
+    // Ticket 12 AC3: GET /api/runs/attention is included here — unlike the
+    // legacy shared-token/local path (isRemoteAllowedRoute), which gets
+    // work-routes.ts's unfiltered, system-wide queue, a collaborator
+    // device's request is grant-filtered inside that same route handler
+    // (scopeRuns), so this is never the leak the pattern below would
+    // otherwise open (a bare pathname check can't tell "filtered" from
+    // "unfiltered" — that's work-routes.ts's job, not this gate's).
+    if (pathname === '/api/repos' || pathname === '/api/runs' || pathname === '/api/profiles' || pathname === '/api/runs/attention') return true;
+    return /^\/api\/runs\/[^/]+$/.test(pathname);
+  }
+  if (method === 'POST') {
+    if (pathname === '/api/runs') return true; // submit — policy-checked inside DurableWorkEngine.submit()
+    if (/^\/api\/runs\/[^/]+\/(prepare|start|cancel)$/.test(pathname)) return true;
+    if (/^\/api\/runs\/[^/]+\/attention\/[^/]+\/(approve|deny|input)$/.test(pathname)) return true;
+  }
+  return false;
 }
 
 // AC1: a brand-new collaborator device has no bearer token yet, so this one
@@ -182,21 +199,18 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // authenticated (the check above already rejected an empty-capability
     // remote request), so this narrows further rather than duplicating it.
     //
-    // Ticket 11 AC4: a resolved collaborator device gets ONLY the narrow
-    // view-only allowlist above (isCollaboratorViewRoute) — never
-    // isRemoteAllowedRoute's set. That allowlist was designed for "the
-    // admin's own phone" (the legacy shared token: unfiltered GET
-    // /api/sessions, POST .../send, and — critically — approve/deny/input
-    // on ANY Run's pending attention) and none of it is scoped by
-    // grantedRepositoryIds. Falling back to it for a named collaborator
+    // Ticket 11 AC4 / ticket 12 AC1: a resolved collaborator device gets
+    // ONLY isCollaboratorAllowedRoute's set — never isRemoteAllowedRoute's.
+    // That allowlist was designed for "the admin's own phone" (the legacy
+    // shared token: unfiltered GET /api/sessions, POST .../send, and
+    // approve/deny/input on ANY Run's pending attention, with no grant
+    // scoping at all) and falling back to it for a named collaborator
     // would let them read every session and resolve any Run's attention
-    // request system-wide — exactly the "guide a Run" administrative
-    // authority ticket 12 (blocked by this one) is responsible for
-    // granting under its own grant checks, not an accidental side door
-    // here. A collaborator device that isn't hitting an
-    // isCollaboratorViewRoute path is refused, full stop.
+    // request system-wide, bypassing the grant checks
+    // isCollaboratorAllowedRoute's own routes enforce. A collaborator
+    // device that isn't hitting one of those paths is refused, full stop.
     const remoteAllowed = trust.device
-      ? isCollaboratorViewRoute(req.method, pathname)
+      ? isCollaboratorAllowedRoute(req.method, pathname)
       : isRemoteAllowedRoute(req.method, pathname);
     if (requiresRemoteToken && trust.kind === 'remote' && !remoteAllowed) {
       return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
@@ -224,6 +238,15 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // Ticket 11: local-admin-only management routes plus the one
   // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
   if (ctx.collaborators) registerCollaboratorRoutes(app, ctx.collaborators);
+
+  // Ticket 12 AC1: admin-only POST (not on isCollaboratorAllowedRoute), GET
+  // filtered to a resolved collaborator device's grantedProfileIds — same
+  // classify() call app.ts's own onRequest hook already made for this
+  // request, so a collaborator's grants can never disagree between the two.
+  if (ctx.store) registerProfileRoutes(app, ctx.store, (req) => classify(
+    { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
+  ).device?.grantedProfileIds);
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

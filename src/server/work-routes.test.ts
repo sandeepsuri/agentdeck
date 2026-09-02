@@ -11,7 +11,7 @@ import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.j
 import { Store } from '../store/index.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
-import type { WorkSpec } from '../work-engine/types.js';
+import type { Profile, RunActor, WorkSpec } from '../work-engine/types.js';
 import { registerWorkRoutes, type WorkRoutesDeps } from './work-routes.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
@@ -55,7 +55,7 @@ function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngin
   registerWorkRoutes(app, engine, deps);
   apps.push(app);
   stores.push(store);
-  return { app, repoPath, store };
+  return { app, repoPath, store, engine };
 }
 
 function submittedIntent(repoPath: string, requestedBaseReference = 'feature/exact-request'): WorkSpec {
@@ -98,6 +98,22 @@ describe('work routes', () => {
 
     const listed = await app.inject({ method: 'GET', url: '/api/runs' });
     expect(listed.json()).toEqual([run]);
+  });
+
+  it('GET /api/runs/:id/activity reports the durable activity trail for admin observability (ticket 12 AC5)', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const activity = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/activity` });
+    expect(activity.statusCode).toBe(200);
+    expect(activity.json()).toEqual([{
+      id: expect.any(String), runId: run.id, kind: 'submitted', at: expect.any(String),
+      principal: expect.any(Object),
+    }]);
+
+    const missing = await app.inject({ method: 'GET', url: '/api/runs/unknown/activity' });
+    expect(missing.statusCode).toBe(404);
   });
 
   it('reports invalid intent and unknown run identities precisely', async () => {
@@ -160,6 +176,89 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
 
     const listed = await app.inject({ method: 'GET', url: '/api/runs' });
     expect(listed.json()).toEqual([run]);
+  });
+});
+
+describe('collaborator submit and guide (ticket 12)', () => {
+  const collaboratorActor: RunActor = {
+    principal: { id: 'collab-1', displayName: 'Alice' },
+    device: { id: 'device-1', label: "Alice's phone" },
+    grants: { repositoryIds: [], profileIds: ['profile-1'] }, // repositoryIds filled in per-test once repoPath is known
+  };
+
+  function actorFor(repoPath: string): RunActor {
+    return { ...collaboratorActor, grants: { repositoryIds: [repoPath], profileIds: ['profile-1'] } };
+  }
+
+  const approvedProfile: Profile = {
+    id: 'profile-1',
+    name: 'Standard Codex run',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 900_000, maxModelTurns: 25 },
+    verificationIntent: { required: true, commands: ['npm test'] },
+    requestedDeliveryResult: 'local-commit',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('submits a Run as the resolved collaborator actor, deriving its spec from the granted Profile', async () => {
+    const { app, repoPath, store } = makeApp(undefined, { resolveActor: () => actorFor(repoPath) });
+    store.createProfile(approvedProfile);
+    const spec = { ...submittedIntent(repoPath), profileId: approvedProfile.id };
+
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: spec });
+
+    expect(created.statusCode).toBe(201);
+    const run = created.json();
+    expect(run.principal).toEqual({ id: 'collab-1', displayName: 'Alice' });
+    expect(run.spec.runtimePreference).toEqual(['codex']);
+  });
+
+  it('403s a submit for an ungranted Repository, naming the policy rule', async () => {
+    const { app, repoPath, store } = makeApp(undefined, { resolveActor: () => collaboratorActor }); // no repositoryIds granted
+    store.createProfile(approvedProfile);
+    const spec = { ...submittedIntent(repoPath), profileId: approvedProfile.id };
+
+    const response = await app.inject({ method: 'POST', url: '/api/runs', payload: spec });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: expect.any(String), rule: 'repository-not-granted' });
+  });
+
+  it('a granted collaborator can prepare, start, and cancel their own Run through REST', async () => {
+    const { app, repoPath, store } = makeApp(undefined, { resolveActor: () => actorFor(repoPath) });
+    store.createProfile(approvedProfile);
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: { ...submittedIntent(repoPath, 'main'), profileId: approvedProfile.id } });
+    const run = created.json();
+
+    const prepared = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    expect(prepared.statusCode).toBe(200);
+
+    const cancelled = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/cancel` });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json().status).toBe('cancelled');
+  });
+
+  it('403s prepare/cancel for a Run outside this actor\'s grants, leaving it queued', async () => {
+    const { app, repoPath, store, engine } = makeApp(undefined, { resolveActor: () => actorFor(repoPath) });
+    store.createProfile(approvedProfile);
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: { ...submittedIntent(repoPath, 'main'), profileId: approvedProfile.id } });
+    const run = created.json();
+
+    // A second app registered against the SAME engine/store, resolving to
+    // an actor with no grants at all — same Run, a different requester.
+    const outsideApp = Fastify();
+    const outsideActor: RunActor = { principal: { id: 'collab-2', displayName: 'Bob' }, grants: { repositoryIds: [], profileIds: [] } };
+    registerWorkRoutes(outsideApp, engine, { resolveActor: () => outsideActor });
+    apps.push(outsideApp);
+
+    const prepared = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    expect(prepared.statusCode).toBe(403);
+    expect(prepared.json()).toEqual({ error: expect.any(String), rule: 'repository-not-granted' });
+
+    const cancelled = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/cancel` });
+    expect(cancelled.statusCode).toBe(403);
+
+    expect(engine.get(run.id)?.status).toBe('queued'); // untouched by either denied attempt
   });
 });
 
@@ -301,6 +400,31 @@ describe('run attention routes (ticket 07)', () => {
     });
     expect(Object.keys(items[0]).sort()).toEqual(['attentionId', 'kind', 'objective', 'reason', 'requestedAt', 'runId']);
     expect(JSON.stringify(items)).not.toContain(repoPath);
+  });
+
+  it('ticket 12 AC3: a collaborator device sees its own granted Run\'s pending attention, and none outside its grants', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const granted = makeApp(
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) },
+    );
+    const runId = await startWithAttentionRequest(granted.app, granted.repoPath);
+
+    // Same Run, re-registered against the same engine with a resolver
+    // granting its Repository — proves the filter *includes* a granted Run.
+    const grantedRoutesApp = Fastify();
+    registerWorkRoutes(grantedRoutesApp, granted.engine, { resolveGrantedRepositoryIds: () => [granted.repoPath] });
+    apps.push(grantedRoutesApp);
+    const asGranted = await grantedRoutesApp.inject({ method: 'GET', url: '/api/runs/attention' });
+    expect(asGranted.json()).toHaveLength(1);
+    expect(asGranted.json()[0]).toMatchObject({ runId });
+
+    // And with nothing granted at all — proves the filter *excludes* it,
+    // never falling back to the unfiltered system-wide queue.
+    const ungrantedRoutesApp = Fastify();
+    registerWorkRoutes(ungrantedRoutesApp, granted.engine, { resolveGrantedRepositoryIds: () => [] });
+    apps.push(ungrantedRoutesApp);
+    const asUngranted = await ungrantedRoutesApp.inject({ method: 'GET', url: '/api/runs/attention' });
+    expect(asUngranted.json()).toEqual([]);
   });
 
   it('approves a pending request through POST .../attention/:attentionId/approve, resuming the Attempt to completion', async () => {

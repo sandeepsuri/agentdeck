@@ -19,9 +19,9 @@ class FakeCollaboratorStore implements CollaboratorStore {
     return row ? { ...row } : undefined;
   }
   listCollaborators(): CollaboratorRow[] { return [...this.collaborators.values()].map((r) => ({ ...r })); }
-  updateCollaboratorGrants(id: string, grantedRepositoryIds: string[]): void {
+  updateCollaboratorGrants(id: string, grants: { repositoryIds: string[]; profileIds: string[] }): void {
     const row = this.collaborators.get(id);
-    if (row) row.grantedRepositoryIds = [...grantedRepositoryIds];
+    if (row) { row.grantedRepositoryIds = [...grants.repositoryIds]; row.grantedProfileIds = [...grants.profileIds]; }
   }
 
   createInvitation(row: InvitationRow, codeHash: string): void {
@@ -93,6 +93,12 @@ describe('CollaboratorService.inviteCollaborator', () => {
     expect(second.code).not.toBe(first.code);
   });
 
+  it('names a new collaborator with granted Profiles too (ticket 12 AC1)', () => {
+    const { service } = build();
+    const { collaborator } = service.inviteCollaborator({ displayName: 'Alice', grantedProfileIds: ['profile-1', 'profile-1'] });
+    expect(collaborator.grantedProfileIds).toEqual(['profile-1']);
+  });
+
   it('rejects an unknown collaboratorId', () => {
     const { service } = build();
     expect(() => service.inviteCollaborator({ collaboratorId: 'nope' })).toThrow(CollaboratorNotFoundError);
@@ -159,9 +165,18 @@ describe('CollaboratorService.resolveDevice', () => {
     const resolved = service.resolveDevice(token);
     expect(resolved).toEqual({
       id: device.id,
+      label: 'phone',
       principal: { id: collaborator.id, displayName: 'Alice' },
       grantedRepositoryIds: ['repo-1'],
+      grantedProfileIds: [],
     });
+  });
+
+  it('resolves granted Profile ids too (ticket 12 AC1)', () => {
+    const { service } = build();
+    const { code } = service.inviteCollaborator({ displayName: 'Alice', grantedProfileIds: ['profile-1'] });
+    const { token } = service.exchangeInvitation(code, 'phone');
+    expect(service.resolveDevice(token)?.grantedProfileIds).toEqual(['profile-1']);
   });
 
   it('returns undefined for an unknown token, fail-closed', () => {
@@ -187,7 +202,7 @@ describe('CollaboratorService.resolveDevice', () => {
     const { service } = build();
     const { code, collaborator } = service.inviteCollaborator({ displayName: 'Alice' });
     const { token } = service.exchangeInvitation(code, 'phone');
-    service.updateGrants(collaborator.id, ['repo-9']);
+    service.updateGrants(collaborator.id, { repositoryIds: ['repo-9'] });
     expect(service.resolveDevice(token)?.grantedRepositoryIds).toEqual(['repo-9']);
   });
 });
@@ -238,12 +253,27 @@ describe('CollaboratorService.updateGrants', () => {
   it('replaces the granted repository set and de-duplicates', () => {
     const { service } = build();
     const { collaborator } = service.inviteCollaborator({ displayName: 'Alice' });
-    const updated = service.updateGrants(collaborator.id, ['repo-1', 'repo-1', 'repo-2']);
+    const updated = service.updateGrants(collaborator.id, { repositoryIds: ['repo-1', 'repo-1', 'repo-2'] });
     expect(updated.grantedRepositoryIds).toEqual(['repo-1', 'repo-2']);
+  });
+
+  it('replaces the granted Profile set independently of the Repository set (ticket 12 AC1)', () => {
+    const { service } = build();
+    const { collaborator } = service.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'] });
+    const updated = service.updateGrants(collaborator.id, { profileIds: ['profile-1', 'profile-1'] });
+    expect(updated.grantedProfileIds).toEqual(['profile-1']);
+    expect(updated.grantedRepositoryIds).toEqual(['repo-1']); // untouched — only profileIds was passed
+  });
+
+  it('leaves both grant sets untouched when neither is passed', () => {
+    const { service } = build();
+    const { collaborator } = service.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'], grantedProfileIds: ['profile-1'] });
+    const updated = service.updateGrants(collaborator.id, {});
+    expect(updated).toEqual(expect.objectContaining({ grantedRepositoryIds: ['repo-1'], grantedProfileIds: ['profile-1'] }));
   });
 
   it('rejects an unknown collaborator', () => {
     const { service } = build();
-    expect(() => service.updateGrants('nope', ['repo-1'])).toThrow(CollaboratorNotFoundError);
+    expect(() => service.updateGrants('nope', { repositoryIds: ['repo-1'] })).toThrow(CollaboratorNotFoundError);
   });
 });

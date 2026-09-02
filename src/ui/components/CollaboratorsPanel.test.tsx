@@ -49,7 +49,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe('CollaboratorsPanel', () => {
   it('loads and lists collaborators with their devices on mount', async () => {
     const fetchMock = vi.fn(async () => jsonResponse([
-      { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], devices: [
+      { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [], devices: [
         { id: 'd1', collaboratorId: 'c1', deviceLabel: "Alice's phone", createdAt: '2026-01-01T00:00:00.000Z' },
       ] },
     ]));
@@ -74,7 +74,7 @@ describe('CollaboratorsPanel', () => {
       if (url === '/api/collaborators' && (!init || init.method === undefined)) return jsonResponse([]);
       if (url === '/api/collaborators' && init?.method === 'POST') {
         return jsonResponse({
-          collaborator: { id: 'c1', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] },
+          collaborator: { id: 'c1', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] },
           invitation: { id: 'inv-1', collaboratorId: 'c1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
           code: 'brand-new-one-time-code',
         }, 201);
@@ -108,7 +108,7 @@ describe('CollaboratorsPanel', () => {
         const devices = listCall === 1
           ? [{ id: 'd1', collaboratorId: 'c1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }]
           : [{ id: 'd1', collaboratorId: 'c1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z', revokedAt: '2026-01-01T01:00:00.000Z' }];
-        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], devices }]);
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices }]);
       }
       if (url === '/api/collaborators/devices/d1/revoke' && init?.method === 'POST') {
         return jsonResponse({ id: 'd1', collaboratorId: 'c1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z', revokedAt: '2026-01-01T01:00:00.000Z' });
@@ -137,6 +137,35 @@ describe('CollaboratorsPanel', () => {
     const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }];
     const host = await mount(repos);
     expect(host.textContent).toContain('example');
-    expect(host.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+    expect(host.querySelectorAll('.collaborators-repo-grants input[type="checkbox"]')).toHaveLength(1);
+  });
+
+  it('ticket 12 AC1: creates a Profile and offers it as an invite-time grant checkbox', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse([]);
+      if (url === '/api/profiles' && (!init || init.method === undefined)) return jsonResponse([]);
+      if (url === '/api/profiles' && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'profile-1', name: 'Standard Codex run', runtimePreference: ['codex'],
+          budget: { maxWallClockMs: 3_600_000 }, verificationIntent: { required: false, commands: [] },
+          requestedDeliveryResult: 'local-commit', createdAt: '2026-01-01T00:00:00.000Z',
+        }, 201);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const nameInput = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
+    await act(async () => { setInputValue(nameInput, 'Standard Codex run'); });
+    const createButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Create Profile')!;
+    await act(async () => {
+      createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    expect(host.querySelectorAll('.collaborators-profile-grants input[type="checkbox"]')).toHaveLength(1);
+    expect(host.textContent).toContain('Standard Codex run');
   });
 });

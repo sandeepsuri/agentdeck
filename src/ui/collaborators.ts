@@ -4,8 +4,10 @@
 // action, reachable from a not-yet-authenticated remote connection's
 // connection gate (App.tsx) — see collaborator-routes.ts's
 // REMOTE_PRE_AUTH_ROUTES exemption on the server side.
-import { apiFetch, responseJson } from './apiFetch.js';
+import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
 import { setStoredToken, tokenStorage } from './connection.js';
+import type { Profile, RequestedDeliveryResult, RunBudget, VerificationIntent } from '../work-engine/types.js';
+import type { AgentType } from '../types.js';
 
 export interface DeviceCredential {
   id: string;
@@ -20,6 +22,8 @@ export interface Collaborator {
   displayName: string;
   createdAt: string;
   grantedRepositoryIds: string[];
+  /** Ticket 12 AC1. */
+  grantedProfileIds: string[];
   devices: DeviceCredential[];
 }
 
@@ -28,7 +32,7 @@ export async function listCollaborators(): Promise<Collaborator[]> {
 }
 
 export async function inviteCollaborator(
-  input: { displayName: string; grantedRepositoryIds: string[] },
+  input: { displayName: string; grantedRepositoryIds: string[]; grantedProfileIds: string[] },
 ): Promise<{ collaborator: Collaborator; code: string }> {
   const response = await apiFetch('/api/collaborators', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
@@ -41,9 +45,30 @@ export async function inviteExistingCollaborator(collaboratorId: string): Promis
   return responseJson(response);
 }
 
-export async function updateGrants(collaboratorId: string, grantedRepositoryIds: string[]): Promise<Collaborator> {
+export async function updateGrants(
+  collaboratorId: string,
+  grants: { grantedRepositoryIds?: string[]; grantedProfileIds?: string[] },
+): Promise<Collaborator> {
   const response = await apiFetch(`/api/collaborators/${collaboratorId}`, {
-    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grantedRepositoryIds }),
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(grants),
+  });
+  return responseJson(response);
+}
+
+/** Ticket 12 AC1: the admin's Profile roster (SettingsModal → CollaboratorsPanel), never grant-filtered here — that filtering is for a collaborator device's own GET /api/profiles, not the local admin. */
+export async function listProfiles(): Promise<Profile[]> {
+  return responseJsonArray(await apiFetch('/api/profiles'));
+}
+
+export async function createProfile(input: {
+  name: string;
+  runtimePreference: AgentType[];
+  budget: RunBudget;
+  verificationIntent: VerificationIntent;
+  requestedDeliveryResult: RequestedDeliveryResult;
+}): Promise<Profile> {
+  const response = await apiFetch('/api/profiles', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
   });
   return responseJson(response);
 }

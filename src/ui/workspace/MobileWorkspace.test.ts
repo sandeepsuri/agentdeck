@@ -242,4 +242,19 @@ describe('MobileWorkspace (static render)', () => {
     expect(html).not.toContain(externalSession.id);
     expect(html).not.toContain('Message the agent');
   });
+
+  it('ticket 12 AC6: never offers "Launch a Run" for the ordinary admin phone (no collaboratorPrincipal)', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+    }));
+    expect(html).not.toContain('Launch a Run');
+  });
+
+  it('ticket 12 AC1/AC6: offers "Launch a Run" for a resolved collaborator device', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+      collaboratorPrincipal: { id: 'collab-1', displayName: 'Alice' },
+    }));
+    expect(html).toContain('Launch a Run');
+  });
 });

@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { FastifyRequest } from 'fastify';
 import type { WebSocketServer } from 'ws';
 import { loadConfig } from '../config.js';
 import { CoordinationService } from '../coordination/service.js';
@@ -23,7 +24,7 @@ import { coordinateManagedWakeLock } from './managed-wake-lock.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { registerWorkRoutes } from './work-routes.js';
 import { CollaboratorService } from '../collaborators/service.js';
-import { classify, TOKEN_HEADER } from './connection-trust.js';
+import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -109,15 +110,20 @@ export async function startServer(): Promise<RunningServer> {
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators,
   });
+  // Ticket 11/12: the same ConnectionTrust.classify() every other route
+  // defers to (see app.ts's onRequest hook) — resolves a collaborator
+  // device's grants, or undefined (unrestricted) for local and the legacy
+  // shared-token remote path.
+  const requestTrust = (req: FastifyRequest) => classify(
+    { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+    { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
+  );
   registerWorkRoutes(app, workEngine, {
-    // Ticket 11 AC4: the same ConnectionTrust.classify() every other route
-    // defers to (see app.ts's onRequest hook) — a collaborator device's
-    // grantedRepositoryIds, or undefined (unrestricted) for local and the
-    // legacy shared-token remote path.
-    resolveGrantedRepositoryIds: (req) => classify(
-      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-      { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
-    ).device?.grantedRepositoryIds,
+    resolveGrantedRepositoryIds: (req) => requestTrust(req).device?.grantedRepositoryIds,
+    resolveActor: (req) => {
+      const device = requestTrust(req).device;
+      return device && toRunActor(device);
+    },
   });
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;

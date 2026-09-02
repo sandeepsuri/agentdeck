@@ -34,7 +34,8 @@ interface Props {
   onError: (message: string) => void;
 }
 
-function lines(value: string): string[] {
+/** Shared with CollaboratorLaunchPanel (MobileWorkspace.tsx) and CreateProfileForm (CollaboratorsPanel.tsx) — every "one item per line" textarea in this app parses the same way. */
+export function lines(value: string): string[] {
   return value.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 

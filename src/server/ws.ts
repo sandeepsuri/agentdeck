@@ -13,7 +13,7 @@ import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
-import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
+import { classify, toRunActor, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
 import { isAllowedRemoteInput } from './remote-input.js';
 import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
@@ -144,13 +144,13 @@ export function attachWs(
   const isLocalSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.kind === 'local';
   // Ticket 11 AC4: a named collaborator's device is authenticated (so it
   // may hold an open socket — AC5 needs something for revocation to
-  // terminate) but grants no session/Run *capability* over WS in this
-  // ticket, the same boundary app.ts's onRequest hook draws for REST
-  // (isCollaboratorViewRoute never includes session or attention routes).
-  // Extending 'attach'/'run_attention_resolve' to a resolved collaborator
-  // device is ticket 12's job ("let collaborators launch and guide
-  // authorized Runs"), gated by grantedRepositoryIds — not an
-  // unscoped side door here.
+  // terminate) but grants no raw *session* terminal capability over WS —
+  // 'attach' below stays refused for it, the same boundary app.ts's
+  // onRequest hook draws for REST (isCollaboratorViewRoute never includes
+  // a session route). Run *guidance* ('run_attention_resolve') is
+  // different: ticket 12 lets a collaborator device reach it too, gated by
+  // its own RunActor grants inside DurableWorkEngine.resolveAttention()
+  // (see that case below) rather than an unscoped socket-level allow here.
   const isCollaboratorSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.device !== undefined;
   const isUiVisible = () => [...uiPresence.values()].some(Boolean);
   const broadcastPresence = () => {
@@ -328,11 +328,22 @@ export function attachWs(
           // trust entry (should never happen post-upgrade) fails safe by
           // withholding it, same direction as the 'input' case's raw-write
           // check above.
-          if (!workEngine || isCollaboratorSocket(ws)) break;
+          if (!workEngine) break;
           const hasCompose = getConnectionTrust(ws)?.capabilities.has('compose') ?? false;
           if (!hasCompose) break;
           const decision = frame.decision === 'input' ? { kind: 'input' as const, value: frame.value } : { kind: frame.decision };
-          workEngine.resolveAttention(frame.runId, frame.attentionId, decision).catch(() => undefined);
+          // Ticket 12 AC1/AC7: a resolved collaborator device's RunActor
+          // (with grants) reaches the exact same
+          // DurableWorkEngine.resolveAttention() policy enforcement REST
+          // does (work-routes.ts) — a Run outside its grants is refused
+          // there, not here; this socket never decides that itself.
+          // Undefined for local and the legacy shared-token path, exactly
+          // like every other actor-accepting call site.
+          const device = getConnectionTrust(ws)?.device;
+          const args: Parameters<typeof workEngine.resolveAttention> = device
+            ? [frame.runId, frame.attentionId, decision, toRunActor(device)]
+            : [frame.runId, frame.attentionId, decision];
+          workEngine.resolveAttention(...args).catch(() => undefined);
           break;
         }
       }

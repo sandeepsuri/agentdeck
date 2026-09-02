@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
 import { buildAttemptEventEnvelope } from '../work-engine/durable-events.js';
-import type { AttemptEvent, RunRepository, WorkSpec } from '../work-engine/types.js';
+import type { AttemptEvent, Profile, RunRepository, WorkSpec } from '../work-engine/types.js';
 import { Store, openStore } from './index.js';
 
 let dir: string;
@@ -385,17 +385,19 @@ describe('settings', () => {
 
 describe('collaborators (ticket 11)', () => {
   it('round-trips a collaborator and its granted repositories', () => {
-    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'] });
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [] });
     expect(store.getCollaborator('collab-1')).toEqual({
-      id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'],
+      id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z',
+      grantedRepositoryIds: ['repo-1'], grantedProfileIds: [],
     });
     expect(store.listCollaborators()).toHaveLength(1);
-    store.updateCollaboratorGrants('collab-1', ['repo-1', 'repo-2']);
+    store.updateCollaboratorGrants('collab-1', { repositoryIds: ['repo-1', 'repo-2'], profileIds: ['profile-1'] });
     expect(store.getCollaborator('collab-1')?.grantedRepositoryIds).toEqual(['repo-1', 'repo-2']);
+    expect(store.getCollaborator('collab-1')?.grantedProfileIds).toEqual(['profile-1']);
   });
 
   it('looks an invitation up by its code hash, never by id, and records consumption', () => {
-    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
     store.createInvitation(
       { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
       'a-code-hash',
@@ -409,8 +411,8 @@ describe('collaborators (ticket 11)', () => {
   });
 
   it('looks a device up by its token hash and lists devices scoped to one collaborator', () => {
-    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
-    store.createCollaborator({ id: 'collab-2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
+    store.createCollaborator({ id: 'collab-2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
     store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
     store.createDevice({ id: 'device-2', collaboratorId: 'collab-2', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
 
@@ -423,7 +425,7 @@ describe('collaborators (ticket 11)', () => {
   });
 
   it('revoking a device is visible by id and by token hash, and does not touch other devices', () => {
-    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
     store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
     store.createDevice({ id: 'device-2', collaboratorId: 'collab-1', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
 
@@ -435,7 +437,7 @@ describe('collaborators (ticket 11)', () => {
   });
 
   it('survives a restart: collaborators, invitations, and devices are reopened with the same identity', () => {
-    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'] });
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [] });
     store.createInvitation(
       { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
       'a-code-hash',
@@ -449,6 +451,94 @@ describe('collaborators (ticket 11)', () => {
     expect(reopened.getDeviceByTokenHash('a-token-hash')?.id).toBe('device-1');
     reopened.close();
     store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('profiles (ticket 12)', () => {
+  const profile: Profile = {
+    id: 'profile-1',
+    name: 'Standard Codex run',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 900_000, maxModelTurns: 25 },
+    verificationIntent: { required: true, commands: ['npm test'] },
+    requestedDeliveryResult: 'local-commit',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('round-trips a Profile exactly, including its nested budget and verification intent', () => {
+    store.createProfile(profile);
+    expect(store.getProfile('profile-1')).toEqual(profile);
+    expect(store.getProfile('no-such-profile')).toBeUndefined();
+    expect(store.listProfiles()).toEqual([profile]);
+  });
+
+  it('survives a restart with the same identity', () => {
+    store.createProfile(profile);
+    store.close();
+    const reopened = openStore(dir);
+    expect(reopened.getProfile('profile-1')).toEqual(profile);
+    reopened.close();
+    store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('Run activity (ticket 12 AC2)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+  const spec: WorkSpec = {
+    objective: 'Add durable managed work',
+    acceptanceCriteria: ['Restart keeps identity'],
+    repository,
+    requestedBaseReference: 'refs/heads/main',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 3_600_000 },
+    verificationIntent: { required: false, commands: [] },
+    requestedDeliveryResult: 'working-tree',
+  };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: runId, taskId: `task-${runId}`, status: 'queued', spec, submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' }, envelope: { state: 'pending' }, verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('appends activity in chronological order, scoped to one Run', () => {
+    createRun('run-1');
+    createRun('run-2');
+    store.appendRunActivity({
+      id: 'act-1', runId: 'run-1', kind: 'submitted',
+      principal: { id: 'collab-1', displayName: 'Alice' }, device: { id: 'device-1', label: 'phone' },
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    store.appendRunActivity({
+      id: 'act-2', runId: 'run-1', kind: 'approved',
+      principal: { id: 'local:admin', displayName: 'admin' },
+      at: '2026-01-01T00:01:00.000Z',
+    });
+    store.appendRunActivity({
+      id: 'act-3', runId: 'run-2', kind: 'submitted',
+      principal: { id: 'local:admin', displayName: 'admin' }, at: '2026-01-01T00:02:00.000Z',
+    });
+
+    const activity = store.listRunActivity('run-1');
+    expect(activity.map((a) => a.id)).toEqual(['act-1', 'act-2']);
+    expect(activity[0]).toEqual({
+      id: 'act-1', runId: 'run-1', kind: 'submitted',
+      principal: { id: 'collab-1', displayName: 'Alice' }, device: { id: 'device-1', label: 'phone' },
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    // No `device` key at all for the local admin's own action — omitted, not null.
+    expect(activity[1]).not.toHaveProperty('device');
+  });
+
+  it('returns an empty list for a Run with no recorded activity', () => {
+    expect(store.listRunActivity('no-such-run')).toEqual([]);
   });
 });
 

@@ -15,13 +15,14 @@ import { nonEmptyString } from './validate.js';
 const MAX_DISPLAY_NAME_LENGTH = 200;
 const MAX_DEVICE_LABEL_LENGTH = 200;
 const MAX_CODE_LENGTH = 512;
-const MAX_REPOSITORY_IDS = 500;
-const MAX_REPOSITORY_ID_LENGTH = 500;
+const MAX_GRANT_IDS = 500;
+const MAX_GRANT_ID_LENGTH = 500;
 
-function parseRepositoryIds(value: unknown): string[] | undefined {
+/** Shared by grantedRepositoryIds and grantedProfileIds — both are just id arrays with the same bounds. */
+function parseIdArray(value: unknown): string[] | undefined {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_REPOSITORY_IDS) return undefined;
-  if (!value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= MAX_REPOSITORY_ID_LENGTH)) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_GRANT_IDS) return undefined;
+  if (!value.every((item) => typeof item === 'string' && item.length > 0 && item.length <= MAX_GRANT_ID_LENGTH)) return undefined;
   return value as string[];
 }
 
@@ -31,14 +32,16 @@ export function registerCollaboratorRoutes(app: FastifyInstance, collaborators: 
   // routes), so a remote connection can never mint its own invitations or
   // read the collaborator roster.
   app.post('/api/collaborators', async (req, reply) => {
-    const body = req.body as { displayName?: unknown; grantedRepositoryIds?: unknown } | null;
+    const body = req.body as { displayName?: unknown; grantedRepositoryIds?: unknown; grantedProfileIds?: unknown } | null;
     if (!nonEmptyString(body?.displayName, MAX_DISPLAY_NAME_LENGTH)) {
       return reply.code(400).send({ error: 'displayName is required' });
     }
-    const grantedRepositoryIds = parseRepositoryIds(body?.grantedRepositoryIds);
+    const grantedRepositoryIds = parseIdArray(body?.grantedRepositoryIds);
     if (grantedRepositoryIds === undefined) return reply.code(400).send({ error: 'grantedRepositoryIds must be an array of strings' });
+    const grantedProfileIds = parseIdArray(body?.grantedProfileIds);
+    if (grantedProfileIds === undefined) return reply.code(400).send({ error: 'grantedProfileIds must be an array of strings' });
     const { collaborator, invitation, code } = collaborators.inviteCollaborator({
-      displayName: body!.displayName as string, grantedRepositoryIds,
+      displayName: body!.displayName as string, grantedRepositoryIds, grantedProfileIds,
     });
     return reply.code(201).send({ collaborator, invitation, code });
   });
@@ -50,11 +53,17 @@ export function registerCollaboratorRoutes(app: FastifyInstance, collaborators: 
 
   app.patch('/api/collaborators/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const body = req.body as { grantedRepositoryIds?: unknown } | null;
-    const grantedRepositoryIds = parseRepositoryIds(body?.grantedRepositoryIds);
-    if (grantedRepositoryIds === undefined) return reply.code(400).send({ error: 'grantedRepositoryIds must be an array of strings' });
+    const body = req.body as { grantedRepositoryIds?: unknown; grantedProfileIds?: unknown } | null;
+    const grantedRepositoryIds = body?.grantedRepositoryIds === undefined ? undefined : parseIdArray(body.grantedRepositoryIds);
+    if (body?.grantedRepositoryIds !== undefined && grantedRepositoryIds === undefined) {
+      return reply.code(400).send({ error: 'grantedRepositoryIds must be an array of strings' });
+    }
+    const grantedProfileIds = body?.grantedProfileIds === undefined ? undefined : parseIdArray(body.grantedProfileIds);
+    if (body?.grantedProfileIds !== undefined && grantedProfileIds === undefined) {
+      return reply.code(400).send({ error: 'grantedProfileIds must be an array of strings' });
+    }
     try {
-      return collaborators.updateGrants(id, grantedRepositoryIds);
+      return collaborators.updateGrants(id, { repositoryIds: grantedRepositoryIds, profileIds: grantedProfileIds });
     } catch (error) {
       if (error instanceof CollaboratorNotFoundError) return reply.code(404).send({ error: error.message });
       throw error;

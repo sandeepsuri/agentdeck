@@ -18,9 +18,13 @@ export type Capability = 'view' | 'compose' | 'control-keys' | 'raw-write';
 /** Ticket 11 AC3: the named Principal and device a remote request's bearer token resolved to, when it matched a collaborator's device credential rather than the single shared tailnet token. */
 export interface RemoteDevice {
   readonly id: string;
+  /** Ticket 12 AC2: the human-readable device label recorded on every RunActivity row this device's actions produce — never just an opaque device id. */
+  readonly label: string;
   readonly principal: { readonly id: string; readonly displayName: string };
-  /** Repository ids this Principal may view (AC4) — routes filter Runs/Repositories by this, never by capabilities alone. */
+  /** Repository ids this Principal may view (ticket 11 AC4) and, together with grantedProfileIds, launch and guide Runs on (ticket 12 AC1) — routes filter by this, never by capabilities alone. */
   readonly grantedRepositoryIds: readonly string[];
+  /** Ticket 12 AC1: admin-approved Profile ids this Principal may submit a Run against. */
+  readonly grantedProfileIds: readonly string[];
 }
 
 export interface TrustResult {
@@ -28,6 +32,28 @@ export interface TrustResult {
   capabilities: Set<Capability>;
   /** Set only for a remote connection authenticated via a named collaborator's device credential — undefined for local and for the legacy shared-token path (see classify()'s `deviceLookup` opt). */
   device?: RemoteDevice;
+}
+
+/**
+ * Ticket 12 AC1/AC7: index.ts (REST) and ws.ts (WebSocket) both need to
+ * turn a resolved `RemoteDevice` into the work-engine/types.ts `RunActor`
+ * shape DurableWorkEngine's mutating methods accept, so the exact same
+ * policy enforcement applies regardless of transport. Defined structurally
+ * here (not importing work-engine/types.ts's RunActor type) to keep this
+ * module's own dependency graph minimal, same reasoning as the header
+ * comment above — TS's structural typing still makes the result directly
+ * assignable at both call sites.
+ */
+export function toRunActor(device: RemoteDevice): {
+  principal: { id: string; displayName: string };
+  device: { id: string; label: string };
+  grants: { repositoryIds: readonly string[]; profileIds: readonly string[] };
+} {
+  return {
+    principal: device.principal,
+    device: { id: device.id, label: device.label },
+    grants: { repositoryIds: device.grantedRepositoryIds, profileIds: device.grantedProfileIds },
+  };
 }
 
 // Re-exported from protocol.ts (not defined here) so the browser bundle can

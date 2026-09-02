@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { deriveRunAttentionItems } from '../attention.js';
 import {
-  InvalidRunStateError, InvalidWorkSpecError, RunAttentionNotPendingError, RunNotFoundError, RunPreparationError,
-  UnsupportedRuntimeError,
+  InvalidRunStateError, InvalidWorkSpecError, PolicyDeniedError, RunAttentionNotPendingError, RunNotFoundError,
+  RunPreparationError, UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
-import type { AttentionDecisionInput, WorkEngine, WorkSpec } from '../work-engine/types.js';
+import type { AttentionDecisionInput, RunActor, WorkEngine, WorkSpec } from '../work-engine/types.js';
 import { nonEmptyString } from './validate.js';
 
 export interface WorkRoutesDeps {
@@ -17,6 +17,25 @@ export interface WorkRoutesDeps {
    * module's own tests don't need a real Fastify request/ConnectionTrust.
    */
   resolveGrantedRepositoryIds?: (request: FastifyRequest) => readonly string[] | undefined;
+  /**
+   * Ticket 12 AC1/AC2/AC7: the RunActor a mutating request (submit,
+   * prepare, start, cancel, resolveAttention) is made as — undefined for
+   * local and legacy-shared-token connections, which stay unrestricted
+   * (the Work Engine itself defaults to its own principalSource, exactly
+   * pre-ticket-12 behavior). A resolved collaborator device's RunActor
+   * carries `grants`, so the SAME DurableWorkEngine.enforcePolicy() every
+   * other transport (WebSocket, a direct engine call) reaches makes the
+   * actual allow/deny decision here — this route only resolves who's
+   * asking, never decides what they may do.
+   */
+  resolveActor?: (request: FastifyRequest) => RunActor | undefined;
+}
+
+/** Ticket 12 AC1/AC4: a PolicyDeniedError is a 403, everywhere it can surface below — never conflated with InvalidWorkSpecError/InvalidRunStateError's 400s, which mean "the request was malformed," not "you're not allowed." */
+function handlePolicyDenied(error: unknown, reply: FastifyReply): boolean {
+  if (!(error instanceof PolicyDeniedError)) return false;
+  reply.code(403).send({ error: error.message, rule: error.rule });
+  return true;
 }
 
 /** Local admin REST adapter; all behavior remains owned by WorkEngine. */
@@ -36,7 +55,14 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   // below; Fastify's router prefers a static path segment over a
   // parametric one regardless of registration order, but this keeps intent
   // obvious to a reader.
-  app.get('/api/runs/attention', async () => deriveRunAttentionItems(workEngine.list()));
+  //
+  // Ticket 12 AC3: a collaborator device must be able to see and resolve
+  // its own granted Run's pending attention too, so this now reuses
+  // scopeRuns' same grant filter — never the unfiltered, system-wide queue
+  // the legacy shared-token/local paths still get (app.ts's
+  // isRemoteAllowedRoute keeps granting that unfiltered read to those,
+  // unchanged).
+  app.get('/api/runs/attention', async (request) => deriveRunAttentionItems(scopeRuns(request)));
 
   app.get('/api/runs/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -50,11 +76,21 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     return run;
   });
 
+  // Ticket 12 AC5: how the admin actually observes who did what to a
+  // collaborator's Run — never on isCollaboratorAllowedRoute (app.ts), so
+  // this stays local-only exactly like GET /api/runs/:id's full spec.
+  app.get('/api/runs/:id/activity', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!workEngine.get(id)) return reply.code(404).send({ error: 'no such run' });
+    return workEngine.listActivity(id);
+  });
+
   app.post('/api/runs', async (request, reply) => {
     try {
-      const run = await workEngine.submit(request.body as WorkSpec);
+      const run = await workEngine.submit(request.body as WorkSpec, deps.resolveActor?.(request));
       return reply.code(201).send(run);
     } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
       if (error instanceof InvalidWorkSpecError) {
         return reply.code(400).send({ error: error.message });
       }
@@ -65,8 +101,9 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   app.post('/api/runs/:id/prepare', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      return await workEngine.prepare(id);
+      return await workEngine.prepare(id, deps.resolveActor?.(request));
     } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
       if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
       if (error instanceof InvalidRunStateError || error instanceof RunPreparationError) {
         return reply.code(400).send({ error: error.message });
@@ -78,8 +115,9 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   app.post('/api/runs/:id/start', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      return await workEngine.start(id);
+      return await workEngine.start(id, deps.resolveActor?.(request));
     } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
       if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
       if (error instanceof InvalidRunStateError || error instanceof UnsupportedRuntimeError) {
         return reply.code(400).send({ error: error.message });
@@ -91,8 +129,9 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   app.post('/api/runs/:id/cancel', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
-      return await workEngine.cancel(id);
+      return await workEngine.cancel(id, deps.resolveActor?.(request));
     } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
       if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
       throw error;
     }
@@ -111,8 +150,9 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   ) => {
     const { id, attentionId } = request.params as { id: string; attentionId: string };
     try {
-      return await workEngine.resolveAttention(id, attentionId, decision);
+      return await workEngine.resolveAttention(id, attentionId, decision, deps.resolveActor?.(request));
     } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
       if (error instanceof RunNotFoundError || error instanceof RunAttentionNotPendingError) {
         return reply.code(404).send({ error: error.message });
       }

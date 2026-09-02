@@ -1,6 +1,7 @@
 // T4 protocol tests: WS bridge + REST routes against a fake backend.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,10 @@ import type { Handle, SessionBackend } from '../sessions/backend.js';
 import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
 import { CollaboratorService } from '../collaborators/service.js';
+import { DurableWorkEngine } from '../work-engine/engine.js';
+import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
+import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
+import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs, getConnectionTrust } from './ws.js';
@@ -1334,7 +1339,7 @@ describe('ticket 07: run_attention_resolve WS authorization — the same Durable
     ws.close();
   });
 
-  it('ticket 11 AC4: a collaborator device cannot resolve Run attention over WS — that is "guiding" a Run, not viewing it', async () => {
+  it('ticket 12 AC1/AC7: a collaborator device\'s run_attention_resolve forwards its RunActor (Principal, device, grants) — the exact same policy path REST reaches, this socket never deciding allow/deny itself', async () => {
     // Deliberately not using this describe block's shared setUp()/attnWss —
     // attachWs registers its own 'upgrade' listener on the http.Server, so
     // a second attachWs call on the same server (to add a collaborators
@@ -1355,8 +1360,8 @@ describe('ticket 07: run_attention_resolve WS authorization — the same Durable
     if (addr === null || typeof addr === 'string') throw new Error('no port');
 
     try {
-      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
-      const { token } = collaborators.exchangeInvitation(code, 'phone');
+      const { code, collaborator } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'] });
+      const { token, device } = collaborators.exchangeInvitation(code, 'phone');
 
       const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
       await new Promise<void>((resolve, reject) => {
@@ -1365,9 +1370,13 @@ describe('ticket 07: run_attention_resolve WS authorization — the same Durable
       });
 
       ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
 
-      expect(resolveAttention).not.toHaveBeenCalled();
+      expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'approve' }, {
+        principal: { id: collaborator.id, displayName: 'Alice' },
+        device: { id: device.id, label: 'phone' },
+        grants: { repositoryIds: ['repo-1'], profileIds: [] },
+      });
       ws.close();
     } finally {
       await closeWs(wss);
@@ -1375,6 +1384,77 @@ describe('ticket 07: run_attention_resolve WS authorization — the same Durable
       await manager.shutdown();
       store.close();
       fs.rmSync(sessionsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ticket 12 AC1/AC8: an ungranted collaborator device cannot bypass policy over WebSocket', () => {
+  const REMOTE_HOST = 'collab-attention-policy-host.tailnet-1234.ts.net';
+
+  it('run_attention_resolve for a Repository this collaborator was never granted never actually resolves the Run\'s pending attention', async () => {
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-policy-'));
+    const manager = new SessionManager(new FakeBackend(), store, { sessionsDir });
+    const collaborators = new CollaboratorService(store);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-policy-engine-'));
+    const repoPath = path.join(root, 'repo');
+    execFileSync('git', ['init'], { cwd: (() => { fs.mkdirSync(repoPath, { recursive: true }); return repoPath; })() });
+    execFileSync('git', ['config', 'user.email', 'agentdeck@example.test'], { cwd: repoPath });
+    execFileSync('git', ['config', 'user.name', 'AgentDeck Test'], { cwd: repoPath });
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'fixture\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repoPath });
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoPath });
+    execFileSync('git', ['branch', '-M', 'main'], { cwd: repoPath });
+    store.upsertRepo({ id: repoPath, name: 'repo', path: repoPath });
+    store.setRepositoryVerificationPolicy(repoPath, { kind: 'no-verification' });
+    const fakeCodex = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const workEngine = new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), {
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fakeCodex.spawn }),
+    });
+
+    const app = buildApp({ config: defaultConfig(), manager, store, remoteHosts: [REMOTE_HOST], collaborators, workEngine });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const wss = attachWs([app.server], manager, '/ws', undefined, undefined, { remoteHosts: [REMOTE_HOST] }, workEngine, collaborators);
+    const addr = app.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+
+    try {
+      // Granted a DIFFERENT repository — never this one.
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['some-other-repo'] });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+
+      const submitted = await workEngine.submit({
+        objective: 'Fix the flaky login test', acceptanceCriteria: ['The test passes reliably'],
+        repository: { id: repoPath, name: 'repo', path: repoPath }, requestedBaseReference: 'main',
+        runtimePreference: ['codex'], budget: { maxWallClockMs: 900_000 },
+        verificationIntent: { required: false, commands: [] }, requestedDeliveryResult: 'working-tree',
+      });
+      await workEngine.prepare(submitted.id);
+      await workEngine.start(submitted.id);
+      await vi.waitUntil(() => workEngine.get(submitted.id)?.pendingAttention !== undefined);
+      const pending = workEngine.get(submitted.id)!.pendingAttention!;
+
+      const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+      ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: submitted.id, attentionId: pending.id, decision: 'approve' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Still pending — the policy-denied resolveAttention() rejection was
+      // swallowed (fire-and-forget, same as any other resolveAttention
+      // failure — see the case's own comment), but the Run itself was
+      // never touched.
+      expect(workEngine.get(submitted.id)?.pendingAttention?.id).toBe(pending.id);
+      ws.close();
+    } finally {
+      await closeWs(wss);
+      await app.close();
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 });

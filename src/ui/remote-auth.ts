@@ -1,7 +1,9 @@
-export interface ConnectionInfo {
-  kind: 'local' | 'remote' | 'denied';
-  capabilities: string[];
-}
+// Ticket 12: apiFetch.ts's ConnectionInfo is a superset (adds an optional
+// `principal` for a resolved collaborator device) of what this module ever
+// reads. Imported (not redefined) and re-exported so existing importers of
+// `./remote-auth.js`'s ConnectionInfo keep working unchanged.
+import type { ConnectionInfo } from './apiFetch.js';
+export type { ConnectionInfo };
 
 /**
  * Finishes a successful first-time phone authentication before the mobile

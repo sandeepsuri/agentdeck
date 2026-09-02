@@ -139,8 +139,10 @@ describe('classify', () => {
 describe('classify with a collaborator deviceLookup (ticket 11)', () => {
   const DEVICE = {
     id: 'device-1',
+    label: "Alice's phone",
     principal: { id: 'collab-1', displayName: 'Alice' },
     grantedRepositoryIds: ['repo-1'],
+    grantedProfileIds: ['profile-1'],
   };
 
   it('resolves a device credential to its Principal and device when the shared token does not match', () => {

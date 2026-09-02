@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session } from '../types.js';
-import type { AttentionDecisionInput, WorkRun } from '../work-engine/types.js';
+import type { AttentionDecisionInput, Profile, WorkRun } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
@@ -113,6 +113,13 @@ export function App() {
   // with zero extra delay, and only switch to the phone view once
   // GET /api/connection actually reports 'remote'.
   const [connectionKind, setConnectionKind] = useState<'local' | 'remote'>('local');
+  // Ticket 12 AC1/AC6: set only when this connection resolved to a named
+  // collaborator's device credential — drives whether MobileWorkspace
+  // offers launching/guiding Runs, and which Repositories/Profiles it
+  // offers them for.
+  const [collaboratorPrincipal, setCollaboratorPrincipal] = useState<{ id: string; displayName: string } | null>(null);
+  const [collaboratorRepos, setCollaboratorRepos] = useState<Repo[]>([]);
+  const [collaboratorProfiles, setCollaboratorProfiles] = useState<Profile[]>([]);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
@@ -304,16 +311,40 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     fetchConnection()
-      .then((body: { kind: 'local' | 'remote' | 'denied'; capabilities: string[] }) => {
+      .then((body) => {
         if (cancelled) return;
         if (body.kind === 'remote') setConnectionKind('remote');
         if (body.kind === 'denied') setConnectionGate('denied');
         else if (body.kind === 'remote' && body.capabilities.length === 0) setConnectionGate('needs-token');
         else setConnectionGate('ready');
+        // Ticket 12 AC6: present only for a resolved collaborator device —
+        // drives whether MobileWorkspace offers launching/guiding Runs.
+        setCollaboratorPrincipal(body.principal ?? null);
       })
       .catch(() => undefined); // can't reach the API at all — leave the normal error/reconnect paths to surface that
     return () => { cancelled = true; };
   }, []);
+
+  // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
+  // Repositories and Profiles — GET /api/repos and GET /api/profiles are
+  // already grant-filtered server-side (routes.ts/profile-routes.ts), so
+  // this is the same shape refreshRepos would do for the desktop path,
+  // just scoped to when there's actually a collaborator Principal to fetch
+  // for. Re-fetches only once on identifying as a collaborator device —
+  // grants rarely change mid-session, and the launch form re-opens fresh.
+  useEffect(() => {
+    if (!collaboratorPrincipal) return;
+    let cancelled = false;
+    Promise.all([
+      apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).catch(() => []),
+      apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []),
+    ]).then(([grantedRepos, grantedProfiles]) => {
+      if (cancelled) return;
+      setCollaboratorRepos(grantedRepos);
+      setCollaboratorProfiles(grantedProfiles);
+    });
+    return () => { cancelled = true; };
+  }, [collaboratorPrincipal]);
 
   const submitToken = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -486,6 +517,9 @@ export function App() {
       <div className="mobile-shell">
         {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
         <MobileWorkspace
+          collaboratorPrincipal={collaboratorPrincipal}
+          collaboratorProfiles={collaboratorProfiles}
+          collaboratorRepos={collaboratorRepos}
           onError={setError}
           onResolveRunAttention={resolveRunAttention}
           onSelect={selectSession}

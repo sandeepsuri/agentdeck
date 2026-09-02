@@ -237,7 +237,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // whether to show the token-entry screen.
   app.get('/api/connection', async (req) => {
     const trust = requestTrust(req);
-    return { kind: trust.kind, capabilities: [...trust.capabilities] };
+    // Ticket 12 AC6: lets the client tell "I'm a named collaborator" apart
+    // from "I'm the admin's own phone on the legacy shared token" (same
+    // `kind: 'remote'`, same capabilities) so the mobile UI knows whether
+    // to offer launching/guiding Runs at all — never anything more
+    // sensitive than the id/displayName this device's own resolveDevice()
+    // already hands back on exchange.
+    const principal = trust.device?.principal;
+    return principal
+      ? { kind: trust.kind, capabilities: [...trust.capabilities], principal }
+      : { kind: trust.kind, capabilities: [...trust.capabilities] };
   });
 
   app.get('/api/runtime-readiness', async () => publicRuntimeReadinessReport(await runtimeReadiness.get()));
