@@ -25,6 +25,21 @@ export interface AttemptLaunchContext {
    * runtimes/codex.ts's fallback.
    */
   readonly awaitAttentionDecision?: (attentionId: string) => Promise<AttentionDecisionInput>;
+  /**
+   * Ticket 09 AC5/AC1: resolves once the engine has decided to stop this
+   * round right now — a cancellation, or a wall-clock budget firing. An
+   * adapter that owns a real process (runtimes/codex.ts) is expected to
+   * listen for this itself and kill that process directly the moment it
+   * resolves, rather than relying on its `run()` generator being asked to
+   * `.return()`: once a `.next()` call on it is already outstanding (always
+   * true for an actively-consumed generator), `.return()` only queues
+   * behind that call and never takes effect if it never settles — exactly
+   * the case a genuinely hung runtime is. Optional for the same reason
+   * `awaitAttentionDecision` is: existing adapter-contract test contexts
+   * never set it, and an adapter must still behave correctly without it —
+   * it simply cannot be stopped mid-round from outside in that case.
+   */
+  readonly abortRequested?: Promise<void>;
 }
 
 export interface RuntimeAttemptAdapter {

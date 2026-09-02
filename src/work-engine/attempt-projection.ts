@@ -20,8 +20,10 @@ export interface AttemptRecordMeta {
  * projects to 'idle'. Otherwise the ordered `events` (already durable,
  * already deduplicated) decide the rest:
  *
- * - a trailing 'failure' event freezes 'failed' — a runtime failure never
- *   goes through verification (ticket 08 AC6);
+ * - a trailing 'failure' or 'budget-exceeded' event freezes 'failed' — a
+ *   runtime failure or a hard resource limit (ticket 09) never goes through
+ *   verification (ticket 08 AC6); RunStatus (deriveRunStatus below) is where
+ *   'failed' vs. 'failed_budget' actually surfaces;
  * - a trailing 'verification-outcome' event (ticket 08) freezes 'completed'
  *   — the runtime itself always finished normally for one to exist at all,
  *   whichever gate outcome it records; RunStatus (deriveRunStatus below) is
@@ -49,6 +51,11 @@ export function projectAttemptState(
       state: 'failed', runtime, startedAt, events, failedAt: last.at, reason: last.reason,
     };
   }
+  if (last?.kind === 'budget-exceeded') {
+    return {
+      state: 'failed', runtime, startedAt, events, failedAt: last.at, reason: describeBudgetExceeded(last),
+    };
+  }
   if (last?.kind === 'verification-outcome') {
     const completedAt = [...events].reverse().find((event) => event.kind === 'completion')?.at ?? last.at;
     return {
@@ -56,6 +63,30 @@ export function projectAttemptState(
     };
   }
   return { state: 'running', runtime, startedAt, events };
+}
+
+/** A precise, human-readable reason for a hard-limit failure — the same "explicit" bar AC3 asks of the durable event itself. */
+function describeBudgetExceeded(event: { limit: string; configured: number; observed: number }): string {
+  return `Hard limit exceeded: ${event.limit} (configured ${event.configured}, observed ${event.observed}).`;
+}
+
+/**
+ * Ticket 09 AC4: whether a pause is merely requested, has taken effect, or
+ * neither — folded from the durable event log so a restart (recovery.ts)
+ * and a live read (deriveRunStatus below) can never disagree. 'resumed'
+ * cancels a prior request/pause back to 'none', exactly like
+ * 'attention-resolved' cancels a pending attention request.
+ */
+export type PauseState = 'none' | 'requested' | 'paused';
+
+export function derivePauseState(events: readonly AttemptEvent[]): PauseState {
+  let state: PauseState = 'none';
+  for (const event of events) {
+    if (event.kind === 'pause-requested') state = 'requested';
+    else if (event.kind === 'paused') state = 'paused';
+    else if (event.kind === 'resumed') state = 'none';
+  }
+  return state;
 }
 
 /**
@@ -131,7 +162,11 @@ export function deriveRunStatus(
   attempt: AttemptState,
   pendingAttention?: RunAttentionRequest,
 ): WorkRun['status'] {
-  if (attempt.state === 'failed') return 'failed';
+  if (attempt.state === 'failed') {
+    // projectAttemptState only ever freezes 'failed' from a trailing
+    // 'failure' or 'budget-exceeded' event — see its own doc comment.
+    return attempt.events.at(-1)?.kind === 'budget-exceeded' ? 'failed_budget' : 'failed';
+  }
   if (attempt.state === 'completed') {
     const outcome = attempt.events.at(-1);
     // projectAttemptState only ever freezes 'completed' from a trailing
@@ -143,6 +178,11 @@ export function deriveRunStatus(
   if (attempt.state === 'running') {
     if (pendingAttention?.kind === 'approval') return 'waiting_approval';
     if (pendingAttention?.kind === 'input') return 'waiting_input';
+    // Ticket 09 AC4: a pause takes priority over the plain 'verifying'/
+    // 'running' read below — it is the more actionable fact once known.
+    const pause = derivePauseState(attempt.events);
+    if (pause === 'paused') return 'paused';
+    if (pause === 'requested') return 'pause_requested';
     if (isVerifying(attempt.events)) return 'verifying';
     return 'running';
   }

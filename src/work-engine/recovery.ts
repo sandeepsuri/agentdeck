@@ -12,6 +12,7 @@
 // only ever records a terminal fact, never replays one.
 import type { RuntimeReadinessReport } from '../sessions/runtime-readiness.js';
 import type { AgentType } from '../types.js';
+import { derivePauseState } from './attempt-projection.js';
 import type { AttemptEvent } from './types.js';
 
 /**
@@ -65,6 +66,23 @@ function describeUnverifiedCompletion(events: readonly AttemptEvent[]): string |
     + 'live process remains to finish that check, so the outcome is not assumed.';
 }
 
+/**
+ * Ticket 09 AC6: a pause that was requested or had already taken effect is
+ * folded from the whole event log (derivePauseState), not just the trailing
+ * event — a still-live round can append ordinary progress events on top of
+ * an outstanding 'pause-requested' before the restart lands. Restart ends
+ * the Attempt precisely either way (no live process survives to honor the
+ * pause or resume it later), but the reason says so plainly rather than
+ * describing it as an ordinary interruption.
+ */
+function describePausedAttempt(events: readonly AttemptEvent[]): string | undefined {
+  const pause = derivePauseState(events);
+  if (pause === 'none') return undefined;
+  return pause === 'paused'
+    ? 'The Attempt was paused, waiting to be resumed, when the restart happened.'
+    : 'A pause had been requested but never reached a safe boundary to take effect before the restart.';
+}
+
 /** Whether the installed runtime's own CLI reports structured continuation support — never, by itself, whether resuming is actually safe (see describeUnrecoverableAttempt). */
 export function isContinuationSupported(readiness: RuntimeReadinessReport, runtime: AgentType): boolean {
   const runtimeReadiness = readiness.runtimes.find((candidate) => candidate.runtime === runtime);
@@ -91,5 +109,7 @@ export function describeUnrecoverableAttempt(
   const pendingAttention = describePendingAttention(events);
   if (pendingAttention) return `${base} ${pendingAttention}`;
   const unverifiedCompletion = describeUnverifiedCompletion(events);
-  return unverifiedCompletion ? `${base} ${unverifiedCompletion}` : base;
+  if (unverifiedCompletion) return `${base} ${unverifiedCompletion}`;
+  const paused = describePausedAttempt(events);
+  return paused ? `${base} ${paused}` : base;
 }

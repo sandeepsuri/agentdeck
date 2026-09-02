@@ -13,6 +13,7 @@ import {
   buildRunEnvelope,
   CapabilityEnvelopeViolation,
   CHILD_RUN_CEILING,
+  DEFAULT_PROCESS_CEILING,
   filterEnvironment,
   MANAGED_ENVIRONMENT_ALLOWLIST,
   TRUSTED_RUNTIME_PROVIDER_DOMAINS,
@@ -88,6 +89,45 @@ describe('buildRunEnvelope', () => {
     if (state.state !== 'ready') throw new Error('expected ready');
     expect(state.capabilityEnvelope.runtime).toBe('codex');
     expect(state.capabilityEnvelope.profile.allowedNetworkDomains).toBe(TRUSTED_RUNTIME_PROVIDER_DOMAINS.codex);
+  });
+
+  it('tightens the process ceiling to the requester\'s own budget when it asks for fewer than the admin default (ticket 09 AC1)', () => {
+    const state = buildRunEnvelope({
+      runtimePreference: ['codex'],
+      readiness: readiness(),
+      worktreePath: '/runs/abc/worktree',
+      budget: { maxConcurrentProcesses: 2 },
+    });
+
+    expect(state.state).toBe('ready');
+    if (state.state !== 'ready') throw new Error('expected ready');
+    expect(state.capabilityEnvelope.profile.processCeiling).toBe(2);
+  });
+
+  it('never lets the requester\'s own budget loosen the admin process ceiling beyond its default', () => {
+    const state = buildRunEnvelope({
+      runtimePreference: ['codex'],
+      readiness: readiness(),
+      worktreePath: '/runs/abc/worktree',
+      budget: { maxConcurrentProcesses: DEFAULT_PROCESS_CEILING + 100 },
+    });
+
+    expect(state.state).toBe('ready');
+    if (state.state !== 'ready') throw new Error('expected ready');
+    expect(state.capabilityEnvelope.profile.processCeiling).toBe(DEFAULT_PROCESS_CEILING);
+  });
+
+  it('uses the admin process ceiling as-is when the requester\'s budget says nothing about it', () => {
+    const state = buildRunEnvelope({
+      runtimePreference: ['codex'],
+      readiness: readiness(),
+      worktreePath: '/runs/abc/worktree',
+      budget: {},
+    });
+
+    expect(state.state).toBe('ready');
+    if (state.state !== 'ready') throw new Error('expected ready');
+    expect(state.capabilityEnvelope.profile.processCeiling).toBe(DEFAULT_PROCESS_CEILING);
   });
 
   it('refuses managed status with a precise reason rather than degrading when no preferred runtime qualifies', () => {

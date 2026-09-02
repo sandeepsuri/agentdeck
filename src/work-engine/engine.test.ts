@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
   afterEach, describe, expect, it, vi,
 } from 'vitest';
 import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
+import { createFakeClock } from '../test-fixtures/clock.js';
 import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
 import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { Store } from '../store/index.js';
@@ -16,6 +18,7 @@ import {
 } from './engine.js';
 import { runBranchName, runWorktreePath } from './prepare.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
+import type { CodexAttemptProcess, CodexProcessSpawner } from './runtimes/codex.js';
 import { createShellVerificationGateRunner, MAX_VERIFICATION_REPAIR_ATTEMPTS } from './verification.js';
 import type { GateExecutionResult, VerificationGateRunner } from './verification.js';
 import type { RunRepository, WorkRun, WorkSpec } from './types.js';
@@ -1053,4 +1056,303 @@ describe('DurableWorkEngine verification and repair (ticket 08)', () => {
     }
     store.close();
   }, 15000);
+});
+
+describe('DurableWorkEngine budgets and safe controls (ticket 09)', () => {
+  /**
+   * A `codex app-server` double that completes the handshake and then goes
+   * silent forever — no further notification, no exit — standing in for a
+   * runtime that is genuinely hung. `killed` flips true only if `kill()` is
+   * actually called, which is how these tests prove a hard limit or a
+   * cancellation really stopped the live process rather than just changing
+   * what the Run's status reads.
+   */
+  function hangingCodexSpawn(): { spawn: CodexProcessSpawner; killed: { value: boolean } } {
+    const killed = { value: false };
+    const spawn: CodexProcessSpawner = (_executable, _args, _options) => {
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(() => {
+        // Never resolves on its own — only kill() below ends this double's story.
+      });
+      let buffer = '';
+      stdin.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8');
+        let index = buffer.indexOf('\n');
+        while (index >= 0) {
+          const line = buffer.slice(0, index).trim();
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf('\n');
+          if (!line) continue;
+          const message = JSON.parse(line) as { id?: number; method?: string };
+          if (message.method === 'initialize') {
+            stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} })}\n`);
+          } else if (message.method === 'thread/start') {
+            stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-hang-1' } } })}\n`);
+          }
+          // turn/start deliberately gets no response at all — the Attempt
+          // hangs with nothing further, exactly like a wedged provider.
+        }
+      });
+      return {
+        stdin, stdout, stderr, exited, kill: () => { killed.value = true; stdout.end(); },
+      } satisfies CodexAttemptProcess;
+    };
+    return { spawn, killed };
+  }
+
+  function setUp(
+    runtimeAdapters: ConstructorParameters<typeof DurableWorkEngine>[3],
+    verificationGateRunner?: VerificationGateRunner,
+    clock?: ConstructorParameters<typeof DurableWorkEngine>[5],
+  ) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(
+      store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters, verificationGateRunner, clock,
+    );
+    return { store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    return engine.get(runId)!;
+  }
+
+  function attemptStartCount(run: WorkRun): number {
+    if (run.attempt.state === 'idle') return 0;
+    return run.attempt.events.filter((event) => event.kind === 'lifecycle' && event.phase === 'attempt-started').length;
+  }
+
+  function codexAdapter(fake: ReturnType<typeof createFakeCodexAppServer>) {
+    return { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+  }
+
+  it('kills a hanging Attempt once its wall-clock budget elapses, reaching failed_budget with durable evidence (AC1/AC3/AC7)', async () => {
+    const { spawn, killed } = hangingCodexSpawn();
+    const clock = createFakeClock();
+    const { store, repository, engine } = setUp(
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }) },
+      undefined,
+      clock,
+    );
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxWallClockMs: 5000 } });
+
+    await engine.start(prepared.id);
+    await clock.advance(5000);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'failed_budget');
+
+    expect(killed.value).toBe(true);
+    const run = engine.get(prepared.id)!;
+    if (run.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(run.attempt.reason).toContain('maxWallClockMs');
+    expect(run.attempt.events.at(-1)).toMatchObject({
+      kind: 'budget-exceeded', limit: 'maxWallClockMs', configured: 5000, observed: 5000,
+    });
+    store.close();
+  });
+
+  it('never fires the wall-clock budget before it actually elapses', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const clock = createFakeClock();
+    const { store, repository, engine } = setUp(codexAdapter(fake), undefined, clock);
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxWallClockMs: 60_000 } });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    store.close();
+  });
+
+  it('stops runtime authority immediately on cancel — the live process is killed rather than left to run to completion (AC5)', async () => {
+    const { spawn, killed } = hangingCodexSpawn();
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    const started = await engine.start(prepared.id);
+    expect(started.status).toBe('running');
+    // Give the fake process's handshake a chance to land durably before cancelling.
+    await vi.waitUntil(() => {
+      const run = engine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'idle' && run.attempt.events.length > 0;
+    });
+
+    const cancelled = await engine.cancel(prepared.id);
+
+    expect(cancelled.status).toBe('cancelled');
+    await vi.waitUntil(() => killed.value === true);
+    expect(killed.value).toBe(true);
+    // Cancellation preserves the worktree, events, and result history — it
+    // is only ever a status change plus stopping the live process; nothing
+    // in the durable event log is rewritten.
+    const run = engine.get(prepared.id)!;
+    expect(run.status).toBe('cancelled');
+    store.close();
+  });
+
+  it('honors budget.maxRepairAttempts instead of the default repair-cycle ceiling (AC1: Attempt count / repair cycles)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+      budget: { maxRepairAttempts: 1 },
+    });
+    expect(MAX_VERIFICATION_REPAIR_ATTEMPTS).not.toBe(1); // the test is only meaningful if this differs from the default
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(settled.attempt.events.at(-1)).toMatchObject({
+      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: 1,
+    });
+    expect(attemptStartCount(settled)).toBe(2); // initial round + exactly one repair round
+    store.close();
+  });
+
+  it('pauses at the next safe boundary — distinguishing requested from effective — and resumes to completion (AC4)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && engineHandle) {
+        const requested = await engineHandle.pause(runId);
+        expect(requested.status).toBe('pause_requested');
+      }
+      return gateCalls === 1
+        ? { passed: false, exitCode: 1, evidence: 'not fixed yet' }
+        : { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'paused');
+
+    const paused = engine.get(prepared.id)!;
+    expect(paused.status).toBe('paused');
+    // Paused before the repair round starts — the effective pause is a real
+    // safe boundary, not merely "the request landed somewhere."
+    expect(attemptStartCount(paused)).toBe(1);
+    expect(gateCalls).toBe(1);
+
+    const resumed = await engine.resume(prepared.id);
+    expect(resumed.status).not.toBe('paused');
+    expect(resumed.status).not.toBe('pause_requested');
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(gateCalls).toBe(2);
+    expect(attemptStartCount(settled)).toBe(2);
+    if (settled.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    const kinds = settled.attempt.events.map((event) => event.kind);
+    expect(kinds).toContain('pause-requested');
+    expect(kinds).toContain('paused');
+    expect(kinds).toContain('resumed');
+    store.close();
+  });
+
+  it('rejects pausing a Run with no live Attempt, and resuming a Run that was never paused', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake));
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await expect(engine.pause(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await expect(engine.resume(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await expect(engine.pause('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('lets a cancellation end a paused Attempt rather than hanging forever waiting for a resume that never comes', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && engineHandle) await engineHandle.pause(runId);
+      return { passed: false, exitCode: 1, evidence: 'still broken' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'paused');
+
+    const cancelled = await engine.cancel(prepared.id);
+    expect(cancelled.status).toBe('cancelled');
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'cancelled');
+
+    // Never resumed — the cancel alone ended it, proving the abort signal
+    // reaches an Attempt that is blocked at a paused safe boundary.
+    expect(gateCalls).toBe(1);
+    store.close();
+  }, 10_000);
+
+  it('keeps the frozen budget intact and a cancellation durable after a restart (AC6)', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const { spawn, killed } = hangingCodexSpawn();
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await firstEngine.prepare((await firstEngine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', budget: { maxWallClockMs: 3_600_000, maxRepairAttempts: 1 },
+    })).id);
+    await firstEngine.start(prepared.id);
+    await vi.waitUntil(() => {
+      const run = firstEngine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'idle' && run.attempt.events.length > 0;
+    });
+    await firstEngine.cancel(prepared.id);
+    await vi.waitUntil(() => killed.value === true);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id)!;
+
+    // The frozen budget — including ticket 09's own maxRepairAttempts — is
+    // never reset by a restart; it is simply the already-durable WorkSpec.
+    expect(reopened.spec.budget).toEqual({ maxWallClockMs: 3_600_000, maxRepairAttempts: 1 });
+    expect(reopened.status).toBe('cancelled');
+    reopenedStore.close();
+  });
 });

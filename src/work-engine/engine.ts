@@ -4,6 +4,8 @@ import { defaultDataDir } from '../config.js';
 import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import type { AgentType, Task } from '../types.js';
+import { systemClock } from './clock.js';
+import type { Clock, TimerHandle } from './clock.js';
 import { buildAttemptEventEnvelope } from './durable-events.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
@@ -17,6 +19,37 @@ import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/ada
 import type {
   AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
 } from './types.js';
+
+/**
+ * Ticket 09 AC1/AC3/AC5: why one adapter round stopped short of a natural
+ * completion/failure — either an operator's cancel() (no further evidence
+ * needed; the raw 'cancelled' status already says why, exactly as it always
+ * has) or the frozen budget.maxWallClockMs deadline firing (which does need
+ * durable evidence — see AttemptBudgetExceededEvent). One shared promise per
+ * Attempt carries whichever fires first to every in-flight round and to the
+ * verification/repair loop, so both a live iterator.next() and a between-
+ * rounds checkpoint learn about it exactly once.
+ */
+type AbortReason =
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'budget-exceeded'; readonly configured: number; readonly observed: number };
+
+/**
+ * Builds the one durable event a budget-exceeded abort owes (AC1/AC3) —
+ * shared so runAdapterRound and runVerification's own abort checkpoint
+ * construct it identically. `sequence: 0` is a placeholder — persistEvent
+ * always overwrites it (see its own comment).
+ */
+function buildBudgetExceededEvent(reason: Extract<AbortReason, { kind: 'budget-exceeded' }>): AttemptEvent {
+  return {
+    kind: 'budget-exceeded',
+    sequence: 0,
+    at: new Date().toISOString(),
+    limit: 'maxWallClockMs',
+    configured: reason.configured,
+    observed: reason.observed,
+  };
+}
 
 // Re-exported so callers (e.g. the REST adapter) reach every error prepare()
 // can throw through this one module, keeping prepare.ts an internal detail.
@@ -120,8 +153,56 @@ function frozenCopy<T>(value: T): T {
 }
 
 const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set([
-  'completed', 'completed_unverified', 'failed_verification', 'failed', 'cancelled',
+  'completed', 'completed_unverified', 'failed_verification', 'failed_budget', 'failed', 'cancelled',
 ]);
+
+/**
+ * Ticket 09 AC4: the in-process half of pause/resume — a one-shot "should I
+ * block right now" gate a live Attempt's safe-boundary check consults.
+ * requestPause()/requestResume() only ever flip the flag and (if blocked)
+ * release it; the *durable* pause-requested/paused/resumed events are always
+ * persisted by the caller that knows the fact at the moment it becomes true
+ * (pause()/resume() themselves for the request/resume; the safe-boundary
+ * check itself for the moment it actually blocks) — exactly the same split
+ * ticket 07's attentionResolvers/persistResolution already uses.
+ */
+class PauseGate {
+  private requested = false;
+  private release: (() => void) | undefined;
+
+  requestPause(): void {
+    this.requested = true;
+  }
+
+  requestResume(): void {
+    this.requested = false;
+    const release = this.release;
+    this.release = undefined;
+    release?.();
+  }
+
+  get isRequested(): boolean {
+    return this.requested;
+  }
+
+  /** Only ever called once isRequested is true; resolves once requestResume() is next called. */
+  block(): Promise<void> {
+    return new Promise((resolve) => { this.release = resolve; });
+  }
+}
+
+/**
+ * Ticket 09: the three pieces of one Attempt's safe-control state that only
+ * ever travel and get consulted together (runVerification's
+ * handleAbort/observeControls) — bundled into one value instead of three
+ * parameters that would otherwise have to stay in sync by convention.
+ */
+interface AttemptControls {
+  readonly abortSignal: Promise<AbortReason>;
+  /** A synchronous mirror of `abortSignal` — see its construction in runAttempt for why a bare Promise can't answer "has this already fired". */
+  getAbortReason(): AbortReason | undefined;
+  readonly pauseGate: PauseGate;
+}
 
 /** Durable entry point for submitting and reopening managed work. */
 export class DurableWorkEngine implements WorkEngine {
@@ -140,10 +221,19 @@ export class DurableWorkEngine implements WorkEngine {
   private readonly liveAttempts = new Map<string, {
     persistResolution(attentionId: string, decision: AttentionDecisionInput): AttemptAttentionResolvedEvent;
     deliverDecision(attentionId: string, decision: AttentionDecisionInput): boolean;
+    /** Ticket 09 AC5: aborts the currently in-flight adapter round (its process killed) — never affects an already-durable outcome. */
+    triggerCancel(): void;
+    /** Ticket 09 AC4: durably records the request and arms the pause gate; a live round keeps running until its next safe boundary. */
+    requestPause(): void;
+    /** Ticket 09 AC4: durably records the resume and releases the pause gate, whether or not it had actually blocked yet. */
+    requestResume(): void;
   }>();
 
   /** Ticket 08: runs one verification gate's exact command — injected so tests can stand in a fast, deterministic fake instead of the real shell/timeout implementation. */
   private readonly verificationGateRunner: VerificationGateRunner;
+
+  /** Ticket 09 AC7: the controllable clock every wall-clock budget check and timer reads — real time in production, a fake, manually-advanceable one in tests. */
+  private readonly clock: Clock;
 
   constructor(
     private readonly store: Store,
@@ -151,11 +241,13 @@ export class DurableWorkEngine implements WorkEngine {
     runtimeReadiness: RuntimeReadinessSource = createRuntimeReadinessSource(),
     runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = { codex: createCodexAttemptAdapter() },
     verificationGateRunner: VerificationGateRunner = createShellVerificationGateRunner(),
+    clock: Clock = systemClock,
   ) {
     this.runsRoot = runsRoot;
     this.runtimeReadiness = runtimeReadiness;
     this.runtimeAdapters = runtimeAdapters;
     this.verificationGateRunner = verificationGateRunner;
+    this.clock = clock;
   }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
@@ -225,6 +317,7 @@ export class DurableWorkEngine implements WorkEngine {
         runtimePreference: existing.spec.runtimePreference,
         readiness: await this.runtimeReadiness.get(),
         worktreePath: prepared.worktreePath,
+        budget: existing.spec.budget,
       });
       // Ticket 08 AC1/AC2: freeze the Repository's admin-approved
       // verification policy at the same instant — resolved once, from
@@ -256,12 +349,50 @@ export class DurableWorkEngine implements WorkEngine {
   async cancel(runId: string): Promise<WorkRun> {
     const existing = this.store.getRun(runId);
     if (!existing) throw new RunNotFoundError(runId);
-    // Cancellation never touches a prepared worktree — it is only a status
-    // change, and stays that way regardless of what preparation recorded.
+    // Cancellation never touches a prepared worktree, its durable events, or
+    // any result already produced — it is only a status change (plus, per
+    // ticket 09 AC5 below, stopping a still-live process), and stays that
+    // way regardless of what preparation recorded.
     if (TERMINAL_STATUSES.has(existing.status)) return frozenCopy(existing);
     const cancelled = frozenCopy<WorkRun>({ ...existing, status: 'cancelled' });
     this.store.updateRun(cancelled);
+    // Ticket 09 AC5: if this Attempt is still live in this process, stop its
+    // runtime authority now rather than letting it run to a natural
+    // completion — see runAdapterRound's abort race. A no-op when nothing is
+    // live (already terminal, or a different process instance), exactly
+    // like resolveAttention's own liveAttempts lookup.
+    this.liveAttempts.get(runId)?.triggerCancel();
     return cancelled;
+  }
+
+  /** See WorkEngine.pause's doc comment. */
+  async pause(runId: string): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    if (existing.status === 'pause_requested' || existing.status === 'paused') return frozenCopy(existing);
+    if (existing.attempt.state !== 'running') {
+      throw new InvalidRunStateError(`cannot pause a Run whose Attempt is not running (${existing.status})`);
+    }
+    const live = this.liveAttempts.get(runId);
+    // Mirrors resolveAttention: no live task in this process (most often a
+    // restart already ended it via recover()) means there is nothing left
+    // to ask to pause.
+    if (!live) throw new InvalidRunStateError('no live Attempt is running for this Run in this process');
+    live.requestPause();
+    return this.get(runId)!;
+  }
+
+  /** See WorkEngine.resume's doc comment. */
+  async resume(runId: string): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    if (existing.status !== 'pause_requested' && existing.status !== 'paused') {
+      throw new InvalidRunStateError(`cannot resume a Run that is not paused (${existing.status})`);
+    }
+    const live = this.liveAttempts.get(runId);
+    if (!live) throw new InvalidRunStateError('no live Attempt is running for this Run in this process');
+    live.requestResume();
+    return this.get(runId)!;
   }
 
   async start(runId: string): Promise<WorkRun> {
@@ -349,6 +480,37 @@ export class DurableWorkEngine implements WorkEngine {
     // the instant an attention-requested event lands can never race ahead of
     // this map having an entry for it.
     const attentionResolvers = new Map<string, (decision: AttentionDecisionInput) => void>();
+
+    // Ticket 09 AC5: one abort signal for this Attempt's whole lifetime —
+    // resolved at most once, either by cancel() (triggerCancel) or by the
+    // wall-clock deadline below, whichever fires first. Raced against every
+    // in-flight adapter round's own iterator.next() (runAdapterRound) so a
+    // runtime that is silently hanging, producing no events at all, can
+    // still be stopped rather than only ever checked between rounds.
+    let resolveAbort!: (reason: AbortReason) => void;
+    let abortReason: AbortReason | undefined;
+    const abortSignal = new Promise<AbortReason>((resolve) => { resolveAbort = resolve; });
+    // A plain, synchronously-readable mirror of abortSignal — the
+    // verification/repair loop's between-round checkpoints (runVerification)
+    // need to ask "has this already fired" without an `await`, which a bare
+    // Promise can't answer.
+    void abortSignal.then((reason) => { abortReason = reason; });
+
+    // Ticket 09 AC1/AC3: the frozen wall-clock budget, enforced for real —
+    // scheduled once, for this Attempt's whole lifetime (initial round
+    // through every repair round and verification pass), on the injected
+    // clock so a test can fire it deterministically (AC7) instead of
+    // actually waiting.
+    const maxWallClockMs = base.spec.budget.maxWallClockMs;
+    const attemptStartMs = this.clock.now();
+    const wallClockTimer = maxWallClockMs === undefined ? undefined : this.clock.setTimeout(() => {
+      resolveAbort({
+        kind: 'budget-exceeded', configured: maxWallClockMs, observed: this.clock.now() - attemptStartMs,
+      });
+    }, maxWallClockMs);
+
+    const pauseGate = new PauseGate();
+
     this.liveAttempts.set(base.id, {
       // Runs on the SAME synchronous call stack as resolveAttention() (no
       // await between its own read-then-append there and this call), so two
@@ -370,6 +532,15 @@ export class DurableWorkEngine implements WorkEngine {
         resolve(decision);
         return true;
       },
+      triggerCancel: () => resolveAbort({ kind: 'cancelled' }),
+      requestPause: () => {
+        persistEvent({ kind: 'pause-requested', sequence: 0, at: new Date().toISOString() });
+        pauseGate.requestPause();
+      },
+      requestResume: () => {
+        persistEvent({ kind: 'resumed', sequence: 0, at: new Date().toISOString() });
+        pauseGate.requestResume();
+      },
     });
 
     const context: AttemptLaunchContext = {
@@ -379,17 +550,29 @@ export class DurableWorkEngine implements WorkEngine {
       worktreePath: envelope.profile.writableWorktree,
       profile: envelope.profile,
       awaitAttentionDecision: (attentionId) => new Promise((resolve) => { attentionResolvers.set(attentionId, resolve); }),
+      // Ticket 09: the same signal every round (initial and each repair —
+      // repairContext spreads this same context, see runVerification) races
+      // against in runAdapterRound, handed to the adapter itself so it can
+      // stop its own real process directly. See its own doc comment.
+      abortRequested: abortSignal.then(() => undefined),
     };
 
     try {
-      const outcome = await this.runAdapterRound(adapter, context, persistEvent);
+      const outcome = await this.runAdapterRound(adapter, context, persistEvent, abortSignal);
       // Ticket 08: a plain runtime failure never goes through verification —
       // it already ended the Run in 'failed' (AC6's "distinct from a
       // runtime failure"). Only a real completion earns a verification pass.
+      // Ticket 09: an aborted initial round ('cancelled'/'budget-exceeded')
+      // is already fully handled by runAdapterRound (nothing persisted for
+      // 'cancelled' — the raw status already says why; a durable
+      // 'budget-exceeded' event for the other) — there is nothing left to
+      // verify either way.
       if (outcome === 'completion') {
-        await this.runVerification(base, adapter, context, envelope, persistEvent);
+        const controls: AttemptControls = { abortSignal, getAbortReason: () => abortReason, pauseGate };
+        await this.runVerification(base, adapter, context, envelope, persistEvent, controls);
       }
     } finally {
+      if (wallClockTimer !== undefined) this.clock.clearTimeout(wallClockTimer);
       this.liveAttempts.delete(base.id);
     }
   }
@@ -401,30 +584,61 @@ export class DurableWorkEngine implements WorkEngine {
    * `persistEvent` unchanged. An adapter that violates its own contract
    * (ends with no terminal event) or throws still ends the round in a
    * precise, recoverable failure rather than leaving it stuck running.
+   *
+   * Ticket 09 AC5/AC1: each pulled event races against `abortSignal`, so a
+   * round that is silently hanging — no event, ever — still notices an
+   * abort rather than blocking this loop forever. Stopping the real
+   * process itself is the adapter's own job, not this loop's: an async
+   * generator's `.return()` only interrupts a *cleanly suspended* generator
+   * (at a yield, with no `.next()` already in flight) — once a `.next()`
+   * call is outstanding, as it always is here mid-race, `.return()` simply
+   * queues behind it and never fires if that call never settles (verified
+   * empirically; a hung `.next()` makes `.return()` hang too). So this loop
+   * never awaits `.return()` for cleanup — it hands `context.abortRequested`
+   * to the adapter up front (see runAttempt), which is what actually kills
+   * the process, independent of wherever the generator happens to be
+   * suspended.
    */
   private async runAdapterRound(
     adapter: RuntimeAttemptAdapter,
     context: AttemptLaunchContext,
     persistEvent: (event: AttemptEvent, dedupeScope?: string) => AttemptEvent,
+    abortSignal: Promise<AbortReason>,
     // Ticket 08: distinguishes a repair round's events (its own
     // 'attempt-started', etc.) from the initial round's structurally
     // identical ones — see persistEvent's own comment. undefined for the
     // initial round preserves ticket 06/07's original dedupe scope exactly.
     dedupeScope?: string,
-  ): Promise<'completion' | 'failure'> {
+  ): Promise<'completion' | 'failure' | 'cancelled' | 'budget-exceeded'> {
     const persistSynthesizedFailure = (reason: string): void => {
       persistEvent({
         kind: 'failure', sequence: 0, at: new Date().toISOString(), reason,
       }, dedupeScope);
     };
+    const iterator = adapter.run(context)[Symbol.asyncIterator]();
     try {
-      for await (const event of adapter.run(context)) {
-        persistEvent(event, dedupeScope);
-        if (event.kind === 'completion') return 'completion';
-        if (event.kind === 'failure') return 'failure';
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next().then((result) => ({ kind: 'next' as const, result })),
+          abortSignal.then((reason) => ({ kind: 'abort' as const, reason })),
+        ]);
+        if (step.kind === 'abort') {
+          // Never awaited (see this method's own doc comment) — a
+          // best-effort courtesy for an adapter that happens to be cleanly
+          // suspended, not the mechanism that actually stops anything.
+          void iterator.return?.().catch(() => undefined);
+          if (step.reason.kind === 'cancelled') return 'cancelled';
+          persistEvent(buildBudgetExceededEvent(step.reason), dedupeScope);
+          return 'budget-exceeded';
+        }
+        if (step.result.done) {
+          persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
+          return 'failure';
+        }
+        persistEvent(step.result.value, dedupeScope);
+        if (step.result.value.kind === 'completion') return 'completion';
+        if (step.result.value.kind === 'failure') return 'failure';
       }
-      persistSynthesizedFailure('The runtime adapter ended without reporting completion or failure.');
-      return 'failure';
     } catch (error) {
       persistSynthesizedFailure(error instanceof Error ? error.message : String(error));
       return 'failure';
@@ -435,11 +649,20 @@ export class DurableWorkEngine implements WorkEngine {
    * Ticket 08: runs the Run's frozen required gates (plus, unconditionally,
    * any supplemental checks the requester selected — AC3, never a
    * replacement for a required gate) against the Attempt's completed work,
-   * with a bounded repair cycle for a runtime that leaves any gate failing.
-   * Always ends by persisting exactly one 'verification-outcome' event,
-   * except when a cancellation is observed between rounds — the Run is then
-   * left exactly as it is, so deriveRunStatus (attempt-projection.ts)
-   * surfaces the cancellation instead of a fabricated outcome.
+   * with a bounded repair cycle (ticket 09: `budget.maxRepairAttempts`, or
+   * MAX_VERIFICATION_REPAIR_ATTEMPTS when unset) for a runtime that leaves
+   * any gate failing. Always ends by persisting exactly one
+   * 'verification-outcome' event, except:
+   * - a cancellation observed between rounds — the Run is left exactly as
+   *   it is, so deriveRunStatus (attempt-projection.ts) surfaces the
+   *   cancellation instead of a fabricated outcome (ticket 08, unchanged);
+   * - a wall-clock budget observed between rounds (ticket 09) — a durable
+   *   'budget-exceeded' event is persisted instead, and RunStatus surfaces
+   *   'failed_budget'.
+   *
+   * Ticket 09 AC4: also honors a pause request at the same "between rounds"
+   * safe boundary — persists 'paused' and blocks until resumed before
+   * starting the next gate-checking pass or repair round.
    */
   private async runVerification(
     base: WorkRun,
@@ -447,9 +670,34 @@ export class DurableWorkEngine implements WorkEngine {
     context: AttemptLaunchContext,
     envelope: CapabilityEnvelope,
     persistEvent: (event: AttemptEvent, dedupeScope?: string) => AttemptEvent,
+    controls: AttemptControls,
   ): Promise<void> {
     const now = (): string => new Date().toISOString();
-    const isCancelled = (): boolean => this.store.getRun(base.id)?.status === 'cancelled';
+    // Persists the durable evidence a hard-limit abort owes (AC1/AC3) —
+    // cancellation needs none of its own; the raw 'cancelled' status already
+    // says why (unchanged from ticket 08).
+    const handleAbort = (): boolean => {
+      const reason = controls.getAbortReason();
+      if (!reason) return false;
+      if (reason.kind === 'budget-exceeded') persistEvent(buildBudgetExceededEvent(reason));
+      return true;
+    };
+    // The one safe-boundary checkpoint: has this Attempt been asked to stop
+    // (cancelled/budget-exceeded), or to pause? The block is raced against
+    // abortSignal, not merely awaited — a cancellation or a wall-clock
+    // deadline reached while paused must still be able to end the Attempt
+    // rather than wait forever for a resume() that may never come; the
+    // trailing handleAbort() catches that case (pauseGate.block() itself
+    // never settles then, but nothing needs it to).
+    const observeControls = async (): Promise<boolean> => {
+      if (handleAbort()) return true;
+      if (controls.pauseGate.isRequested) {
+        persistEvent({ kind: 'paused', sequence: 0, at: now() });
+        await Promise.race([controls.pauseGate.block(), controls.abortSignal]);
+        if (handleAbort()) return true;
+      }
+      return false;
+    };
     const policy = base.verificationPolicy;
 
     if (policy.state === 'missing') {
@@ -477,10 +725,13 @@ export class DurableWorkEngine implements WorkEngine {
       ...policy.requiredGates.map((gate) => ({ gate, required: true as const })),
       ...base.spec.verificationIntent.commands.map((command) => ({ gate: { name: command, command }, required: false as const })),
     ];
+    // Ticket 09 AC1: the "Attempt count" / "repair cycles" hard limit —
+    // configurable per Run, defaulting to ticket 08's original constant.
+    const maxRepairAttempts = base.spec.budget.maxRepairAttempts ?? MAX_VERIFICATION_REPAIR_ATTEMPTS;
 
     let repairAttempts = 0;
     for (;;) {
-      if (isCancelled()) return;
+      if (await observeControls()) return;
 
       // Ticket 08: each verification pass gets its own dedupe scope — a gate
       // that fails with byte-identical evidence on this pass and the last
@@ -491,6 +742,9 @@ export class DurableWorkEngine implements WorkEngine {
       // Gates run sequentially, in the order the frozen policy lists them,
       // so evidence stays deterministic run to run.
       for (const { gate, required } of gates) {
+        // A hard-limit abort mid-pass stops the next gate from starting —
+        // bounded by at most one gate's own runtime, not the whole pass.
+        if (handleAbort()) return;
         const result = await this.verificationGateRunner(gate, envelope.profile.writableWorktree);
         persistEvent({
           kind: 'verification-check',
@@ -512,8 +766,8 @@ export class DurableWorkEngine implements WorkEngine {
         });
         return;
       }
-      if (isCancelled()) return;
-      if (repairAttempts >= MAX_VERIFICATION_REPAIR_ATTEMPTS) {
+      if (await observeControls()) return;
+      if (repairAttempts >= maxRepairAttempts) {
         persistEvent({
           kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'failed_verification', repairAttempts,
         });
@@ -529,11 +783,15 @@ export class DurableWorkEngine implements WorkEngine {
       // deciding on the next one. Its own scope (see runAdapterRound's own
       // comment) keeps its 'attempt-started' event from colliding with an
       // earlier round's structurally-identical one.
-      const outcome = await this.runAdapterRound(adapter, repairContext, persistEvent, `repair-${repairAttempts}`);
+      const outcome = await this.runAdapterRound(
+        adapter, repairContext, persistEvent, controls.abortSignal, `repair-${repairAttempts}`,
+      );
       // A repair round that itself fails is a runtime failure, not a
       // verification failure (AC6) — runAdapterRound already persisted the
       // terminal 'failure' event, so there is nothing left to conclude here.
-      if (outcome === 'failure') return;
+      // A cancelled/budget-exceeded round is likewise already fully handled
+      // by runAdapterRound (ticket 09).
+      if (outcome !== 'completion') return;
     }
   }
 

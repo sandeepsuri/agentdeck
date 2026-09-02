@@ -242,6 +242,12 @@ export function createCodexAttemptAdapter(
     // needs for runtimeWorkspaceRoots is opted into over the wire instead,
     // by the initialize handshake below declaring experimentalApi.
     const proc = spawnProcess(executable, ['app-server'], { cwd: context.worktreePath, env });
+    // Ticket 09 AC5/AC1: kills the real process the instant the engine asks
+    // to stop, independent of wherever this generator happens to be
+    // suspended — awaiting the handshake, mid-queue, anywhere. See
+    // AttemptLaunchContext.abortRequested's own comment for why this can't
+    // rely on the generator's own `.return()` instead.
+    void context.abortRequested?.then(() => proc.kill());
 
     const queue = new AsyncEventQueue<AttemptEvent>();
     const pending = new Map<number, { resolve: (result: Record<string, unknown>) => void; reject: (error: Error) => void }>();

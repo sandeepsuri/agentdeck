@@ -9,7 +9,7 @@ import path from 'node:path';
 import type { AgentType } from '../types.js';
 import type { RuntimeReadinessReport } from '../sessions/runtime-readiness-contract.js';
 import type {
-  CapabilityEnvelope, EnvelopeProfile, RunEnvelopeState, SecretGrant,
+  CapabilityEnvelope, EnvelopeProfile, RunBudget, RunEnvelopeState, SecretGrant,
 } from './types.js';
 
 export class CapabilityEnvelopeViolation extends Error {
@@ -52,6 +52,19 @@ export interface BuildRunEnvelopeOptions {
   readonly readiness: RuntimeReadinessReport;
   readonly worktreePath: string;
   readonly secretGrants?: readonly SecretGrant[];
+  /**
+   * Ticket 09 AC1: the requester's own concurrent-process/child-Run hard
+   * limits (spec.budget) — resolved into the frozen ceilings alongside
+   * everything else the envelope already freezes. A requester can only ever
+   * *tighten* the admin default (DEFAULT_PROCESS_CEILING/CHILD_RUN_CEILING),
+   * never loosen it — see resolveCeiling.
+   */
+  readonly budget?: RunBudget;
+}
+
+/** The requester's own budget can only ever tighten an admin ceiling, never loosen it (ticket 09 AC1). */
+function resolveCeiling(adminCeiling: number, requested: number | undefined): number {
+  return requested === undefined ? adminCeiling : Math.min(adminCeiling, requested);
 }
 
 /**
@@ -63,6 +76,8 @@ export interface BuildRunEnvelopeOptions {
 export function buildRunEnvelope(options: BuildRunEnvelopeOptions): RunEnvelopeState {
   const secretGrants = options.secretGrants ?? [];
   for (const grant of secretGrants) assertRedactedSecretReference(grant);
+  const processCeiling = resolveCeiling(DEFAULT_PROCESS_CEILING, options.budget?.maxConcurrentProcesses);
+  const childRunCeiling = resolveCeiling(CHILD_RUN_CEILING, options.budget?.maxChildRuns);
 
   const refusalReasons: string[] = [];
   for (const runtime of options.runtimePreference) {
@@ -91,8 +106,8 @@ export function buildRunEnvelope(options: BuildRunEnvelopeOptions): RunEnvelopeS
         readableRoots: [options.worktreePath],
         allowedNetworkDomains: TRUSTED_RUNTIME_PROVIDER_DOMAINS[runtime],
         environmentAllowlist: MANAGED_ENVIRONMENT_ALLOWLIST,
-        processCeiling: DEFAULT_PROCESS_CEILING,
-        childRunCeiling: CHILD_RUN_CEILING,
+        processCeiling,
+        childRunCeiling,
       },
       secretGrants,
     };

@@ -15,6 +15,15 @@ export interface RunBudget {
   maxToolCalls?: number;
   maxConcurrentProcesses?: number;
   maxCostUsd?: number;
+  /**
+   * Ticket 09 AC1's "Attempt count" / "repair cycles" hard limit — how many
+   * repair rounds (ticket 08) a failing required gate may trigger before
+   * verification gives up. Unset falls back to
+   * verification.ts's MAX_VERIFICATION_REPAIR_ATTEMPTS, exactly ticket 08's
+   * original behavior, so a WorkSpec that never mentions this keeps working
+   * unchanged.
+   */
+  maxRepairAttempts?: number;
 }
 
 export interface VerificationIntent {
@@ -50,7 +59,13 @@ export type RunStatus =
   | 'completed_unverified'
   /** Ticket 08 AC6: required verification gates never passed within the bounded repair cycle — distinct from a plain runtime 'failed' and from 'cancelled'. */
   | 'failed_verification'
+  /** Ticket 09 AC1/AC3: a hard resource limit (wall-clock duration today) was reached — distinct from a runtime failure, a verification failure, and a cancellation. */
+  | 'failed_budget'
   | 'failed'
+  /** Ticket 09 AC4: a pause was requested but the live Attempt has not yet reached a safe boundary to honor it — distinct from 'paused' itself. */
+  | 'pause_requested'
+  /** Ticket 09 AC4: the Attempt reached a safe boundary and stopped starting new work — distinct from the mere request. */
+  | 'paused'
   | 'cancelled';
 
 /**
@@ -248,6 +263,48 @@ export interface AttemptVerificationOutcomeEvent extends AttemptEventBase {
   readonly repairAttempts: number;
 }
 
+// Ticket 09: hard resource limits and safe controls. A Run's own frozen
+// budget (WorkSpec.budget) never changes; these events are the durable
+// record of the engine proactively enforcing it, or of an operator's
+// pause/resume/cancel request being observed and acted on.
+
+/**
+ * A hard limit was reached and the engine stopped the Attempt itself
+ * (AC1/AC3) — never a silent, unexplained stall.
+ *
+ * `limit` names only `maxWallClockMs` today: it is the only budget field
+ * this event kind is ever actually produced for. `maxConcurrentProcesses`
+ * and `maxChildRuns` are resolved into the frozen capability envelope's
+ * processCeiling/childRunCeiling (envelope.ts) and enforced by ticket 04's
+ * assertProcessCeiling/assertChildRunCeiling — but nothing in this codebase
+ * yet spawns more than one process at a time for a Run, or creates a child
+ * Run at all (childRunCeiling is 0 unconditionally), so there is no live
+ * call site that could ever observe either ceiling being exceeded. Widening
+ * this union ahead of that call site existing would advertise enforcement
+ * this event can't actually deliver.
+ */
+export interface AttemptBudgetExceededEvent extends AttemptEventBase {
+  readonly kind: 'budget-exceeded';
+  readonly limit: 'maxWallClockMs';
+  readonly configured: number;
+  readonly observed: number;
+}
+
+/** An operator asked to pause — not yet honored; see AttemptPausedEvent for when it actually takes effect (AC4). */
+export interface AttemptPauseRequestedEvent extends AttemptEventBase {
+  readonly kind: 'pause-requested';
+}
+
+/** The Attempt reached its next safe boundary and stopped starting new work — the *effective* pause AC4 distinguishes from the mere request. */
+export interface AttemptPausedEvent extends AttemptEventBase {
+  readonly kind: 'paused';
+}
+
+/** An operator resumed a paused Attempt; the safe boundary it was blocked at proceeds. */
+export interface AttemptResumedEvent extends AttemptEventBase {
+  readonly kind: 'resumed';
+}
+
 export type AttemptEvent =
   | AttemptLifecycleEvent
   | AttemptMessageEvent
@@ -258,7 +315,11 @@ export type AttemptEvent =
   | AttemptAttentionRequestedEvent
   | AttemptAttentionResolvedEvent
   | AttemptVerificationCheckEvent
-  | AttemptVerificationOutcomeEvent;
+  | AttemptVerificationOutcomeEvent
+  | AttemptBudgetExceededEvent
+  | AttemptPauseRequestedEvent
+  | AttemptPausedEvent
+  | AttemptResumedEvent;
 
 /**
  * The one canonical field list per AttemptEvent kind — the single source of
@@ -278,6 +339,10 @@ export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonl
   'attention-resolved': ['kind', 'sequence', 'at', 'attentionId', 'decision', 'input'],
   'verification-check': ['kind', 'sequence', 'at', 'gate', 'command', 'required', 'passed', 'exitCode', 'evidence'],
   'verification-outcome': ['kind', 'sequence', 'at', 'outcome', 'repairAttempts'],
+  'budget-exceeded': ['kind', 'sequence', 'at', 'limit', 'configured', 'observed'],
+  'pause-requested': ['kind', 'sequence', 'at'],
+  paused: ['kind', 'sequence', 'at'],
+  resumed: ['kind', 'sequence', 'at'],
 };
 
 interface AttemptRunBase {
@@ -338,7 +403,13 @@ export interface WorkEngine {
   list(): WorkRun[];
   /** Resolves the exact base commit and creates a dedicated worktree. Idempotent once ready. */
   prepare(runId: string): Promise<WorkRun>;
-  /** Marks a Run cancelled without touching any worktree it already prepared. */
+  /**
+   * Marks a Run cancelled without touching any worktree it already
+   * prepared, its durable events, or any result already produced. Ticket 09
+   * AC5: if the Attempt is still live in this process, this also stops its
+   * runtime authority — the live adapter round is aborted (its own process
+   * killed) rather than left running to a natural completion.
+   */
   cancel(runId: string): Promise<WorkRun>;
   /**
    * Starts the Run's one Attempt in its prepared worktree, inside its frozen
@@ -367,4 +438,15 @@ export interface WorkEngine {
    * apply to a request that is no longer waiting.
    */
   resolveAttention(runId: string, attentionId: string, decision: AttentionDecisionInput): Promise<WorkRun>;
+  /**
+   * Ticket 09 AC4: asks a live Attempt to stop starting new work at its next
+   * supported safe boundary — never mid-flight — and durably records the
+   * request. Never kills anything already running; see cancel() for that.
+   * Resolves once the request is durable; the Attempt itself reports
+   * 'paused' (not just 'pause_requested') only once it actually reaches
+   * that boundary.
+   */
+  pause(runId: string): Promise<WorkRun>;
+  /** Ticket 09 AC4: lets a paused (or pause-requested) Attempt proceed past the safe boundary it was waiting at. */
+  resume(runId: string): Promise<WorkRun>;
 }

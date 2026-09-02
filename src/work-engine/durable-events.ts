@@ -31,9 +31,17 @@ export type EventDurabilityClass = 'durable' | 'transient';
 // the same reason again — each gate result and the final verification
 // outcome are final facts (AC4's "durable command and result evidence"),
 // never deltas.
+//
+// Ticket 09: 'budget-exceeded', 'pause-requested', 'paused', and 'resumed'
+// are durable for the same reason once more — each is one final fact (a
+// hard limit was hit; a pause was requested/took effect/was lifted), which
+// is what lets a restart tell "paused, waiting to resume" apart from
+// "cancelled" or "never asked to pause at all" (AC6's restart-durability
+// bar) instead of ever guessing.
 const DURABLE_ATTEMPT_EVENT_KINDS: ReadonlySet<AttemptEvent['kind']> = new Set([
   'lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure',
   'attention-requested', 'attention-resolved', 'verification-check', 'verification-outcome',
+  'budget-exceeded', 'pause-requested', 'paused', 'resumed',
 ]);
 
 export function classifyEventDurability(kind: AttemptEvent['kind']): EventDurabilityClass {

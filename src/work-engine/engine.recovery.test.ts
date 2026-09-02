@@ -314,6 +314,64 @@ describe('DurableWorkEngine.recover — crash while an approval/input request wa
   }
 });
 
+describe('DurableWorkEngine.recover — crash while paused (ticket 09 AC6)', () => {
+  function appendEvent(store: Store, runId: string, attemptId: string, event: AttemptEvent): void {
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId, attemptId, event }));
+  }
+
+  it('ends an effectively-paused Attempt precisely, stating plainly that it was paused rather than merely interrupted', async () => {
+    const { store, repository, runsRoot } = setUp();
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    const prepared = await engine.prepare((await engine.submit(workSpec(repository))).id);
+    store.startAttempt({
+      id: 'attempt-crash-7', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:00:00.000Z',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-7', {
+      kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-7', { kind: 'pause-requested', sequence: 1, at: '2026-09-01T00:00:02.000Z' });
+    appendEvent(store, prepared.id, 'attempt-crash-7', { kind: 'paused', sequence: 2, at: '2026-09-01T00:00:03.000Z' });
+    expect(store.getRun(prepared.id)?.status).toBe('paused');
+
+    const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    await restarted.recover();
+
+    const recovered = restarted.get(prepared.id)!;
+    expect(recovered.status).toBe('failed');
+    if (recovered.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(recovered.attempt.reason).toContain('AgentDeck restarted before this Attempt finished');
+    expect(recovered.attempt.reason).toContain('was paused, waiting to be resumed');
+  });
+
+  it('ends an Attempt whose pause was only ever requested — never reached its safe boundary — precisely, distinguishing that from an effective pause', async () => {
+    const { store, repository, runsRoot } = setUp();
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    const prepared = await engine.prepare((await engine.submit(workSpec(repository))).id);
+    store.startAttempt({
+      id: 'attempt-crash-8', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:00:00.000Z',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-8', {
+      kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:00:01.000Z', phase: 'attempt-started',
+    });
+    appendEvent(store, prepared.id, 'attempt-crash-8', { kind: 'pause-requested', sequence: 1, at: '2026-09-01T00:00:02.000Z' });
+    // Still-live progress landed after the request but before any safe
+    // boundary honored it — exactly what a restart can catch mid-flight.
+    appendEvent(store, prepared.id, 'attempt-crash-8', {
+      kind: 'tool-activity', sequence: 2, at: '2026-09-01T00:00:03.000Z', tool: 'command_execution', status: 'completed',
+    });
+    // The request is already visible even though it hasn't taken effect yet.
+    expect(store.getRun(prepared.id)?.status).toBe('pause_requested');
+
+    const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource());
+    await restarted.recover();
+
+    const recovered = restarted.get(prepared.id)!;
+    expect(recovered.status).toBe('failed');
+    if (recovered.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(recovered.attempt.reason).toContain('A pause had been requested but never reached a safe boundary');
+  });
+});
+
 describe('DurableWorkEngine.recover — reconnect idempotency', () => {
   it('running recover twice appends exactly one terminal failure event, not two', async () => {
     const { store, repository, runsRoot } = setUp();
