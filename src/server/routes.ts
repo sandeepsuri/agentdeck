@@ -26,6 +26,7 @@ import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import type { WorkEngine } from '../work-engine/types.js';
+import type { CollaboratorService } from '../collaborators/service.js';
 import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
@@ -209,6 +210,8 @@ export interface RouteContext {
   remoteHosts?: readonly string[];
   /** Ticket 07: feeds GET /api/companion's runAttention field. Undefined only in tests that don't exercise Runs — it degrades to an empty runAttention list rather than erroring. */
   workEngine?: WorkEngine;
+  /** Ticket 11: feeds requestTrust's deviceLookup, so a collaborator device's request resolves to its Principal and grants. Undefined only in tests that don't exercise collaborators. */
+  collaborators?: CollaboratorService;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -220,7 +223,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       origin: req.headers.origin,
       token: req.headers[TOKEN_HEADER] as string | undefined,
     },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+    {
+      remoteHosts: ctx.remoteHosts,
+      token: ctx.config.tailscaleToken,
+      deviceLookup: ctx.collaborators?.resolveDevice,
+    },
   );
 
   // Ticket 05: how the client discovers "you're remote, please enter a
@@ -340,14 +347,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return session ? publicSession(session) : reply.code(404).send({ error: 'no such session' });
   });
 
-  app.get('/api/repos', async () => {
+  // Ticket 11 AC4: a collaborator device connection only sees the
+  // Repositories the admin granted it (trust.device.grantedRepositoryIds) —
+  // local and legacy-shared-token remote connections are unrestricted,
+  // exactly as before this ticket.
+  const scopeRepos = (repos: Awaited<ReturnType<typeof scanRepos>>, req: FastifyRequest) => {
+    const grantedRepositoryIds = requestTrust(req).device?.grantedRepositoryIds;
+    return grantedRepositoryIds ? repos.filter((repo) => grantedRepositoryIds.includes(repo.id)) : repos;
+  };
+  app.get('/api/repos', async (req) => {
     if (!ctx.store) return [];
     try {
       const repos = await scanRepos(ctx.config.projectsDir, ctx.store);
       await ctx.coordination?.syncRepos(repos);
-      return repos;
+      return scopeRepos(repos, req);
     } catch {
-      return ctx.store.listRepos();
+      return scopeRepos(ctx.store.listRepos(), req);
     }
   });
 

@@ -18,6 +18,7 @@ import { publicSession } from './security.js';
 import { isAllowedRemoteInput } from './remote-input.js';
 import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
 import type { WorkEngine } from '../work-engine/types.js';
+import type { CollaboratorService } from '../collaborators/service.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -52,6 +53,8 @@ export function attachWs(
   trust: { remoteHosts?: readonly string[]; token?: string } = {},
   /** Ticket 07: the same one policy path REST reaches (work-routes.ts) — see the 'run_attention_resolve' case below. Undefined only in tests that don't exercise Runs over WS. */
   workEngine?: WorkEngine,
+  /** Ticket 11: resolves a collaborator device's bearer token for the upgrade's classify() call, and its onRevoke hook terminates any already-open socket for a device the instant it's revoked (AC5) — undefined only in tests that don't exercise collaborators. */
+  collaborators?: CollaboratorService,
 ): WebSocketServer {
   // noServer: true because there are now potentially two underlying
   // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
@@ -89,7 +92,7 @@ export function attachWs(
       // header.
       const result = classify(
         { host: req.headers.host, origin: req.headers.origin, token },
-        trust,
+        { ...trust, deviceLookup: collaborators?.resolveDevice },
       );
       const allowed = result.kind === 'local' || (result.kind === 'remote' && result.capabilities.size > 0);
       if (!allowed) {
@@ -102,6 +105,16 @@ export function attachWs(
       });
     });
   }
+
+  // AC5: a device revoked while it holds an open socket is disconnected
+  // immediately, not merely blocked on its next reconnect — every other
+  // socket (this device's own REST calls have no equivalent long-lived
+  // state to invalidate) is untouched.
+  collaborators?.onRevoke((deviceId: string) => {
+    for (const client of wss.clients) {
+      if (getConnectionTrust(client)?.device?.id === deviceId) client.terminate();
+    }
+  });
 
   // socket → sessionIds it is viewing
   const viewing = new Map<WebSocket, Set<string>>();
@@ -129,6 +142,16 @@ export function attachWs(
   // only matters if that invariant is ever broken by a future change.
   // Denied connections never reach here at all (rejected at upgrade).
   const isLocalSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.kind === 'local';
+  // Ticket 11 AC4: a named collaborator's device is authenticated (so it
+  // may hold an open socket — AC5 needs something for revocation to
+  // terminate) but grants no session/Run *capability* over WS in this
+  // ticket, the same boundary app.ts's onRequest hook draws for REST
+  // (isCollaboratorViewRoute never includes session or attention routes).
+  // Extending 'attach'/'run_attention_resolve' to a resolved collaborator
+  // device is ticket 12's job ("let collaborators launch and guide
+  // authorized Runs"), gated by grantedRepositoryIds — not an
+  // unscoped side door here.
+  const isCollaboratorSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.device !== undefined;
   const isUiVisible = () => [...uiPresence.values()].some(Boolean);
   const broadcastPresence = () => {
     const visible = isUiVisible();
@@ -226,6 +249,7 @@ export function attachWs(
       if (!frame) return;
       switch (frame.t) {
         case 'attach': {
+          if (isCollaboratorSocket(ws)) return;
           const session = manager.getSession(frame.sessionId);
           if (!session || (!isLocalSocket(ws) && session.origin !== 'managed')) return;
           const sessionIds = viewing.get(ws) ?? new Set<string>();
@@ -304,7 +328,7 @@ export function attachWs(
           // trust entry (should never happen post-upgrade) fails safe by
           // withholding it, same direction as the 'input' case's raw-write
           // check above.
-          if (!workEngine) break;
+          if (!workEngine || isCollaboratorSocket(ws)) break;
           const hasCompose = getConnectionTrust(ws)?.capabilities.has('compose') ?? false;
           if (!hasCompose) break;
           const decision = frame.decision === 'input' ? { kind: 'input' as const, value: frame.value } : { kind: frame.decision };

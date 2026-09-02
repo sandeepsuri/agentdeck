@@ -22,6 +22,8 @@ import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
 import { coordinateManagedWakeLock } from './managed-wake-lock.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { registerWorkRoutes } from './work-routes.js';
+import { CollaboratorService } from '../collaborators/service.js';
+import { classify, TOKEN_HEADER } from './connection-trust.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -30,6 +32,10 @@ export async function startServer(): Promise<RunningServer> {
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
   const workEngine = new DurableWorkEngine(store, path.join(config.dataDir, 'runs'));
+  // Ticket 11: named collaborators and their device credentials, backed by
+  // the same durable store as everything else — survives a restart exactly
+  // like a queued Run does.
+  const collaborators = new CollaboratorService(store);
   // Ticket 06: no in-memory Attempt task survives a restart, so any Run
   // still 'running' from before this process started is ended now with a
   // precise unrecoverable reason rather than left stuck — see
@@ -101,9 +107,18 @@ export async function startServer(): Promise<RunningServer> {
   });
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
-    remoteHosts: remoteAccess.hosts,
+    remoteHosts: remoteAccess.hosts, collaborators,
   });
-  registerWorkRoutes(app, workEngine);
+  registerWorkRoutes(app, workEngine, {
+    // Ticket 11 AC4: the same ConnectionTrust.classify() every other route
+    // defers to (see app.ts's onRequest hook) — a collaborator device's
+    // grantedRepositoryIds, or undefined (unrestricted) for local and the
+    // legacy shared-token remote path.
+    resolveGrantedRepositoryIds: (req) => classify(
+      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+      { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
+    ).device?.grantedRepositoryIds,
+  });
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;
   let companion: RunningCompanion | undefined;
@@ -143,7 +158,7 @@ export async function startServer(): Promise<RunningServer> {
         agents: deriveCompanionAgents(sessions, events, attention),
         runAttention: deriveRunAttentionItems(workEngine.list()),
       };
-    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine);
+    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine, collaborators);
 
     companion = launchNativeCompanion(port);
     discovery.start();

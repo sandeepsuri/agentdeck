@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { Model } from '../../sessions/model-catalog.js';
+import type { Repo } from '../../types.js';
 import { apiFetch } from '../apiFetch.js';
+import { CollaboratorsPanel } from './CollaboratorsPanel.js';
 
 interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; error?: string }
 
@@ -11,7 +13,7 @@ interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; er
  * openaiKeyConfigured (a boolean), never the key itself, so there is
  * nothing to prefill here even right after saving one.
  */
-export function SettingsModal({ onClose }: { onClose: () => void }) {
+export function SettingsModal({ onClose, repos = [] }: { onClose: () => void; repos?: Repo[] }) {
   const [models, setModels] = useState<Model[]>([]);
   const [openaiKeyConfigured, setOpenaiKeyConfigured] = useState(false);
   const [defaultModel, setDefaultModel] = useState('');
@@ -130,6 +132,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
               {error && <div className="form-error">{error}</div>}
               {saved && !error && <div className="settings-saved">Saved.</div>}
+
+              <CollaboratorsPanel repos={repos} />
             </>
           )}
         </div>

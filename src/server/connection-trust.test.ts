@@ -136,6 +136,62 @@ describe('classify', () => {
   });
 });
 
+describe('classify with a collaborator deviceLookup (ticket 11)', () => {
+  const DEVICE = {
+    id: 'device-1',
+    principal: { id: 'collab-1', displayName: 'Alice' },
+    grantedRepositoryIds: ['repo-1'],
+  };
+
+  it('resolves a device credential to its Principal and device when the shared token does not match', () => {
+    const deviceLookup = (token: string) => (token === 'alices-device-token' ? DEVICE : undefined);
+    const result = classify(
+      { host: `${REMOTE_HOST}:4040`, token: 'alices-device-token' },
+      { remoteHosts: [REMOTE_HOST], token: TOKEN, deviceLookup },
+    );
+    expect(result.kind).toBe('remote');
+    expect(result.capabilities).toEqual(new Set(['view', 'compose', 'control-keys']));
+    expect(result.device).toEqual(DEVICE);
+  });
+
+  it('prefers the legacy shared token when it matches, never consulting deviceLookup', () => {
+    const deviceLookup = () => { throw new Error('should not be called'); };
+    const result = classify(
+      { host: `${REMOTE_HOST}:4040`, token: TOKEN },
+      { remoteHosts: [REMOTE_HOST], token: TOKEN, deviceLookup },
+    );
+    expect(result.kind).toBe('remote');
+    expect(result.device).toBeUndefined();
+  });
+
+  it('is remote-but-unauthenticated (fail-closed) when neither the shared token nor deviceLookup match', () => {
+    const deviceLookup = () => undefined;
+    const result = classify(
+      { host: `${REMOTE_HOST}:4040`, token: 'a-revoked-or-unknown-token' },
+      { remoteHosts: [REMOTE_HOST], token: TOKEN, deviceLookup },
+    );
+    expect(result).toEqual({ kind: 'remote', capabilities: new Set() });
+  });
+
+  it('never calls deviceLookup with an undefined token', () => {
+    const deviceLookup = () => { throw new Error('should not be called'); };
+    const result = classify(
+      { host: `${REMOTE_HOST}:4040` },
+      { remoteHosts: [REMOTE_HOST], token: TOKEN, deviceLookup },
+    );
+    expect(result).toEqual({ kind: 'remote', capabilities: new Set() });
+  });
+
+  it('still denies a mismatched Origin before ever consulting deviceLookup', () => {
+    const deviceLookup = () => { throw new Error('should not be called'); };
+    const result = classify(
+      { host: `${REMOTE_HOST}:4040`, origin: 'https://evil.example', token: 'alices-device-token' },
+      { remoteHosts: [REMOTE_HOST], token: TOKEN, deviceLookup },
+    );
+    expect(result.kind).toBe('denied');
+  });
+});
+
 describe('isLoopbackHostHeader / isAllowedOrigin (moved from app.ts, same behavior)', () => {
   it('still recognizes loopback host headers', () => {
     expect(isLoopbackHostHeader('127.0.0.1:4040')).toBe(true);

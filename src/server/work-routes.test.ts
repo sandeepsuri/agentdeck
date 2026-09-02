@@ -12,7 +12,7 @@ import { Store } from '../store/index.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
 import type { WorkSpec } from '../work-engine/types.js';
-import { registerWorkRoutes } from './work-routes.js';
+import { registerWorkRoutes, type WorkRoutesDeps } from './work-routes.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
 const stores: Store[] = [];
@@ -29,7 +29,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** A real repository, never the caller's real ~/.agentdeck/runs, so prepare() has something to resolve against. */
-function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
+function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3], deps?: WorkRoutesDeps) {
   const root = tempDir();
   const repoPath = path.join(root, 'repo');
   fs.mkdirSync(repoPath, { recursive: true });
@@ -52,7 +52,7 @@ function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngin
   const engine = runtimeAdapters
     ? new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), runtimeAdapters)
     : new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource());
-  registerWorkRoutes(app, engine);
+  registerWorkRoutes(app, engine, deps);
   apps.push(app);
   stores.push(store);
   return { app, repoPath, store };
@@ -112,6 +112,54 @@ describe('work routes', () => {
     const missing = await app.inject({ method: 'GET', url: '/api/runs/unknown' });
     expect(missing.statusCode).toBe(404);
     expect(missing.json()).toEqual({ error: 'no such run' });
+  });
+});
+
+describe('collaborator grant scoping (ticket 11 AC4)', () => {
+  it('omits an ungranted Run from the list and 404s reading it by id directly', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [] });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs' });
+    expect(listed.json()).toEqual([]);
+
+    const fetched = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(fetched.statusCode).toBe(404);
+  });
+
+  it('includes a Run whose Repository id is in the resolved grant set', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs' });
+    expect(listed.json()).toEqual([run]);
+
+    const fetched = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(fetched.statusCode).toBe(200);
+  });
+
+  it('404s a granted-elsewhere Run read by id -- never leaking that it exists', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => ['some-other-repo'] });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const fetched = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(fetched.statusCode).toBe(404);
+    expect(fetched.json()).toEqual({ error: 'no such run' });
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs' });
+    expect(listed.json()).toEqual([]);
+  });
+
+  it('stays unrestricted when the resolver returns undefined (local/legacy-token connections)', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => undefined });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs' });
+    expect(listed.json()).toEqual([run]);
   });
 });
 

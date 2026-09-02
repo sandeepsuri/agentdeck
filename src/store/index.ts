@@ -12,6 +12,9 @@ import type {
   WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
+import type {
+  CollaboratorRow, CollaboratorStore, DeviceRow, InvitationRow,
+} from '../collaborators/service.js';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../../migrations');
 
@@ -134,6 +137,41 @@ function rowToRepo(r: RepoRow): Repo {
   return repo;
 }
 
+interface CollaboratorTableRow {
+  id: string; display_name: string; created_at: string; granted_repository_ids: string;
+}
+
+function rowToCollaborator(r: CollaboratorTableRow): CollaboratorRow {
+  return {
+    id: r.id, displayName: r.display_name, createdAt: r.created_at,
+    grantedRepositoryIds: fromJson<string[]>(r.granted_repository_ids) ?? [],
+  };
+}
+
+interface InvitationTableRow {
+  id: string; collaborator_id: string; created_at: string; expires_at: string; consumed_at: string | null;
+}
+
+function rowToInvitation(r: InvitationTableRow): InvitationRow {
+  const invitation: InvitationRow = {
+    id: r.id, collaboratorId: r.collaborator_id, createdAt: r.created_at, expiresAt: r.expires_at,
+  };
+  if (r.consumed_at !== null) invitation.consumedAt = r.consumed_at;
+  return invitation;
+}
+
+interface DeviceTableRow {
+  id: string; collaborator_id: string; device_label: string; created_at: string; revoked_at: string | null;
+}
+
+function rowToDevice(r: DeviceTableRow): DeviceRow {
+  const device: DeviceRow = {
+    id: r.id, collaboratorId: r.collaborator_id, deviceLabel: r.device_label, createdAt: r.created_at,
+  };
+  if (r.revoked_at !== null) device.revokedAt = r.revoked_at;
+  return device;
+}
+
 // --- store -------------------------------------------------------------------
 
 export interface StoredEvent extends AgentMessage {
@@ -141,7 +179,7 @@ export interface StoredEvent extends AgentMessage {
   eventId: number;
 }
 
-export class Store {
+export class Store implements CollaboratorStore {
   private db: Database;
 
   /** @param dbPath file path, or ':memory:' (tests) */
@@ -465,6 +503,82 @@ export class Store {
          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       )
       .run(key, JSON.stringify(value));
+  }
+
+  // -- collaborators (ticket 11) --
+  //
+  // CollaboratorService (collaborators/service.ts) owns all hashing and
+  // lifecycle logic; these methods are plain row storage, exactly the
+  // CollaboratorStore surface it depends on. Bearer secrets never reach
+  // here in plaintext -- only the hashes the service already computed.
+
+  createCollaborator(row: CollaboratorRow): void {
+    this.db.prepare(
+      `INSERT INTO collaborators (id, display_name, created_at, granted_repository_ids)
+       VALUES (@id, @displayName, @createdAt, @grantedRepositoryIds)`,
+    ).run({ ...row, grantedRepositoryIds: JSON.stringify(row.grantedRepositoryIds) });
+  }
+
+  getCollaborator(id: string): CollaboratorRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborators WHERE id = ?').get(id) as CollaboratorTableRow | undefined;
+    return row ? rowToCollaborator(row) : undefined;
+  }
+
+  listCollaborators(): CollaboratorRow[] {
+    return (this.db.prepare('SELECT * FROM collaborators ORDER BY created_at').all() as CollaboratorTableRow[])
+      .map(rowToCollaborator);
+  }
+
+  updateCollaboratorGrants(id: string, grantedRepositoryIds: string[]): void {
+    this.db.prepare('UPDATE collaborators SET granted_repository_ids = ? WHERE id = ?')
+      .run(JSON.stringify(grantedRepositoryIds), id);
+  }
+
+  createInvitation(row: InvitationRow, codeHash: string): void {
+    this.db.prepare(
+      `INSERT INTO collaborator_invitations (id, collaborator_id, code_hash, created_at, expires_at)
+       VALUES (@id, @collaboratorId, @codeHash, @createdAt, @expiresAt)`,
+    ).run({ ...row, codeHash });
+  }
+
+  getInvitationByCodeHash(codeHash: string): InvitationRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_invitations WHERE code_hash = ?')
+      .get(codeHash) as InvitationTableRow | undefined;
+    return row ? rowToInvitation(row) : undefined;
+  }
+
+  consumeInvitation(id: string, consumedAt: string): void {
+    this.db.prepare('UPDATE collaborator_invitations SET consumed_at = ? WHERE id = ?').run(consumedAt, id);
+  }
+
+  createDevice(row: DeviceRow, tokenHash: string): void {
+    this.db.prepare(
+      `INSERT INTO collaborator_devices (id, collaborator_id, device_label, token_hash, created_at)
+       VALUES (@id, @collaboratorId, @deviceLabel, @tokenHash, @createdAt)`,
+    ).run({ ...row, tokenHash });
+  }
+
+  getDeviceByTokenHash(tokenHash: string): DeviceRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_devices WHERE token_hash = ?')
+      .get(tokenHash) as DeviceTableRow | undefined;
+    return row ? rowToDevice(row) : undefined;
+  }
+
+  getDevice(id: string): DeviceRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_devices WHERE id = ?').get(id) as DeviceTableRow | undefined;
+    return row ? rowToDevice(row) : undefined;
+  }
+
+  listDevices(collaboratorId?: string): DeviceRow[] {
+    const rows = (collaboratorId === undefined
+      ? this.db.prepare('SELECT * FROM collaborator_devices ORDER BY created_at').all()
+      : this.db.prepare('SELECT * FROM collaborator_devices WHERE collaborator_id = ? ORDER BY created_at').all(collaboratorId)
+    ) as DeviceTableRow[];
+    return rows.map(rowToDevice);
+  }
+
+  revokeDevice(id: string, revokedAt: string): void {
+    this.db.prepare('UPDATE collaborator_devices SET revoked_at = ? WHERE id = ?').run(revokedAt, id);
   }
 }
 

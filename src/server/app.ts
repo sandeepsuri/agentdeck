@@ -10,7 +10,9 @@ import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
 import type { ModelCatalog } from '../sessions/model-catalog.js';
 import type { WorkEngine } from '../work-engine/types.js';
+import type { CollaboratorService } from '../collaborators/service.js';
 import { registerRoutes, type RouteContext } from './routes.js';
+import { registerCollaboratorRoutes } from './collaborator-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -68,6 +70,33 @@ function isRemoteAllowedRoute(method: string, pathname: string): boolean {
   return false;
 }
 
+/**
+ * Ticket 11 AC4: a named collaborator, authenticated via their own device
+ * credential (never the legacy shared tailnet token — see classify()'s
+ * `device` field), may additionally view Repositories and Runs. This is
+ * deliberately its own allowlist rather than added to isRemoteAllowedRoute
+ * above: those routes stay open to any authenticated remote connection
+ * (including the single shared token every admin's own phone still uses),
+ * while these two only ever open for a resolved collaborator device — the
+ * route handlers (routes.ts's GET /api/repos, work-routes.ts's GET
+ * /api/runs*) then filter to exactly `device.grantedRepositoryIds`.
+ */
+function isCollaboratorViewRoute(method: string, pathname: string): boolean {
+  if (method !== 'GET') return false;
+  if (pathname === '/api/repos' || pathname === '/api/runs') return true;
+  // Excludes /api/runs/attention explicitly: it would otherwise match the
+  // per-Run-id pattern below (no slash in "attention") and let a
+  // collaborator device through to work-routes.ts's *unfiltered*,
+  // system-wide attention queue — a grant-scoping leak, not the
+  // grant-filtered GET /api/runs/:id this pattern exists for.
+  return pathname !== '/api/runs/attention' && /^\/api\/runs\/[^/]+$/.test(pathname);
+}
+
+// AC1: a brand-new collaborator device has no bearer token yet, so this one
+// exchange route must be reachable exactly like GET /api/connection is —
+// see the onRequest hook's `requiresRemoteToken` check below.
+const REMOTE_PRE_AUTH_ROUTES = new Set(['/api/connection', '/api/collaborators/exchange']);
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -91,6 +120,8 @@ export interface AppContext {
   modelCatalog?: ModelCatalog;
   /** Ticket 07: feeds GET /api/companion's runAttention field (routes.ts). Never registered separately — registerWorkRoutes(app, workEngine) in index.ts owns the actual /api/runs* routes. */
   workEngine?: WorkEngine;
+  /** Ticket 11: named collaborators and their device credentials — feeds the /api/collaborators/* admin+exchange routes and, via deviceLookup below, every remote request's Principal resolution. Undefined only in tests that don't exercise collaborators. */
+  collaborators?: CollaboratorService;
   /**
    * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
    * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
@@ -111,7 +142,11 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // another (see docs/specs, "ConnectionTrust").
     const trust = classify(
       { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-      { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+      {
+        remoteHosts: ctx.remoteHosts,
+        token: ctx.config.tailscaleToken,
+        deviceLookup: ctx.collaborators?.resolveDevice,
+      },
     );
     const allowedHost = trust.kind !== 'denied';
     const connectPolicy = allowedHost ? `connect-src 'self' ws://${req.headers.host}` : "connect-src 'self'";
@@ -131,11 +166,13 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // Remote-but-unauthenticated (no/invalid token) may still load the SPA
     // shell and static assets — otherwise the phone could never load the
     // page that prompts for a token — but every /api/* call requires the
-    // token, except /api/connection itself, which is how the client
-    // discovers "you're remote, please enter a token" in the first place.
+    // token, except the pre-auth routes a not-yet-authenticated remote
+    // client needs: GET /api/connection (discovers "please enter a token")
+    // and POST /api/collaborators/exchange (ticket 11 AC1 — a brand-new
+    // collaborator device has no token yet either).
     const pathname = (req.url ?? '').split('?')[0] ?? '';
     const isApiRoute = pathname.startsWith('/api/');
-    const requiresRemoteToken = isApiRoute && pathname !== '/api/connection';
+    const requiresRemoteToken = isApiRoute && !REMOTE_PRE_AUTH_ROUTES.has(pathname);
     if (requiresRemoteToken && trust.kind === 'remote' && trust.capabilities.size === 0) {
       return reply.code(403).send({ error: 'a valid tailnet token is required' });
     }
@@ -144,7 +181,24 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // comment above. Only reached once a remote connection is already
     // authenticated (the check above already rejected an empty-capability
     // remote request), so this narrows further rather than duplicating it.
-    if (requiresRemoteToken && trust.kind === 'remote' && !isRemoteAllowedRoute(req.method, pathname)) {
+    //
+    // Ticket 11 AC4: a resolved collaborator device gets ONLY the narrow
+    // view-only allowlist above (isCollaboratorViewRoute) — never
+    // isRemoteAllowedRoute's set. That allowlist was designed for "the
+    // admin's own phone" (the legacy shared token: unfiltered GET
+    // /api/sessions, POST .../send, and — critically — approve/deny/input
+    // on ANY Run's pending attention) and none of it is scoped by
+    // grantedRepositoryIds. Falling back to it for a named collaborator
+    // would let them read every session and resolve any Run's attention
+    // request system-wide — exactly the "guide a Run" administrative
+    // authority ticket 12 (blocked by this one) is responsible for
+    // granting under its own grant checks, not an accidental side door
+    // here. A collaborator device that isn't hitting an
+    // isCollaboratorViewRoute path is refused, full stop.
+    const remoteAllowed = trust.device
+      ? isCollaboratorViewRoute(req.method, pathname)
+      : isRemoteAllowedRoute(req.method, pathname);
+    if (requiresRemoteToken && trust.kind === 'remote' && !remoteAllowed) {
       return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
     }
   });
@@ -164,7 +218,12 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     modelCatalog: ctx.modelCatalog,
     workEngine: ctx.workEngine,
     remoteHosts: ctx.remoteHosts,
+    collaborators: ctx.collaborators,
   });
+
+  // Ticket 11: local-admin-only management routes plus the one
+  // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
+  if (ctx.collaborators) registerCollaboratorRoutes(app, ctx.collaborators);
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

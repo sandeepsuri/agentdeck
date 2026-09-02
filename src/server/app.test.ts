@@ -10,6 +10,8 @@ import { buildApp, type AppContext } from './app.js';
 import { TOKEN_HEADER } from './connection-trust.js';
 import type { RouteContext } from './routes.js';
 import type { Session } from '../types.js';
+import { CollaboratorService } from '../collaborators/service.js';
+import { Store } from '../store/index.js';
 
 const REMOTE_HOST = 'my-mac.tailnet-1234.ts.net';
 const REMOTE_IP = '100.101.102.103';
@@ -116,6 +118,177 @@ describe('host/origin/CSP agreement (ticket 05)', () => {
       headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: 'wrong-token' },
     });
     expect(response.statusCode).toBe(403);
+  });
+});
+
+describe('named collaborator device credentials (ticket 11)', () => {
+  let app: ReturnType<typeof Fastify>;
+  let store: Store;
+  let collaborators: CollaboratorService;
+  afterEach(async () => { await app.close(); store.close(); });
+
+  function build(overrides: Partial<AppContext> = {}) {
+    store = new Store(':memory:');
+    collaborators = new CollaboratorService(store);
+    app = makeApp({ remoteHosts: [REMOTE_HOST], collaborators, store, ...overrides });
+  }
+
+  it('POST /api/collaborators/exchange works pre-authentication, same exemption as GET /api/connection (AC1)', async () => {
+    build();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const response = await app.inject({
+      method: 'POST', url: '/api/collaborators/exchange',
+      headers: { host: `${REMOTE_HOST}:4040`, 'content-type': 'application/json' },
+      payload: JSON.stringify({ code, deviceLabel: 'phone' }),
+    });
+    expect(response.statusCode).toBe(201);
+    const body = response.json() as { token: string; principal: { displayName: string } };
+    expect(body.principal.displayName).toBe('Alice');
+    expect(body.token.length).toBeGreaterThan(20);
+  });
+
+  it('an exchanged device token authenticates subsequent /api/connection requests as remote+authenticated', async () => {
+    build();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const exchanged = (await app.inject({
+      method: 'POST', url: '/api/collaborators/exchange',
+      headers: { host: `${REMOTE_HOST}:4040`, 'content-type': 'application/json' },
+      payload: JSON.stringify({ code, deviceLabel: 'phone' }),
+    })).json() as { token: string };
+
+    const connection = await app.inject({
+      method: 'GET', url: '/api/connection',
+      headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: exchanged.token },
+    });
+    expect(connection.json()).toEqual({ kind: 'remote', capabilities: ['view', 'compose', 'control-keys'] });
+  });
+
+  it('a collaborator device can view GET /api/repos, filtered to its grants (AC4) — never reachable by the legacy shared token alone', async () => {
+    // A projectsDir that can't be scanned (ENOENT) forces GET /api/repos to
+    // fall back to the store's own listRepos() — otherwise scanRepos()
+    // would rescan this real machine's filesystem and never see the
+    // fixture repos seeded below at all.
+    build({ config: { ...defaultConfig(), tailscaleToken: 'the-shared-token', projectsDir: '/nonexistent/agentdeck-test-projects-dir' } });
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'] });
+    const { token } = collaborators.exchangeInvitation(code, 'phone');
+    store.upsertRepo({ id: 'repo-1', name: 'granted', path: '/tmp/repo-1' });
+    store.upsertRepo({ id: 'repo-2', name: 'ungranted', path: '/tmp/repo-2' });
+
+    const asCollaborator = await app.inject({
+      method: 'GET', url: '/api/repos',
+      headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token },
+    });
+    expect(asCollaborator.statusCode).toBe(200);
+    expect((asCollaborator.json() as { id: string }[]).map((r) => r.id)).toEqual(['repo-1']);
+
+    // The legacy shared token is a different bearer value entirely, but
+    // even the admin's own remote device (were it using the shared token)
+    // never reaches this route — see isCollaboratorViewRoute's comment in
+    // app.ts. Confirmed by refusing the wrong token outright here (a right
+    // token for the *shared* path 403s the same way GET /api/runs already
+    // does in the allowlist suite above).
+    const asSharedToken = await app.inject({
+      method: 'GET', url: '/api/repos',
+      headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: 'the-shared-token' },
+    });
+    expect(asSharedToken.statusCode).toBe(403);
+  });
+
+  it.each([
+    ['GET', '/api/sessions'],
+    ['POST', '/api/sessions/some-id/send'],
+    ['GET', '/api/runs/attention'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/approve'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/deny'],
+    ['POST', '/api/runs/some-id/attention/some-attention-id/input'],
+  ])(
+    'a collaborator device gets ONLY the view-only allowlist — %s %s (on the legacy shared-token allowlist) stays refused (AC4: view only, never guide)',
+    async (method, url) => {
+      build();
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+      const response = await app.inject({
+        method: method as 'GET' | 'POST', url,
+        headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
+        payload: method === 'GET' ? undefined : '{}',
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
+    },
+  );
+
+  it('the legacy shared token keeps its own pre-ticket allowlist (GET /api/sessions) even when collaborators are configured on the same app', async () => {
+    build({
+      config: { ...defaultConfig(), tailscaleToken: 'the-shared-token' },
+      manager: { listSessions: () => [] } as unknown as RouteContext['manager'],
+    });
+    const response = await app.inject({
+      method: 'GET', url: '/api/sessions',
+      headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: 'the-shared-token' },
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('a revoked device is refused on its very next request (AC5) — REST needs no separate teardown', async () => {
+    build();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: [] });
+    const { device, token } = collaborators.exchangeInvitation(code, 'phone');
+
+    const before = await app.inject({ method: 'GET', url: '/api/repos', headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token } });
+    expect(before.statusCode).toBe(200);
+
+    collaborators.revokeDevice(device.id);
+
+    const after = await app.inject({ method: 'GET', url: '/api/repos', headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token } });
+    expect(after.statusCode).toBe(403);
+  });
+
+  it.each([
+    ['POST', '/api/collaborators'],
+    ['GET', '/api/collaborators'],
+    ['PATCH', '/api/collaborators/some-id'],
+    ['POST', '/api/collaborators/some-id/invitations'],
+    ['POST', '/api/collaborators/devices/some-id/revoke'],
+  ])('admin route %s %s is local-only — refused on an authenticated collaborator device connection', async (method, url) => {
+    build();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const { token } = collaborators.exchangeInvitation(code, 'phone');
+    const response = await app.inject({
+      method: method as 'GET' | 'POST' | 'PATCH', url,
+      headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
+      payload: method === 'GET' ? undefined : '{}',
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
+  });
+
+  it('the local admin can create a collaborator, list devices, and revoke one, all over loopback (AC1/AC2)', async () => {
+    build();
+    const created = await app.inject({
+      method: 'POST', url: '/api/collaborators', headers: { host: '127.0.0.1:4040', 'content-type': 'application/json' },
+      payload: JSON.stringify({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'] }),
+    });
+    expect(created.statusCode).toBe(201);
+    const { code, collaborator } = created.json() as { code: string; collaborator: { id: string } };
+
+    const exchanged = await app.inject({
+      method: 'POST', url: '/api/collaborators/exchange',
+      headers: { host: `${REMOTE_HOST}:4040`, 'content-type': 'application/json' },
+      payload: JSON.stringify({ code, deviceLabel: 'phone' }),
+    });
+    const { device } = exchanged.json() as { device: { id: string } };
+
+    const listed = await app.inject({ method: 'GET', url: '/api/collaborators', headers: { host: '127.0.0.1:4040' } });
+    const rows = listed.json() as { id: string; displayName: string; devices: { id: string; deviceLabel: string }[] }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: collaborator.id, displayName: 'Alice', grantedRepositoryIds: ['repo-1'] });
+    expect(rows[0]!.devices).toEqual([expect.objectContaining({ id: device.id, deviceLabel: 'phone' })]);
+
+    const revoked = await app.inject({
+      method: 'POST', url: `/api/collaborators/devices/${device.id}/revoke`, headers: { host: '127.0.0.1:4040' },
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect((revoked.json() as { revokedAt?: string }).revokedAt).toEqual(expect.any(String));
   });
 });
 

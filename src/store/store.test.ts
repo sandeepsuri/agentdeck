@@ -383,6 +383,75 @@ describe('settings', () => {
   });
 });
 
+describe('collaborators (ticket 11)', () => {
+  it('round-trips a collaborator and its granted repositories', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'] });
+    expect(store.getCollaborator('collab-1')).toEqual({
+      id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'],
+    });
+    expect(store.listCollaborators()).toHaveLength(1);
+    store.updateCollaboratorGrants('collab-1', ['repo-1', 'repo-2']);
+    expect(store.getCollaborator('collab-1')?.grantedRepositoryIds).toEqual(['repo-1', 'repo-2']);
+  });
+
+  it('looks an invitation up by its code hash, never by id, and records consumption', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createInvitation(
+      { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
+      'a-code-hash',
+    );
+    expect(store.getInvitationByCodeHash('a-code-hash')).toEqual({
+      id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z',
+    });
+    expect(store.getInvitationByCodeHash('no-such-hash')).toBeUndefined();
+    store.consumeInvitation('inv-1', '2026-01-01T01:00:00.000Z');
+    expect(store.getInvitationByCodeHash('a-code-hash')?.consumedAt).toBe('2026-01-01T01:00:00.000Z');
+  });
+
+  it('looks a device up by its token hash and lists devices scoped to one collaborator', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createCollaborator({ id: 'collab-2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
+    store.createDevice({ id: 'device-2', collaboratorId: 'collab-2', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
+
+    expect(store.getDeviceByTokenHash('hash-1')?.id).toBe('device-1');
+    expect(store.getDeviceByTokenHash('no-such-hash')).toBeUndefined();
+    expect(store.listDevices('collab-1')).toEqual([
+      { id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+    expect(store.listDevices()).toHaveLength(2);
+  });
+
+  it('revoking a device is visible by id and by token hash, and does not touch other devices', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [] });
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
+    store.createDevice({ id: 'device-2', collaboratorId: 'collab-1', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
+
+    store.revokeDevice('device-1', '2026-01-01T02:00:00.000Z');
+
+    expect(store.getDevice('device-1')?.revokedAt).toBe('2026-01-01T02:00:00.000Z');
+    expect(store.getDeviceByTokenHash('hash-1')?.revokedAt).toBe('2026-01-01T02:00:00.000Z');
+    expect(store.getDevice('device-2')?.revokedAt).toBeUndefined();
+  });
+
+  it('survives a restart: collaborators, invitations, and devices are reopened with the same identity', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'] });
+    store.createInvitation(
+      { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
+      'a-code-hash',
+    );
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'a-token-hash');
+    store.close();
+
+    const reopened = openStore(dir);
+    expect(reopened.getCollaborator('collab-1')?.grantedRepositoryIds).toEqual(['repo-1']);
+    expect(reopened.getInvitationByCodeHash('a-code-hash')?.id).toBe('inv-1');
+    expect(reopened.getDeviceByTokenHash('a-token-hash')?.id).toBe('device-1');
+    reopened.close();
+    store = openStore(dir); // hand back to afterEach
+  });
+});
+
 describe('migrations', () => {
   it('boot is idempotent: reopening the same file re-runs migrate harmlessly', () => {
     store.upsertSession(externalSession);

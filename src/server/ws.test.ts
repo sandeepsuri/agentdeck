@@ -10,6 +10,7 @@ import type { LaunchSpec } from '../types.js';
 import type { Handle, SessionBackend } from '../sessions/backend.js';
 import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
+import { CollaboratorService } from '../collaborators/service.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs, getConnectionTrust } from './ws.js';
@@ -1097,6 +1098,140 @@ describe('remote (tailnet) WebSocket access', () => {
   });
 });
 
+describe('collaborator device WebSocket access (ticket 11)', () => {
+  const REMOTE_HOST = 'phone-test-host.tailnet-1234.ts.net';
+
+  let collabStore: Store;
+  let collabManager: SessionManager;
+  let collabBackend: FakeBackend;
+  let collabSessionsDir: string;
+  let collabApp: ReturnType<typeof buildApp>;
+  let collabWss: WebSocketServer;
+  let collaborators: CollaboratorService;
+  let collabPort: number;
+
+  beforeEach(async () => {
+    collabStore = new Store(':memory:');
+    collabSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-'));
+    collabBackend = new FakeBackend();
+    collabManager = new SessionManager(collabBackend, collabStore, { sessionsDir: collabSessionsDir });
+    collaborators = new CollaboratorService(collabStore);
+    collabApp = buildApp({
+      config: { ...defaultConfig() },
+      manager: collabManager,
+      store: collabStore,
+      remoteHosts: [REMOTE_HOST],
+      collaborators,
+    });
+    await collabApp.listen({ port: 0, host: '127.0.0.1' });
+    collabWss = attachWs(
+      [collabApp.server], collabManager, '/ws', undefined, undefined,
+      { remoteHosts: [REMOTE_HOST] }, undefined, collaborators,
+    );
+    const addr = collabApp.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    collabPort = addr.port;
+  });
+
+  afterEach(async () => {
+    await closeWs(collabWss);
+    await collabApp.close();
+    await collabManager.shutdown();
+    collabStore.close();
+    fs.rmSync(collabSessionsDir, { recursive: true, force: true });
+  });
+
+  function issueDeviceToken(): string {
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    return collaborators.exchangeInvitation(code, 'phone').token;
+  }
+
+  it('accepts a tailnet-host upgrade authenticated by a collaborator device token (no shared tailscaleToken configured at all)', async () => {
+    const token = issueDeviceToken();
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  it('refuses an upgrade with an unknown or already-revoked device token', async () => {
+    const ws1 = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=bogus-token`, { headers: { host: REMOTE_HOST } });
+    const rejected1 = await new Promise<boolean>((resolve) => {
+      ws1.once('error', () => resolve(true));
+      ws1.once('open', () => resolve(false));
+    });
+    ws1.terminate();
+    expect(rejected1).toBe(true);
+
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Bob' });
+    const { device, token: bobToken } = collaborators.exchangeInvitation(code, 'bob-phone');
+    collaborators.revokeDevice(device.id);
+    const ws2 = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(bobToken)}`, { headers: { host: REMOTE_HOST } });
+    const rejected2 = await new Promise<boolean>((resolve) => {
+      ws2.once('error', () => resolve(true));
+      ws2.once('open', () => resolve(false));
+    });
+    ws2.terminate();
+    expect(rejected2).toBe(true);
+  });
+
+  it('revoking a device terminates its already-open socket without disrupting another device\'s socket (AC5)', async () => {
+    const { code: codeA } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const { device: deviceA, token: tokenA } = collaborators.exchangeInvitation(codeA, 'alice-phone');
+    const { code: codeB } = collaborators.inviteCollaborator({ displayName: 'Bob' });
+    const { token: tokenB } = collaborators.exchangeInvitation(codeB, 'bob-phone');
+
+    const wsA = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(tokenA)}`, { headers: { host: REMOTE_HOST } });
+    const wsB = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(tokenB)}`, { headers: { host: REMOTE_HOST } });
+    await Promise.all([wsA, wsB].map((ws) => new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    })));
+
+    const closedA = new Promise<void>((resolve) => wsA.once('close', () => resolve()));
+    collaborators.revokeDevice(deviceA.id);
+    await closedA;
+
+    expect(wsB.readyState).toBe(WebSocket.OPEN);
+    wsB.close();
+  });
+
+  it('a collaborator device cannot attach to a session or receive its output over WS (AC4: view only, never guide)', async () => {
+    const launched = await collabApp.inject({
+      method: 'POST', url: '/api/sessions', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(SPEC),
+    });
+    const { id, pid } = launched.json() as { id: string; pid: number };
+
+    const token = issueDeviceToken();
+    const ws = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+
+    const frames: unknown[] = [];
+    ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    collabBackend.emitOutput(pid, 'output after a refused attach');
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: 'echo hi\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // No replay, no reflow_text — the attach never registered a viewer.
+    expect(frames.some((f) => (f as { t: string }).t === 'replay')).toBe(false);
+    expect(frames.some((f) => (f as { t: string }).t === 'reflow_text')).toBe(false);
+    // The refused attach means 'input' never found a viewing session either.
+    expect(collabBackend.written.get(String(pid))).toEqual([]);
+
+    ws.close();
+  });
+});
+
 describe('ticket 07: run_attention_resolve WS authorization — the same DurableWorkEngine.resolveAttention() REST reaches', () => {
   const REMOTE_HOST = 'attention-test-host.tailnet-1234.ts.net';
   const TOKEN = 'a-real-remote-access-token-0123456789';
@@ -1197,5 +1332,49 @@ describe('ticket 07: run_attention_resolve WS authorization — the same Durable
 
     expect(ws.readyState).toBe(WebSocket.OPEN);
     ws.close();
+  });
+
+  it('ticket 11 AC4: a collaborator device cannot resolve Run attention over WS — that is "guiding" a Run, not viewing it', async () => {
+    // Deliberately not using this describe block's shared setUp()/attnWss —
+    // attachWs registers its own 'upgrade' listener on the http.Server, so
+    // a second attachWs call on the same server (to add a collaborators
+    // service) would leave both listeners active and racing. A fully
+    // separate app/server/wss, same shape as the "collaborator device
+    // WebSocket access" describe block above, avoids that entirely.
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-attention-'));
+    const manager = new SessionManager(new FakeBackend(), store, { sessionsDir });
+    const collaborators = new CollaboratorService(store);
+    const app = buildApp({ config: defaultConfig(), manager, store, remoteHosts: [REMOTE_HOST], collaborators });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const wss = attachWs(
+      [app.server], manager, '/ws', undefined, undefined,
+      { remoteHosts: [REMOTE_HOST] }, { resolveAttention } as unknown as Parameters<typeof attachWs>[6], collaborators,
+    );
+    const addr = app.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+
+    try {
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+
+      const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+
+      ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(resolveAttention).not.toHaveBeenCalled();
+      ws.close();
+    } finally {
+      await closeWs(wss);
+      await app.close();
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    }
   });
 });

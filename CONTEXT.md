@@ -87,3 +87,11 @@ _Avoid_: Runtime status, informal test output
 **Run result**:
 The durable terminal record of a Run's outcome, including its submitted intent, delivery artifacts, verification evidence, approvals, usage, budget state, and recovery notes.
 _Avoid_: Session summary, terminal transcript
+
+**Invitation**:
+A one-time code the bootstrap local admin issues for a named collaborator, exchanged exactly once for a Device credential. An invitation grants no authority itself — it only proves the exchange happened.
+_Avoid_: Token, access code
+
+**Device credential**:
+An individually revocable bearer credential bound to one collaborator's device, minted by exchanging an Invitation. Authenticates a remote request to a Principal and device for audit attribution; stored only as a hash, never in a form that reveals the bearer value after issuance.
+_Avoid_: Token, session, API key

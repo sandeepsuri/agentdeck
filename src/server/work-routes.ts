@@ -5,14 +5,29 @@ import {
   UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
 import type { AttentionDecisionInput, WorkEngine, WorkSpec } from '../work-engine/types.js';
+import { nonEmptyString } from './validate.js';
 
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
+export interface WorkRoutesDeps {
+  /**
+   * Ticket 11 AC4: a collaborator device's granted Repository ids
+   * (connection-trust.ts's `TrustResult.device.grantedRepositoryIds`), or
+   * undefined for local and legacy-shared-token remote connections, which
+   * stay unrestricted exactly as before this ticket. Kept as a plain
+   * function rather than importing connection-trust.ts directly so this
+   * module's own tests don't need a real Fastify request/ConnectionTrust.
+   */
+  resolveGrantedRepositoryIds?: (request: FastifyRequest) => readonly string[] | undefined;
 }
 
 /** Local admin REST adapter; all behavior remains owned by WorkEngine. */
-export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine): void {
-  app.get('/api/runs', async () => workEngine.list());
+export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine, deps: WorkRoutesDeps = {}): void {
+  const scopeRuns = (request: FastifyRequest) => {
+    const granted = deps.resolveGrantedRepositoryIds?.(request);
+    const runs = workEngine.list();
+    return granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs;
+  };
+
+  app.get('/api/runs', async (request) => scopeRuns(request));
 
   // Ticket 07: the one minimal, remote-safe read a mobile client needs to
   // act on a pending Run attention request — never the Repository path,
@@ -26,7 +41,13 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine)
   app.get('/api/runs/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const run = workEngine.get(id);
-    return run ?? reply.code(404).send({ error: 'no such run' });
+    if (!run) return reply.code(404).send({ error: 'no such run' });
+    // AC4: a Run outside a collaborator device's grants doesn't exist as
+    // far as it's concerned — 404, not 403, so an id it can't view never
+    // leaks even the fact that it exists.
+    const granted = deps.resolveGrantedRepositoryIds?.(request);
+    if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
+    return run;
   });
 
   app.post('/api/runs', async (request, reply) => {

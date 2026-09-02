@@ -4,6 +4,7 @@ import type { AttentionDecisionInput, WorkRun } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
+import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { RunSubmissionModal } from './components/RunSubmissionModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
@@ -99,6 +100,13 @@ export function App() {
   const [connectionGate, setConnectionGate] = useState<'ready' | 'needs-token' | 'denied'>('ready');
   const [tokenInput, setTokenInput] = useState('');
   const [tokenError, setTokenError] = useState<string | null>(null);
+  // Ticket 11 AC1: a named collaborator's device has no shared tailnet
+  // token to enter — it exchanges a one-time invitation code for its own
+  // device credential instead. Same gate, a second mode.
+  const [authMode, setAuthMode] = useState<'token' | 'invitation'>('token');
+  const [inviteCode, setInviteCode] = useState('');
+  const [deviceLabel, setDeviceLabel] = useState('');
+  const [inviteError, setInviteError] = useState<string | null>(null);
   // Ticket 13: which workspace to render once the gate is 'ready'. Defaults
   // to 'local' for the same reason connectionGate defaults to 'ready' — the
   // ordinary desktop/loopback case must render its normal tree immediately,
@@ -324,6 +332,28 @@ export function App() {
     }
   };
 
+  // Ticket 11 AC1: exchanges the one-time invitation code the bootstrap
+  // admin issued for this device's own bearer token (collaborators.ts
+  // stores it exactly like the shared tailnet token), then re-checks
+  // GET /api/connection the same way submitToken does above.
+  const submitInvitation = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const result = await exchangeInvitationCode(inviteCode.trim(), deviceLabel.trim());
+    if (!result.ok) { setInviteError(result.error); return; }
+    try {
+      const body = await fetchConnection();
+      if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
+        setConnectionKind('remote');
+        setInviteError(null);
+        setConnectionGate('ready');
+      } else {
+        setInviteError('The device credential was not accepted.');
+      }
+    } catch {
+      setInviteError('Could not reach AgentDeck to confirm the device.');
+    }
+  };
+
   const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
   const selectRun = (run: WorkRun) => { setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
   const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
@@ -407,18 +437,41 @@ export function App() {
   if (connectionGate === 'needs-token') {
     return (
       <div className="agentdeck-shell">
-        <form onSubmit={(event) => { void submitToken(event); }}>
-          <label htmlFor="agentdeck-token-input">Enter access token</label>
-          <input
-            autoFocus
-            id="agentdeck-token-input"
-            onChange={(event) => setTokenInput(event.target.value)}
-            type="password"
-            value={tokenInput}
-          />
-          <button type="submit">Continue</button>
-          {tokenError && <p role="alert">{tokenError}</p>}
-        </form>
+        {authMode === 'token' ? (
+          <form onSubmit={(event) => { void submitToken(event); }}>
+            <label htmlFor="agentdeck-token-input">Enter access token</label>
+            <input
+              autoFocus
+              id="agentdeck-token-input"
+              onChange={(event) => setTokenInput(event.target.value)}
+              type="password"
+              value={tokenInput}
+            />
+            <button type="submit">Continue</button>
+            {tokenError && <p role="alert">{tokenError}</p>}
+            <button onClick={() => setAuthMode('invitation')} type="button">Have an invitation code instead?</button>
+          </form>
+        ) : (
+          <form onSubmit={(event) => { void submitInvitation(event); }}>
+            <label htmlFor="agentdeck-invite-code-input">Invitation code</label>
+            <input
+              autoFocus
+              id="agentdeck-invite-code-input"
+              onChange={(event) => setInviteCode(event.target.value)}
+              value={inviteCode}
+            />
+            <label htmlFor="agentdeck-device-label-input">This device&rsquo;s name</label>
+            <input
+              id="agentdeck-device-label-input"
+              onChange={(event) => setDeviceLabel(event.target.value)}
+              placeholder="e.g. My phone"
+              value={deviceLabel}
+            />
+            <button type="submit">Continue</button>
+            {inviteError && <p role="alert">{inviteError}</p>}
+            <button onClick={() => setAuthMode('token')} type="button">Have an access token instead?</button>
+          </form>
+        )}
       </div>
     );
   }
@@ -505,7 +558,7 @@ export function App() {
       <CommandPalette onClose={() => setPaletteOpen(false)} onLaunch={() => setShowLaunch(true)} onSelectSession={(session) => { selectSession(session); setView('operations'); }} onView={setView} open={paletteOpen} repos={repos} sessions={sessions} />
       {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
       {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} repos={repos} />}
     </div>
   );
 }
