@@ -28,6 +28,7 @@
     "prepack": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "snapshot:codex-protocol": "node scripts/snapshot-codex-protocol.mjs",
     "test:notch": "xcrun swift test --package-path native/AgentDeckNotch --scratch-path .native-build",
     "postinstall": "node scripts/postinstall.mjs"
   },

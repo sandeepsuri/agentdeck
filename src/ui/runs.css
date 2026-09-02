@@ -39,6 +39,29 @@
 .run-attempt-event.kind-failure { border-color: var(--status-error); }
 .run-attempt-event.kind-completion { border-color: var(--status-working); }
 
+/* The readable Attempt report: the answer, then what the Run did in plain
+   sentences. The raw command stays available under "Show technical detail" —
+   the durable log keeps it, so a reader who wants the exact shell is one
+   click away, and everyone else is not reading /bin/zsh -lc by default. */
+.run-attempt-answer { margin: 16px 0 0; padding: 14px 16px; border: 1px solid var(--border-muted); border-left: 2px solid var(--status-working); border-radius: 6px; background: var(--surface-panel); }
+.run-attempt-answer h3,.run-attempt-steps h3 { margin: 0; color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.run-attempt-answer p { margin: 9px 0 0; color: var(--text-primary); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-attempt-answer p.is-empty { color: var(--text-muted); font-style: italic; }
+.run-attempt-steps { margin: 18px 0 0; }
+.run-attempt-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.run-detail-toggle { padding: 5px 9px; border: 1px solid var(--border-muted); border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 10px; cursor: pointer; }
+.run-detail-toggle:hover { background: var(--surface-hover); }
+.run-attempt-step { display: grid; grid-template-columns: 16px minmax(0,1fr); align-items: baseline; gap: 8px; padding: 6px 0; border: 0; background: none; }
+.run-step-mark { color: var(--status-working); font: 11px var(--font-mono); }
+.run-attempt-step.status-failed .run-step-mark { color: var(--status-error); }
+.run-attempt-step.status-started .run-step-mark { color: var(--text-muted); }
+.run-step-label { color: var(--text-primary); font-size: 13px; line-height: 1.5; }
+.run-attempt-step code { grid-column: 2; margin-top: 5px; padding: 6px 8px; border-radius: 5px; background: var(--surface-code); color: var(--text-secondary); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.run-attempt-verdict { margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; }
+.run-attempt-verdict.is-success { color: var(--status-working); }
+.run-attempt-verdict.is-failure { color: var(--status-error); }
+.run-attempt-raw { margin-top: 16px; }
+
 /* Ticket 07: a pending Run attention request — approve/deny or provide
    clarifying input, matching the .run-attempt-event kind-* accent pattern
    above (border color keyed to what the request means). */

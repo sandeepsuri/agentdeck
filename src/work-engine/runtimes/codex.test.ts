@@ -66,13 +66,35 @@ describe('createCodexAttemptAdapter', () => {
     expect(events.map((event) => event.kind)).toEqual([
       'lifecycle', 'lifecycle', 'tool-activity', 'tool-activity', 'message', 'usage', 'lifecycle', 'completion',
     ]);
-    expect(events).toContainEqual(expect.objectContaining({ kind: 'tool-activity', tool: 'command_execution', status: 'started', summary: 'npm test' }));
-    expect(events).toContainEqual(expect.objectContaining({ kind: 'tool-activity', tool: 'command_execution', status: 'completed', summary: 'npm test' }));
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'tool-activity', tool: 'commandExecution', status: 'started', summary: 'npm test' }));
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'tool-activity', tool: 'commandExecution', status: 'completed', summary: 'npm test' }));
     expect(events).toContainEqual(expect.objectContaining({
       kind: 'message', role: 'assistant', text: 'Added the missing test and confirmed it passes.',
     }));
     expect(events).toContainEqual(expect.objectContaining({ kind: 'usage', inputTokens: 1200, outputTokens: 340 }));
     expect(events.at(-1)).toMatchObject({ kind: 'completion', outcome: 'success' });
+  });
+
+  it('records the assistant message as the answer, and never records the objective echo or the model\'s thinking as activity', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    // The whole deliverable of an objective like "summarize this repo".
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: 'message', role: 'assistant', text: 'Added the missing test and confirmed it passes.',
+    }));
+    // userMessage is our own objective handed back; reasoning is internal
+    // thinking. Neither is an action, so neither becomes a tool-activity.
+    const tools = events.filter((event) => event.kind === 'tool-activity').map((event) => event.tool);
+    expect(tools).toEqual(['commandExecution', 'commandExecution']);
+    expect(JSON.stringify(events)).not.toContain('Deciding where the test belongs');
+  });
+
+  it('reads usage from the cumulative thread total the notification actually carries', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'usage', inputTokens: 1200, outputTokens: 340 }));
   });
 
   it('reports missing usage as unknown rather than zero', async () => {
@@ -87,6 +109,18 @@ describe('createCodexAttemptAdapter', () => {
     const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
     const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
 
+    expect(events.at(-1)).toMatchObject({ kind: 'failure', reason: 'The sandboxed command exited non-zero.' });
+  });
+
+  it('fails the Attempt when the turn itself ends failed, rather than reporting a success', async () => {
+    // The outcome lives on turn.status, not on a top-level params.error:
+    // reading the wrong one meant every failed turn was recorded as
+    // 'Completed — success', which is precisely what would mislead a reader
+    // who cannot inspect the commands themselves.
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    expect(events.some((event) => event.kind === 'completion')).toBe(false);
     expect(events.at(-1)).toMatchObject({ kind: 'failure', reason: 'The sandboxed command exited non-zero.' });
   });
 
@@ -140,6 +174,24 @@ describe('createCodexAttemptAdapter', () => {
     expect(turnStart.params.input[0].type).toBe('text');
     expect(turnStart.params.input[0].text).toContain(context.objective);
     expect(turnStart.params.input[0].text).toContain(context.acceptanceCriteria[0]);
+  });
+
+  it('reads the thread id from the nested thread the app-server returns, and carries it into turn/start', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success', threadId: 'thread-nested-42' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    const turnStart = fake.writes.map((line) => JSON.parse(line)).find((message) => message.method === 'turn/start');
+    expect(turnStart.params.threadId).toBe('thread-nested-42');
+    expect(events.at(-1)).toMatchObject({ kind: 'completion' });
+  });
+
+  it('fails the Attempt precisely when thread/start returns no usable thread id, rather than hanging', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'missing-thread-id' });
+    const events = await run({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn });
+
+    expect(events.at(-1)).toMatchObject({ kind: 'failure', reason: 'Codex app-server did not return a thread id.' });
+    // The objective is never sent against a thread that does not exist.
+    expect(fake.writes.some((line) => line.includes('turn/start'))).toBe(false);
   });
 
   it('launches a plain `codex app-server` and opts into the experimental API through initialize, not a CLI flag', async () => {

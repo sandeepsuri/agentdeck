@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import type { AttemptEvent, AttentionDecisionInput, WorkRun } from '../../work-engine/types.js';
+import {
+  describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
+} from './attemptActivity.js';
 import { formatRunLabel } from './runModel.js';
 
 function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: string } {
@@ -32,6 +35,72 @@ function AttentionInputForm({ onSubmit }: { onSubmit: (value: string) => void })
       <input aria-label="Clarifying input" onChange={(event) => setValue(event.target.value)} type="text" value={value} />
       <button className="button button-primary" disabled={!value.trim()} type="submit">Send</button>
     </form>
+  );
+}
+
+const STATUS_MARK: Record<ActivityStatus, string> = { started: '…', completed: '\u2713', failed: '\u2715' };
+
+/**
+ * What an Attempt produced, for someone who did not write the commands.
+ *
+ * The answer first (it is what was asked for), then what the Run did in plain
+ * sentences, then a verdict. The exact commands stay one toggle away — the
+ * durable log keeps them, and a reader who wants them is one click from them.
+ */
+function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
+  const [showDetail, setShowDetail] = useState(false);
+  const { answer, steps, outcome, usage } = summarizeAttempt(events);
+  const settled = Boolean(outcome);
+  const verdict = describeOutcome(outcome);
+  return (
+    <>
+      <section className="run-attempt-answer">
+        <h3>Result</h3>
+        {answer
+          ? <p>{answer}</p>
+          : <p className="is-empty">{settled ? 'This Run produced no written answer.' : 'Working\u2026'}</p>}
+      </section>
+      {steps.length > 0 && (
+        <section className="run-attempt-steps">
+          <div className="run-attempt-steps-header">
+            <h3>What it did</h3>
+            <button className="button run-detail-toggle" onClick={() => setShowDetail((shown) => !shown)} type="button">
+              {showDetail ? 'Hide technical detail' : 'Show technical detail'}
+            </button>
+          </div>
+          <ol className="run-attempt-activity">
+            {steps.map((step) => (
+              <li className={`run-attempt-step status-${step.status}`} key={step.sequence}>
+                <span aria-hidden="true" className="run-step-mark">{STATUS_MARK[step.status]}</span>
+                <span className="run-step-label">{step.label}</span>
+                {showDetail && step.detail && <code>{step.detail}</code>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+      {verdict && (
+        <p className={`run-attempt-verdict ${outcome?.kind === 'failure' ? 'is-failure' : 'is-success'}`}>
+          {verdict}
+          {usage && (usage.inputTokens !== 'unknown' || usage.outputTokens !== 'unknown') && (
+            <span> · {formatTokenCount(usage.inputTokens)} in / {formatTokenCount(usage.outputTokens)} out tokens</span>
+          )}
+        </p>
+      )}
+      {showDetail && (
+        <ol className="run-attempt-activity run-attempt-raw">
+          {events.map((event) => {
+            const { label, detail } = describeAttemptEvent(event);
+            return (
+              <li className={`run-attempt-event kind-${event.kind}`} key={event.sequence}>
+                <strong>{label}</strong>
+                {detail && <p>{detail}</p>}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </>
   );
 }
 
@@ -170,19 +239,7 @@ export function RunWorkspace({
               </section>
             );
           })()}
-          {attempt.state !== 'idle' && (
-            <ol className="run-attempt-activity">
-              {attempt.events.map((event) => {
-                const { label, detail } = describeAttemptEvent(event);
-                return (
-                  <li className={`run-attempt-event kind-${event.kind}`} key={event.sequence}>
-                    <strong>{label}</strong>
-                    {detail && <p>{detail}</p>}
-                  </li>
-                );
-              })}
-            </ol>
-          )}
+          {attempt.state !== 'idle' && <AttemptReport events={attempt.events} />}
         </section>
       )}
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>

@@ -186,7 +186,7 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     expect(html).not.toContain('Start Attempt');
   });
 
-  it('shows ordered structured activity for a running Attempt, and no Start action once one is underway', () => {
+  it('reports a running Attempt in plain language, and offers no Start action once one is underway', () => {
     const run: WorkRun = {
       ...eligibleRun(),
       status: 'running',
@@ -198,7 +198,7 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
           { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
           { kind: 'lifecycle', sequence: 1, at: '2026-09-01T00:05:01.000Z', phase: 'turn-started' },
           {
-            kind: 'tool-activity', sequence: 2, at: '2026-09-01T00:05:02.000Z', tool: 'command_execution', status: 'started', summary: 'npm test',
+            kind: 'tool-activity', sequence: 2, at: '2026-09-01T00:05:02.000Z', tool: 'commandExecution', status: 'started', summary: 'npm test',
           },
           {
             kind: 'message', sequence: 3, at: '2026-09-01T00:05:03.000Z', role: 'assistant', text: 'Working on the fix now.',
@@ -210,10 +210,103 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onStart: () => undefined }));
 
     expect(html).not.toContain('Start Attempt');
-    expect(html).toContain('Attempt started');
-    expect(html).toContain('Turn started');
-    expect(html).toContain('npm test');
+    expect(html).toContain('Ran the tests');
     expect(html).toContain('Working on the fix now.');
+    // Lifecycle bookkeeping is not a step a reader needs.
+    expect(html).not.toContain('Turn started');
+  });
+
+  it('leads with the answer the Run was asked for, instead of burying it in the log', () => {
+    const summary = 'AgentDeck is a local-first control panel for Claude Code and Codex CLI sessions on macOS.';
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'completed',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          {
+            kind: 'tool-activity',
+            sequence: 1,
+            at: '2026-09-01T00:05:01.000Z',
+            tool: 'commandExecution',
+            status: 'completed',
+            summary: `/bin/zsh -lc "pwd && rg --files -g '!*node_modules*' | sed -n '1,240p'"`,
+          },
+          { kind: 'message', sequence: 2, at: '2026-09-01T00:05:02.000Z', role: 'assistant', text: summary },
+          { kind: 'usage', sequence: 3, at: '2026-09-01T00:05:03.000Z', inputTokens: 4200, outputTokens: 310 },
+          { kind: 'completion', sequence: 4, at: '2026-09-01T00:06:00.000Z', outcome: 'success' },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Result');
+    expect(html).toContain(summary);
+    expect(html).toContain('Searched the repository for source files');
+    expect(html).toContain('Completed successfully');
+    expect(html).toContain('4,200 in / 310 out tokens');
+    // The exact shell is kept in the durable log but stays behind the toggle:
+    // this feed is read by people who do not read /bin/zsh.
+    expect(html).not.toContain('/bin/zsh');
+    expect(html).toContain('Show technical detail');
+  });
+
+  it('says plainly that a completed Attempt produced no written answer, rather than showing an empty Result', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'completed',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'completion', sequence: 1, at: '2026-09-01T00:06:00.000Z', outcome: 'no-changes' },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('This Run produced no written answer.');
+    expect(html).toContain('Completed without changing any files');
+  });
+
+  it('never tells a reader a failed Attempt succeeded', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'failed',
+      attempt: {
+        state: 'failed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        failedAt: '2026-09-01T00:06:00.000Z',
+        reason: 'The sandboxed command exited non-zero.',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          {
+            kind: 'tool-activity', sequence: 1, at: '2026-09-01T00:05:01.000Z', tool: 'commandExecution', status: 'failed', summary: 'npm test',
+          },
+          {
+            kind: 'failure', sequence: 2, at: '2026-09-01T00:06:00.000Z', reason: 'The sandboxed command exited non-zero.',
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).not.toContain('Completed successfully');
+    // renderToStaticMarkup escapes the apostrophe.
+    expect(html).toMatch(/Didn(?:&#x27;|')t finish/);
+    expect(html).toContain('The sandboxed command exited non-zero.');
+    expect(html).toContain('status-failed');
   });
 
   it('shows the terminal outcome for a completed Attempt', () => {

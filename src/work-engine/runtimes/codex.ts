@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { resolveAgentExecutable } from '../../sessions/executable.js';
 import { filterEnvironment } from '../envelope.js';
+import { readThreadId } from './codex-protocol.js';
 import type { AttentionDecisionInput, AttemptEvent, AttentionRequestKind } from '../types.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './adapter.js';
 
@@ -128,11 +129,41 @@ function isJsonRpcMessage(value: unknown): value is JsonRpcMessage {
   return typeof value === 'object' && value !== null;
 }
 
+// The identifying detail of a ThreadItem, by the field each type actually
+// carries (see the item paths in test-fixtures/codex-protocol-snapshot.json).
+// This is the raw fact for the durable log — turning it into something a
+// person can read is the UI's job (ui/workspace/attemptActivity.ts), so the
+// wording can improve later without rewriting history.
 function itemSummary(item: Record<string, unknown>): string | undefined {
   if (typeof item.command === 'string') return item.command;
   if (Array.isArray(item.command)) return item.command.filter((part) => typeof part === 'string').join(' ');
   if (typeof item.path === 'string') return item.path;
+  if (typeof item.query === 'string') return item.query;
+  if (Array.isArray(item.changes)) {
+    const paths = item.changes
+      .map((change) => (change as Record<string, unknown> | null)?.path)
+      .filter((path): path is string => typeof path === 'string');
+    if (paths.length > 0) return paths.join(' ');
+  }
+  if (typeof item.tool === 'string') {
+    return typeof item.server === 'string' ? `${item.server}/${item.tool}` : item.tool;
+  }
   return undefined;
+}
+
+/** ThreadItem types that are not actions: our own objective echoed back, and the model's internal thinking. Recording either as 'tool-activity' would be a category error, not just noise. */
+const NON_ACTIVITY_ITEM_TYPES = new Set(['userMessage', 'reasoning']);
+
+/** The assistant's own prose — the Attempt's answer, and for an objective like "summarize this repo" the entire deliverable. */
+const AGENT_MESSAGE_ITEM_TYPE = 'agentMessage';
+
+/** 'declined' is an operator denial and 'interrupted' a cancellation: neither is a step that succeeded, so neither may render as one. */
+function activityStatus(status: unknown): 'completed' | 'failed' {
+  return status === 'failed' || status === 'declined' || status === 'interrupted' ? 'failed' : 'completed';
+}
+
+function usageAmount(value: unknown): number | 'unknown' {
+  return typeof value === 'number' ? value : 'unknown';
 }
 
 // Ticket 07: Codex's own JSON-RPC schema names the approval request/response
@@ -248,7 +279,9 @@ export function createCodexAttemptAdapter(
           return;
         case 'item/started': {
           const item = (params.item ?? {}) as Record<string, unknown>;
-          if (typeof item.type === 'string' && item.type !== 'agent_message') {
+          // An agentMessage's text only arrives on item/completed, so its
+          // start is not an event of its own.
+          if (typeof item.type === 'string' && item.type !== AGENT_MESSAGE_ITEM_TYPE && !NON_ACTIVITY_ITEM_TYPES.has(item.type)) {
             hadActivity = true;
             const summary = itemSummary(item);
             pushEvent({
@@ -260,35 +293,49 @@ export function createCodexAttemptAdapter(
         }
         case 'item/completed': {
           const item = (params.item ?? {}) as Record<string, unknown>;
-          if (item.type === 'agent_message') {
+          if (item.type === AGENT_MESSAGE_ITEM_TYPE) {
             hadActivity = true;
             pushEvent({
               kind: 'message', sequence: sequence++, at: now(), role: 'assistant',
               text: typeof item.text === 'string' ? item.text : '',
             });
-          } else if (typeof item.type === 'string') {
+          } else if (typeof item.type === 'string' && !NON_ACTIVITY_ITEM_TYPES.has(item.type)) {
             hadActivity = true;
             const summary = itemSummary(item);
             pushEvent({
               kind: 'tool-activity', sequence: sequence++, at: now(), tool: item.type,
-              status: item.status === 'failed' ? 'failed' : 'completed',
+              status: activityStatus(item.status),
               ...(summary ? { summary } : {}),
             });
           }
           return;
         }
-        case 'thread/tokenUsageUpdated':
+        case 'thread/tokenUsage/updated': {
+          // ThreadTokenUsage is { last, total }: `total` is cumulative for the
+          // thread, so the newest usage event is the Attempt's running total
+          // rather than one request's slice.
+          const usage = (params.tokenUsage ?? {}) as Record<string, unknown>;
+          const total = (usage.total ?? {}) as Record<string, unknown>;
           pushEvent({
             kind: 'usage', sequence: sequence++, at: now(),
-            inputTokens: typeof params.inputTokens === 'number' ? params.inputTokens : 'unknown',
-            outputTokens: typeof params.outputTokens === 'number' ? params.outputTokens : 'unknown',
+            inputTokens: usageAmount(total.inputTokens),
+            outputTokens: usageAmount(total.outputTokens),
           });
           return;
+        }
         case 'turn/completed': {
           pushEvent({ kind: 'lifecycle', sequence: sequence++, at: now(), phase: 'turn-completed' });
-          const error = params.error as { message?: string } | undefined;
-          if (error) emitFailure(typeof error.message === 'string' ? error.message : 'Codex reported a turn failure.');
-          else emitCompletion();
+          // The outcome is on the Turn, not on params: reading params.error
+          // meant every failed turn was reported as a success.
+          const turn = (params.turn ?? {}) as Record<string, unknown>;
+          const error = (turn.error ?? undefined) as { message?: string } | undefined;
+          if (turn.status === 'failed') {
+            emitFailure(typeof error?.message === 'string' ? error.message : 'Codex reported a turn failure.');
+          } else if (turn.status === 'interrupted') {
+            emitFailure('Codex interrupted the turn before it completed.');
+          } else {
+            emitCompletion();
+          }
           return;
         }
         case 'session/error':
@@ -405,7 +452,10 @@ export function createCodexAttemptAdapter(
         sandbox: 'workspace-write',
         runtimeWorkspaceRoots: [context.worktreePath],
       });
-      const threadId = typeof threadStart.threadId === 'string' ? threadStart.threadId : undefined;
+      // ThreadStartResponse nests the id: { thread: { id, … }, cwd, model, … }.
+      // codex-protocol.ts owns that path and is checked against the generated
+      // schema by codex-protocol.conformance.test.ts.
+      const threadId = readThreadId(threadStart);
       if (!threadId) throw new Error('Codex app-server did not return a thread id.');
       // 'turn/start' is the objective-carrying request the installed
       // app-server actually exposes (ClientRequest.json lists turn/start,
