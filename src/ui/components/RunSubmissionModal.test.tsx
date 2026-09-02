@@ -17,6 +17,7 @@ const spec: WorkSpec = {
 
 const run: WorkRun = {
   id: 'run-1', taskId: 'task-1', status: 'queued', submittedAt: '2026-09-01T00:00:00.000Z', spec,
+  principal: { id: 'local:test', displayName: 'test' },
   preparation: { state: 'pending' },
   envelope: { state: 'pending' },
   verificationPolicy: { state: 'pending' },

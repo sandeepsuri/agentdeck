@@ -31,6 +31,7 @@ const run: WorkRun = {
     verificationIntent: { required: true, commands: ['npm test'] },
     requestedDeliveryResult: 'local-commit',
   },
+  principal: { id: 'local:test', displayName: 'test' },
   preparation: { state: 'pending' },
   envelope: { state: 'pending' },
   verificationPolicy: { state: 'pending' },

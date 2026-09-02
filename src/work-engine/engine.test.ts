@@ -19,6 +19,7 @@ import {
 import { runBranchName, runWorktreePath } from './prepare.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import type { CodexAttemptProcess, CodexProcessSpawner } from './runtimes/codex.js';
+import { deriveRunResult } from './run-result.js';
 import { createShellVerificationGateRunner, MAX_VERIFICATION_REPAIR_ATTEMPTS } from './verification.js';
 import type { GateExecutionResult, VerificationGateRunner } from './verification.js';
 import type { RunRepository, WorkRun, WorkSpec } from './types.js';
@@ -1353,6 +1354,196 @@ describe('DurableWorkEngine budgets and safe controls (ticket 09)', () => {
     // never reset by a restart; it is simply the already-durable WorkSpec.
     expect(reopened.spec.budget).toEqual({ maxWallClockMs: 3_600_000, maxRepairAttempts: 1 });
     expect(reopened.status).toBe('cancelled');
+    reopenedStore.close();
+  });
+});
+
+describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
+  function setUp(verificationGateRunner?: VerificationGateRunner) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const engine = new DurableWorkEngine(
+      store,
+      runsRoot,
+      stubRuntimeReadinessSource(),
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) },
+      verificationGateRunner,
+    );
+    return {
+      store, repository, runsRoot, engine,
+    };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', verificationIntent: { required: false, commands: [] }, ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    return engine.get(runId)!;
+  }
+
+  const trivialRequiredGate = { kind: 'required' as const, gates: [{ name: 'ok', command: 'true' }] };
+
+  it('creates a local commit with AgentDeck identity and metadata, and the Run result reflects it, once verification passes (AC1/AC2/AC4)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const commitEvent = settled.attempt.events.find((event) => event.kind === 'commit-created');
+    expect(commitEvent).toMatchObject({ changedFiles: ['new-file.txt'], signed: false });
+    expect(git(prepared.preparation.worktreePath!, 'log', '-1', '--format=%an <%ae>')).toBe('AgentDeck <noreply@agentdeck.local>');
+    expect(git(prepared.preparation.worktreePath!, 'log', '-1', '--format=%B')).toContain(`AgentDeck-Run: ${prepared.id}`);
+
+    const result = deriveRunResult(settled);
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
+    expect(result?.commit).toMatchObject({ signed: false });
+    store.close();
+  });
+
+  it('never attempts a commit for a Repository with no verification required — only an ordinarily successful verified Run is eligible (AC1)', async () => {
+    const { store, repository, engine } = setUp();
+    // registerGitRepository defaults to a no-verification policy.
+    const prepared = await submitAndPrepare(engine, repository);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created' || event.kind === 'commit-failed')).toBe(false);
+    // The change is still sitting there, uncommitted — the worktree is preserved, never silently discarded.
+    expect(fs.existsSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'))).toBe(true);
+    store.close();
+  });
+
+  it('never attempts a commit once repairs are exhausted — a failed_verification Run stays uncommitted (AC1/AC7)', async () => {
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxRepairAttempts: 1 } });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(false);
+    const result = deriveRunResult(settled);
+    expect(result?.commit).toBeUndefined();
+    expect(result?.changedFiles).toEqual([]);
+    store.close();
+  });
+
+  it('never attempts a commit for a Run whose requester asked only for a working tree', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'working-tree' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(false);
+    expect(fs.existsSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'))).toBe(true);
+    store.close();
+  });
+
+  it('reports no-changes honestly — a verified Run that changed nothing gets no commit and an empty result, never a fabricated one (AC8: empty diff)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created' || event.kind === 'commit-failed')).toBe(false);
+    const result = deriveRunResult(settled);
+    expect(result?.changedFiles).toEqual([]);
+    expect(result?.commit).toBeUndefined();
+    store.close();
+  });
+
+  it('records a failed delivery commit durably without hiding the Run\'s own verified status (AC3/AC8: commit failure)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+    const worktreePath = prepared.preparation.worktreePath!;
+    fs.writeFileSync(path.join(worktreePath, 'new-file.txt'), 'hello\n');
+    // Linked worktrees share hooks with the Repository they came from —
+    // there is no separate hooks/ directory per worktree.
+    fs.writeFileSync(path.join(repository.path, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const failedEvent = settled.attempt.events.find((event) => event.kind === 'commit-failed');
+    expect(failedEvent).toBeDefined();
+    const result = deriveRunResult(settled);
+    expect(result?.outcome).toBe('completed');
+    expect(result?.commit).toBeUndefined();
+    expect(result?.recoveryNotes).toBeTruthy();
+    store.close();
+  });
+
+  it('keeps a created commit and its Run result durable across a restart (AC8: restart)', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    firstStore.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await firstEngine.prepare((await firstEngine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', verificationIntent: { required: false, commands: [] },
+    })).id);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+    await firstEngine.start(prepared.id);
+    await vi.waitUntil(() => {
+      const run = firstEngine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    });
+    const beforeRestart = firstEngine.get(prepared.id)!;
+    expect(beforeRestart.status).toBe('completed');
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id)!;
+
+    expect(reopened.status).toBe('completed');
+    const result = deriveRunResult(reopened);
+    expect(result?.commit).toBeDefined();
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
     reopenedStore.close();
   });
 });

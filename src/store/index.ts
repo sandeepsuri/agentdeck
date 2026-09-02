@@ -8,7 +8,8 @@ import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
-  AttemptEvent, RepositoryVerificationPolicy, RunEnvelopeState, RunPreparation, RunVerificationPolicyState, WorkRun, WorkSpec,
+  AttemptEvent, RepositoryVerificationPolicy, RunEnvelopeState, RunPreparation, RunPrincipal, RunVerificationPolicyState,
+  WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 
@@ -87,7 +88,7 @@ function rowToTask(r: TaskRow): Task {
 
 interface RunRow {
   id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
-  preparation: string; envelope: string; verification_policy: string;
+  preparation: string; envelope: string; verification_policy: string; principal: string;
 }
 
 interface AttemptRow {
@@ -113,6 +114,7 @@ function rowToRun(r: RunRow): RawRun {
     preparation: JSON.parse(r.preparation) as RunPreparation,
     envelope: JSON.parse(r.envelope) as RunEnvelopeState,
     verificationPolicy: JSON.parse(r.verification_policy) as RunVerificationPolicyState,
+    principal: JSON.parse(r.principal) as RunPrincipal,
   };
 }
 
@@ -277,8 +279,8 @@ export class Store {
     this.db.transaction(() => {
       this.saveTask(task);
       this.db.prepare(
-        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, verification_policy)
-         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @verificationPolicy)`,
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, verification_policy, principal)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @verificationPolicy, @principal)`,
       ).run({
         id: run.id,
         taskId: run.taskId,
@@ -288,6 +290,7 @@ export class Store {
         preparation: JSON.stringify(run.preparation),
         envelope: JSON.stringify(run.envelope),
         verificationPolicy: JSON.stringify(run.verificationPolicy),
+        principal: JSON.stringify(run.principal),
       });
     })();
   }

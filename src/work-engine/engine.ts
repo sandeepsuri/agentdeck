@@ -6,9 +6,11 @@ import type { Store } from '../store/index.js';
 import type { AgentType, Task } from '../types.js';
 import { systemClock } from './clock.js';
 import type { Clock, TimerHandle } from './clock.js';
+import { buildCommitMessage, createLocalCommit } from './commit.js';
 import { buildAttemptEventEnvelope } from './durable-events.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
+import { resolveLocalPrincipal } from './principal.js';
 import { describeUnrecoverableAttempt } from './recovery.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import {
@@ -17,7 +19,8 @@ import {
 import type { FailingGateEvidence, VerificationGateRunner } from './verification.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
-  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, WorkEngine, WorkRun, WorkSpec,
+  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, RunPrincipal, WorkEngine, WorkRun,
+  WorkSpec,
 } from './types.js';
 
 /**
@@ -235,6 +238,9 @@ export class DurableWorkEngine implements WorkEngine {
   /** Ticket 09 AC7: the controllable clock every wall-clock budget check and timer reads — real time in production, a fake, manually-advanceable one in tests. */
   private readonly clock: Clock;
 
+  /** Ticket 10 AC2: resolves the Principal recorded against each newly-submitted Run — injected so tests never depend on the actual OS user running them. */
+  private readonly principalSource: () => RunPrincipal;
+
   constructor(
     private readonly store: Store,
     runsRoot: string = path.join(defaultDataDir(), 'runs'),
@@ -242,12 +248,14 @@ export class DurableWorkEngine implements WorkEngine {
     runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = { codex: createCodexAttemptAdapter() },
     verificationGateRunner: VerificationGateRunner = createShellVerificationGateRunner(),
     clock: Clock = systemClock,
+    principalSource: () => RunPrincipal = resolveLocalPrincipal,
   ) {
     this.runsRoot = runsRoot;
     this.runtimeReadiness = runtimeReadiness;
     this.runtimeAdapters = runtimeAdapters;
     this.verificationGateRunner = verificationGateRunner;
     this.clock = clock;
+    this.principalSource = principalSource;
   }
 
   async submit(input: WorkSpec): Promise<WorkRun> {
@@ -265,6 +273,7 @@ export class DurableWorkEngine implements WorkEngine {
       status: 'queued',
       spec,
       submittedAt: new Date().toISOString(),
+      principal: this.principalSource(),
       preparation: { state: 'pending' },
       envelope: { state: 'pending' },
       verificationPolicy: { state: 'pending' },
@@ -761,6 +770,7 @@ export class DurableWorkEngine implements WorkEngine {
       }
 
       if (failing.length === 0) {
+        await this.deliverLocalCommit(base, envelope, persistEvent);
         persistEvent({
           kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'verified', repairAttempts,
         });
@@ -792,6 +802,42 @@ export class DurableWorkEngine implements WorkEngine {
       // A cancelled/budget-exceeded round is likewise already fully handled
       // by runAdapterRound (ticket 09).
       if (outcome !== 'completion') return;
+    }
+  }
+
+  /**
+   * Ticket 10 AC1/AC6: only ever reached once verification has already
+   * passed — never for any other outcome (AC7 preserves the worktree and
+   * reports an honest non-success result instead, with no commit attempted
+   * at all). Creates a local commit with AgentDeck's own identity when the
+   * requester actually wants one delivered (requestedDeliveryResult
+   * 'local-commit' or 'pull-request' — a later ticket's publish step still
+   * needs a local commit to push from; only 'working-tree' skips this
+   * entirely). Never pushes, never opens a pull request itself (AC6). A
+   * durable 'commit-created' or 'commit-failed' event records how it went —
+   * delivery failing never retroactively changes the Run's own verified
+   * status, which already settled by the time this runs.
+   */
+  private async deliverLocalCommit(
+    base: WorkRun,
+    envelope: CapabilityEnvelope,
+    persistEvent: (event: AttemptEvent, dedupeScope?: string) => AttemptEvent,
+  ): Promise<void> {
+    if (base.spec.requestedDeliveryResult === 'working-tree') return;
+    const message = buildCommitMessage(base.spec.objective, base.id, base.principal);
+    const result = await createLocalCommit(envelope.profile.writableWorktree, message);
+    if (result.kind === 'committed') {
+      persistEvent({
+        kind: 'commit-created',
+        sequence: 0,
+        at: new Date().toISOString(),
+        sha: result.sha,
+        branch: result.branch,
+        signed: result.signed,
+        changedFiles: result.changedFiles,
+      });
+    } else if (result.kind === 'failed') {
+      persistEvent({ kind: 'commit-failed', sequence: 0, at: new Date().toISOString(), reason: result.reason });
     }
   }
 

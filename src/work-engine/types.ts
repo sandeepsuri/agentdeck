@@ -6,6 +6,20 @@ export interface RunRepository {
   path: string;
 }
 
+/**
+ * Ticket 10 AC2: the authenticated human, device, service, or runtime
+ * identity that requested this Run (CONTEXT.md's "Principal") — recorded so
+ * a commit AgentDeck makes on their behalf can say who asked for it,
+ * distinct from the commit's own author identity (always AgentDeck's own —
+ * see work-engine/commit.ts). Named collaborators with real device
+ * credentials are tickets 11/12's job; until then every Run's Principal is
+ * the single local operator running AgentDeck.
+ */
+export interface RunPrincipal {
+  readonly id: string;
+  readonly displayName: string;
+}
+
 export interface RunBudget {
   maxWallClockMs?: number;
   maxModelTurns?: number;
@@ -305,6 +319,29 @@ export interface AttemptResumedEvent extends AttemptEventBase {
   readonly kind: 'resumed';
 }
 
+// Ticket 10: the local-commit delivery step, attempted only once verification
+// reaches 'verified' (AC1) — never for any other outcome. Exactly one of
+// these two, or neither (nothing changed to commit), ever appears per
+// Attempt; a commit-created/failed event never changes the Run's own
+// verified status — that already settled — it only reports how delivery
+// went (CONTEXT.md's Run result "delivery artifacts").
+
+/** A local commit was created with AgentDeck's own automation identity (AC2) — never pushed, never a pull request (AC6). */
+export interface AttemptCommitCreatedEvent extends AttemptEventBase {
+  readonly kind: 'commit-created';
+  readonly sha: string;
+  readonly branch: string;
+  /** Whether the commit carries a valid signature — signing is optional (AC3): false whenever it wasn't configured, or was configured but failed and AgentDeck fell back to an unsigned commit rather than losing the work. */
+  readonly signed: boolean;
+  readonly changedFiles: readonly string[];
+}
+
+/** Verification passed but the delivery commit itself could not be created — never carries raw signing/credential output (AC3). */
+export interface AttemptCommitFailedEvent extends AttemptEventBase {
+  readonly kind: 'commit-failed';
+  readonly reason: string;
+}
+
 export type AttemptEvent =
   | AttemptLifecycleEvent
   | AttemptMessageEvent
@@ -319,7 +356,9 @@ export type AttemptEvent =
   | AttemptBudgetExceededEvent
   | AttemptPauseRequestedEvent
   | AttemptPausedEvent
-  | AttemptResumedEvent;
+  | AttemptResumedEvent
+  | AttemptCommitCreatedEvent
+  | AttemptCommitFailedEvent;
 
 /**
  * The one canonical field list per AttemptEvent kind — the single source of
@@ -343,6 +382,8 @@ export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonl
   'pause-requested': ['kind', 'sequence', 'at'],
   paused: ['kind', 'sequence', 'at'],
   resumed: ['kind', 'sequence', 'at'],
+  'commit-created': ['kind', 'sequence', 'at', 'sha', 'branch', 'signed', 'changedFiles'],
+  'commit-failed': ['kind', 'sequence', 'at', 'reason'],
 };
 
 interface AttemptRunBase {
@@ -383,6 +424,8 @@ export interface WorkRun {
   readonly status: RunStatus;
   readonly spec: WorkSpec;
   readonly submittedAt: string;
+  /** Ticket 10 AC2: who requested this Run — frozen at submit(), exactly like spec. */
+  readonly principal: RunPrincipal;
   readonly preparation: RunPreparation;
   readonly envelope: RunEnvelopeState;
   /** Ticket 08: the Repository's admin-approved verification policy, resolved and frozen once preparation completes. */
@@ -395,6 +438,52 @@ export interface WorkRun {
    * attempt.state is 'running' (see deriveOpenAttentionRequest).
    */
   readonly pendingAttention?: RunAttentionRequest;
+}
+
+/** One resolved approval or input request, as it belongs in a Run result (ticket 10 AC4) — never the raw attention-requested/resolved event pair. */
+export interface RunResultApproval {
+  readonly attentionId: string;
+  readonly kind: AttentionRequestKind;
+  readonly reason: string;
+  readonly decision: 'approved' | 'denied' | 'provided';
+  readonly resolvedAt: string;
+}
+
+export interface RunResultCommit {
+  readonly sha: string;
+  readonly branch: string;
+  readonly signed: boolean;
+}
+
+export interface RunResultUsage {
+  readonly inputTokens: AttemptUsageAmount;
+  readonly outputTokens: AttemptUsageAmount;
+}
+
+/**
+ * Ticket 10 AC4: CONTEXT.md's "Run result" — "the durable terminal record of
+ * a Run's outcome, including its submitted intent, delivery artifacts,
+ * verification evidence, approvals, usage, budget state, and recovery
+ * notes." Never its own stored record — see run-result.ts's deriveRunResult,
+ * the only place one is ever produced, folded from the same durable state
+ * (WorkSpec + the Attempt's event log) everything else in this file already
+ * reads. Only ever produced once the Attempt has reached a terminal state
+ * (AC7: a failed/cancelled/unrecoverable/completed-unverified Run gets one
+ * too, honestly reporting that outcome — never only for success).
+ */
+export interface RunResult {
+  readonly objective: string;
+  readonly acceptanceCriteria: readonly string[];
+  readonly outcome: RunStatus;
+  readonly changedFiles: readonly string[];
+  /** Absent whenever no local commit was created — an unverified/failed/cancelled outcome (AC7), a 'working-tree' delivery request, no changes to commit, or delivery itself failing (see recoveryNotes then). */
+  readonly commit?: RunResultCommit;
+  readonly verificationEvidence: readonly AttemptVerificationCheckEvent[];
+  readonly approvals: readonly RunResultApproval[];
+  readonly usage?: RunResultUsage;
+  readonly budget: RunBudget;
+  /** The precise reason behind a non-verified outcome — a runtime failure, a hard-limit abort, an unrecoverable restart, or (still 'completed') a failed delivery commit. Absent only for an ordinary verified success with nothing to note. */
+  readonly recoveryNotes?: string;
 }
 
 export interface WorkEngine {

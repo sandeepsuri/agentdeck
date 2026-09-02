@@ -20,6 +20,7 @@ function baseRun(): WorkRun {
       verificationIntent: { required: true, commands: ['npm test'] },
       requestedDeliveryResult: 'local-commit',
     },
+    principal: { id: 'local:test', displayName: 'test' },
     preparation: { state: 'pending' },
     envelope: { state: 'pending' },
     verificationPolicy: { state: 'pending' },
@@ -277,6 +278,67 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
 
     expect(html).toContain('This Run produced no written answer.');
     expect(html).toContain('Completed without changing any files');
+  });
+
+  it('presents a verified, committed Run\'s result as a structured summary, never requiring the raw event log (ticket 10 AC5)', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'completed',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'completion', sequence: 1, at: '2026-09-01T00:05:30.000Z', outcome: 'success' },
+          {
+            kind: 'verification-check', sequence: 2, at: '2026-09-01T00:05:31.000Z', gate: 'tests', command: 'npm test',
+            required: true, passed: true, exitCode: 0, evidence: 'ok',
+          },
+          {
+            kind: 'commit-created', sequence: 3, at: '2026-09-01T00:05:32.000Z', sha: 'abc123def456', branch: 'agentdeck/run/eligible',
+            signed: false, changedFiles: ['src/index.ts'],
+          },
+          {
+            kind: 'verification-outcome', sequence: 4, at: '2026-09-01T00:06:00.000Z', outcome: 'verified', repairAttempts: 0,
+          },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Run result');
+    expect(html).toContain('src/index.ts');
+    expect(html).toContain('abc123def456'.slice(0, 12));
+    expect(html).toContain('agentdeck/run/eligible');
+    expect(html).toContain('tests');
+    expect(html).toContain('npm test');
+  });
+
+  it('presents an honest non-success result for a failed Run, distinct from a successful one (ticket 10 AC7)', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'failed',
+      attempt: {
+        state: 'failed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        failedAt: '2026-09-01T00:06:00.000Z',
+        reason: 'The sandboxed command exited non-zero.',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'failure', sequence: 1, at: '2026-09-01T00:06:00.000Z', reason: 'The sandboxed command exited non-zero.' },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Run result');
+    expect(html).toContain('The sandboxed command exited non-zero.');
+    expect(html).not.toContain('run-result-verification');
   });
 
   it('never tells a reader a failed Attempt succeeded', () => {

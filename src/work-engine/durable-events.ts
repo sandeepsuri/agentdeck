@@ -38,10 +38,14 @@ export type EventDurabilityClass = 'durable' | 'transient';
 // is what lets a restart tell "paused, waiting to resume" apart from
 // "cancelled" or "never asked to pause at all" (AC6's restart-durability
 // bar) instead of ever guessing.
+//
+// Ticket 10: 'commit-created'/'commit-failed' are durable once more — the
+// one, final fact of how the delivery commit went, part of the durable Run
+// result (AC4).
 const DURABLE_ATTEMPT_EVENT_KINDS: ReadonlySet<AttemptEvent['kind']> = new Set([
   'lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure',
   'attention-requested', 'attention-resolved', 'verification-check', 'verification-outcome',
-  'budget-exceeded', 'pause-requested', 'paused', 'resumed',
+  'budget-exceeded', 'pause-requested', 'paused', 'resumed', 'commit-created', 'commit-failed',
 ]);
 
 export function classifyEventDurability(kind: AttemptEvent['kind']): EventDurabilityClass {

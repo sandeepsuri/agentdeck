@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { deriveRunResult } from '../../work-engine/run-result.js';
 import type { AttemptEvent, AttentionDecisionInput, WorkRun } from '../../work-engine/types.js';
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
@@ -15,6 +16,8 @@ function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: st
     case 'failure': return { label: 'Failed', detail: event.reason };
     case 'attention-requested': return { label: `${formatRunLabel(event.attentionKind)} requested`, detail: event.reason };
     case 'attention-resolved': return { label: formatRunLabel(event.decision), detail: event.input };
+    case 'commit-created': return { label: `Committed ${event.sha.slice(0, 12)}`, detail: `${event.branch} · ${event.changedFiles.length} file(s)` };
+    case 'commit-failed': return { label: 'Commit failed', detail: event.reason };
     default: return { label: String(event) };
   }
 }
@@ -101,6 +104,73 @@ function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
         </ol>
       )}
     </>
+  );
+}
+
+/**
+ * Ticket 10 AC5: CONTEXT.md's "Run result", presented as a structured
+ * summary — never a prompt to go read the raw event log (AttemptReport's
+ * "Show technical detail" toggle already covers that, for anyone who wants
+ * it). Renders once the Attempt has settled, whatever the outcome —
+ * AC7's honest non-success result gets the same treatment as a verified one.
+ */
+function RunResultPanel({ run }: { run: WorkRun }) {
+  const result = deriveRunResult(run);
+  if (!result) return null;
+  return (
+    <section className="run-result">
+      <h3>Run result</h3>
+      <dl className="run-intent-grid">
+        <div><dt>Outcome</dt><dd><span className={`work-run-status status-${result.outcome}`}>{formatRunLabel(result.outcome)}</span></dd></div>
+        <div>
+          <dt>Changed files</dt>
+          <dd>{result.changedFiles.length > 0 ? result.changedFiles.map((file) => <code key={file}>{file}</code>) : 'None'}</dd>
+        </div>
+        {result.commit && (
+          <div>
+            <dt>Commit</dt>
+            <dd>
+              <code>{result.commit.sha.slice(0, 12)}</code> on <code>{result.commit.branch}</code>
+              {result.commit.signed && <span> · signed</span>}
+            </dd>
+          </div>
+        )}
+        {result.verificationEvidence.length > 0 && (
+          <div>
+            <dt>Verification evidence</dt>
+            <dd>
+              <ul className="run-result-verification">
+                {result.verificationEvidence.map((check) => (
+                  <li className={check.passed ? 'is-success' : 'is-failure'} key={`${check.gate}-${check.sequence}`}>
+                    {check.passed ? '✓' : '✕'} {check.gate}{check.required ? '' : ' (supplemental)'}
+                    <code>{check.command}</code>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </div>
+        )}
+        {result.approvals.length > 0 && (
+          <div>
+            <dt>Approvals</dt>
+            <dd>{result.approvals.map((approval) => (
+              <span key={approval.attentionId}>{formatRunLabel(approval.decision)}: {approval.reason}</span>
+            ))}</dd>
+          </div>
+        )}
+        {result.usage && (
+          <div>
+            <dt>Usage</dt>
+            <dd>{formatTokenCount(result.usage.inputTokens)} in / {formatTokenCount(result.usage.outputTokens)} out tokens</dd>
+          </div>
+        )}
+        <div>
+          <dt>Budget</dt>
+          <dd>{Object.entries(result.budget).map(([name, value]) => <span key={name}>{formatRunLabel(name)}: {value}</span>)}</dd>
+        </div>
+        {result.recoveryNotes && <div><dt>Recovery notes</dt><dd>{result.recoveryNotes}</dd></div>}
+      </dl>
+    </section>
   );
 }
 
@@ -240,6 +310,7 @@ export function RunWorkspace({
             );
           })()}
           {attempt.state !== 'idle' && <AttemptReport events={attempt.events} />}
+          <RunResultPanel run={run} />
         </section>
       )}
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
