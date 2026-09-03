@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
 import { buildAttemptEventEnvelope } from '../work-engine/durable-events.js';
-import type { AttemptEvent, Profile, RunRepository, WorkSpec } from '../work-engine/types.js';
+import type {
+  AttemptEvent, Profile, RunPublication, RunRepository, WorkSpec,
+} from '../work-engine/types.js';
 import { Store, openStore } from './index.js';
 
 let dir: string;
@@ -551,5 +553,111 @@ describe('migrations', () => {
     expect(again.listSessions()).toHaveLength(1);
     again.close();
     store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('Run publications (ticket 13)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: 'Publish me', status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'queued',
+        spec: {
+          objective: 'Publish me',
+          acceptanceCriteria: ['It is published'],
+          repository,
+          requestedBaseReference: 'main',
+          runtimePreference: ['codex'],
+          budget: {},
+          verificationIntent: { required: false, commands: [] },
+          requestedDeliveryResult: 'pull-request',
+        },
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  function publication(runId: string): RunPublication {
+    return {
+      id: `pub-${runId}`,
+      runId,
+      idempotencyKey: `run:${runId}:commit:abc123`,
+      target: 'draft-pull-request',
+      commit: 'abc123',
+      branch: `agentdeck/run/${runId}`,
+      state: 'authorized',
+      authorizedBy: { id: 'local:admin', displayName: 'admin' },
+      authorizedAt: '2026-09-02T00:00:00.000Z',
+      updatedAt: '2026-09-02T00:00:00.000Z',
+      executions: 0,
+    };
+  }
+
+  it('reads no publication for a Run that never had one authorized', () => {
+    createRun('run-1');
+    expect(store.getRun('run-1')?.publication).toBeUndefined();
+    expect(store.getRunPublication('run-1')).toBeUndefined();
+  });
+
+  it('round-trips an authorized intent and folds it onto the Run on every read', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    expect(store.getRunPublication('run-1')).toEqual(publication('run-1'));
+    expect(store.getRun('run-1')?.publication).toEqual(publication('run-1'));
+    expect(store.listRuns()[0]?.publication).toEqual(publication('run-1'));
+  });
+
+  it('refuses a second intent for the same Run — one stable identity per Run (AC3)', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    expect(() => store.createRunPublication({ ...publication('run-1'), id: 'pub-other' })).toThrow();
+  });
+
+  it('updates state, executions, result, and reason in place, omitting absent optionals on read', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'executing', executions: 1, updatedAt: '2026-09-02T00:00:01.000Z',
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'executing', executions: 1 });
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('result');
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('reason');
+
+    const result = {
+      remote: { name: 'origin' as const, url: 'git@github.com:example/project.git' },
+      branch: 'agentdeck/run/run-1',
+      commit: 'abc123',
+      pullRequest: { number: 7, url: 'https://github.com/example/project/pull/7', title: 'Publish me', draft: true },
+    };
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'succeeded', executions: 1, updatedAt: '2026-09-02T00:00:02.000Z', result,
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'succeeded', result });
+
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'ambiguous', executions: 2, updatedAt: '2026-09-02T00:00:03.000Z', reason: 'origin unreachable',
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'ambiguous', reason: 'origin unreachable' });
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('result');
+  });
+
+  it('lists only incomplete intents (authorized or executing) for restart reconciliation (AC5)', () => {
+    for (const runId of ['run-a', 'run-b', 'run-c', 'run-d', 'run-e']) createRun(runId);
+    store.createRunPublication(publication('run-a'));
+    store.createRunPublication({ ...publication('run-b'), id: 'pub-b', idempotencyKey: 'run:run-b:commit:abc', state: 'executing' });
+    store.createRunPublication({ ...publication('run-c'), id: 'pub-c', idempotencyKey: 'run:run-c:commit:abc', state: 'succeeded' });
+    store.createRunPublication({ ...publication('run-d'), id: 'pub-d', idempotencyKey: 'run:run-d:commit:abc', state: 'failed' });
+    store.createRunPublication({ ...publication('run-e'), id: 'pub-e', idempotencyKey: 'run:run-e:commit:abc', state: 'ambiguous' });
+    expect(store.listIncompleteRunPublications().map((item) => item.runId).sort()).toEqual(['run-a', 'run-b']);
   });
 });

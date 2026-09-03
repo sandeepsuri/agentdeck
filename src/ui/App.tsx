@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session } from '../types.js';
-import type { AttentionDecisionInput, Profile, WorkRun } from '../work-engine/types.js';
+import type {
+  AttentionDecisionInput, Profile, PublicationTarget, WorkRun,
+} from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
@@ -403,6 +405,18 @@ export function App() {
     setRuns((current) => current.map((item) => item.id === body.id ? body : item));
   };
 
+  // Ticket 13 AC2: the admin's explicit authorization of an external effect
+  // — the request blocks until publication reaches a settled state, and the
+  // returned Run carries the durable publication record whatever it is.
+  const publishRun = async (run: WorkRun, target: PublicationTarget) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/publish`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target }),
+    });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Publishing the Run result failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
   // Ticket 07 AC2: the one Work Engine policy path every transport's
   // approve/deny/provide-input command reaches — this is the REST call both
   // the local desktop RunWorkspace and the mobile attention card make.
@@ -556,7 +570,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onStart={startRun} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onStart={startRun} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>

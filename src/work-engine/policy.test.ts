@@ -55,3 +55,18 @@ describe('decidePolicy', () => {
     expect(decision.rule).toBe('repository-not-granted');
   });
 });
+
+describe('decidePolicy — publish (ticket 13 AC2)', () => {
+  it('allows the admin to authorize publication', () => {
+    expect(decidePolicy(admin, { kind: 'publish', repositoryId: 'repo-1' }).allowed).toBe(true);
+  });
+
+  it('denies publication to a collaborator even for a granted Repository, naming the rule', () => {
+    const decision = decidePolicy(collaborator, { kind: 'publish', repositoryId: 'repo-1' });
+    expect(decision).toEqual({ allowed: false, rule: 'publish-admin-only', reason: expect.stringContaining('admin') });
+  });
+
+  it('denies publication to a collaborator for an ungranted Repository with the publish rule, never a grant hint', () => {
+    expect(decidePolicy(collaborator, { kind: 'publish', repositoryId: 'repo-9' }).rule).toBe('publish-admin-only');
+  });
+});

@@ -485,3 +485,110 @@ describe('RunWorkspace pending attention (ticket 07)', () => {
     expect(inputHtml).toContain('Waiting input');
   });
 });
+
+describe('RunWorkspace publication (ticket 13)', () => {
+  function verifiedRun(): WorkRun {
+    return {
+      ...eligibleRun(),
+      status: 'completed',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'completion', sequence: 1, at: '2026-09-01T00:05:30.000Z', outcome: 'success' },
+          {
+            kind: 'commit-created', sequence: 2, at: '2026-09-01T00:05:32.000Z', sha: 'abc123def456', branch: 'agentdeck/run/eligible',
+            signed: false, changedFiles: ['src/index.ts'],
+          },
+          { kind: 'verification-outcome', sequence: 3, at: '2026-09-01T00:06:00.000Z', outcome: 'verified', repairAttempts: 0 },
+        ],
+      },
+    };
+  }
+
+  const publication = {
+    id: 'pub-1',
+    runId: 'run-durable-123',
+    idempotencyKey: 'run:run-durable-123:commit:abc123def456',
+    target: 'draft-pull-request' as const,
+    commit: 'abc123def456',
+    branch: 'agentdeck/run/eligible',
+    authorizedBy: { id: 'local:admin', displayName: 'admin' },
+    authorizedAt: '2026-09-02T00:00:00.000Z',
+    updatedAt: '2026-09-02T00:00:00.000Z',
+  };
+
+  it('says plainly that a verified result is still local and offers the publish action, never publishing on its own (AC1)', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: verifiedRun(), structuredAttemptsEnabled: true, onPublish: () => undefined }));
+    expect(html).toContain('Nothing has been pushed');
+    expect(html).toContain('Push branch');
+  });
+
+  it('renders — and offers the publish action — with the experimental structured-attempts panel left off (AC2: the admin\'s only way to authorize a publish is never hidden behind that unrelated flag)', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: verifiedRun(), onPublish: () => undefined }));
+    expect(html).toContain('Nothing has been pushed');
+    expect(html).toContain('Push branch');
+    expect(html).not.toContain('Run result');
+  });
+
+  it('offers a draft pull request when that is what the requester asked for', () => {
+    const run: WorkRun = { ...verifiedRun(), spec: { ...verifiedRun().spec, requestedDeliveryResult: 'pull-request' } };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPublish: () => undefined }));
+    expect(html).toContain('Push and open draft pull request');
+  });
+
+  it('offers no publish action without a handler, for an unverified Run, or for one with no commit', () => {
+    expect(renderToStaticMarkup(createElement(RunWorkspace, { run: verifiedRun(), structuredAttemptsEnabled: true }))).not.toContain('Push branch');
+    const unverified: WorkRun = { ...verifiedRun(), status: 'completed_unverified' };
+    expect(renderToStaticMarkup(createElement(RunWorkspace, { run: unverified, structuredAttemptsEnabled: true, onPublish: () => undefined })))
+      .not.toContain('Publication');
+  });
+
+  it('shows a successful publication — state, target, authorizer, remote, and the draft pull request — with no further action (AC4)', () => {
+    const run: WorkRun = {
+      ...verifiedRun(),
+      publication: {
+        ...publication,
+        state: 'succeeded',
+        executions: 1,
+        result: {
+          remote: { name: 'origin', url: 'git@github.com:example/project.git' },
+          branch: 'agentdeck/run/eligible',
+          commit: 'abc123def456',
+          pullRequest: { number: 42, url: 'https://github.com/example/project/pull/42', title: 'Implement durable runs', draft: true },
+        },
+      },
+    };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPublish: () => undefined }));
+    for (const expected of ['Succeeded', 'Draft pull request', 'admin', 'git@github.com:example/project.git', 'https://github.com/example/project/pull/42', 'Draft pull request #42']) {
+      expect(html).toContain(expected);
+    }
+    expect(html).not.toContain('Retry publication');
+    expect(html).not.toContain('Nothing has been pushed');
+  });
+
+  it('presents an ambiguous outcome as requiring the admin, with its reason and a reconcile-and-retry action (AC6)', () => {
+    const run: WorkRun = {
+      ...verifiedRun(),
+      publication: { ...publication, state: 'ambiguous', executions: 1, reason: 'origin could not be observed afterward.' },
+    };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPublish: () => undefined }));
+    expect(html).toContain('Ambiguous');
+    expect(html).toContain('outcome is unknown');
+    expect(html).toContain('origin could not be observed afterward.');
+    expect(html).toContain('Reconcile and retry');
+  });
+
+  it('presents a failed publication with its reason and a retry action', () => {
+    const run: WorkRun = {
+      ...verifiedRun(),
+      publication: { ...publication, state: 'failed', executions: 2, reason: 'origin/agentdeck/run/eligible is at 999, not the authorized commit.' },
+    };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPublish: () => undefined }));
+    expect(html).toContain('not the authorized commit');
+    expect(html).toContain('Retry publication');
+  });
+});

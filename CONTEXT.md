@@ -95,3 +95,7 @@ _Avoid_: Token, access code
 **Device credential**:
 An individually revocable bearer credential bound to one collaborator's device, minted by exchanging an Invitation. Authenticates a remote request to a Principal and device for audit attribution; stored only as a hash, never in a form that reveals the bearer value after issuance.
 _Avoid_: Token, session, API key
+
+**Publication**:
+An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.
+_Avoid_: Deploy, release, publish (as a bare verb with no durable record)

@@ -1,6 +1,9 @@
 import { useState } from 'react';
 import { deriveRunResult } from '../../work-engine/run-result.js';
-import type { AttemptEvent, AttentionDecisionInput, WorkRun } from '../../work-engine/types.js';
+import { defaultPublicationTarget } from '../../work-engine/publication.js';
+import type {
+  AttemptEvent, AttentionDecisionInput, PublicationTarget, RunPublication, WorkRun,
+} from '../../work-engine/types.js';
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
 } from './attemptActivity.js';
@@ -107,6 +110,75 @@ function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
   );
 }
 
+const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
+  authorized: 'Authorized — not yet started.',
+  executing: 'Publishing…',
+  succeeded: 'Published.',
+  failed: 'Publication did not happen. Fix the cause and publish again.',
+  ambiguous: 'Publication outcome is unknown. Check origin before publishing again.',
+};
+
+/**
+ * Ticket 13: publication is a separate, explicit step after a verified
+ * result — never implied by the result itself. Shows what the admin
+ * authorized and exactly what came of it (AC4), and offers the action only
+ * while there is something to do: nothing yet authorized, or a prior attempt
+ * that failed or ended ambiguous and needs the admin's decision (AC6).
+ * Collaborators never reach this desktop panel; the mobile UI does not
+ * render it, and the engine refuses them regardless (AC2).
+ */
+function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: WorkRun, target: PublicationTarget) => void }) {
+  const result = deriveRunResult(run);
+  if (!result?.commit || run.status !== 'completed') return null;
+  const { publication } = run;
+  const requestedTarget: PublicationTarget = defaultPublicationTarget(run.spec.requestedDeliveryResult);
+  const canPublish = Boolean(onPublish) && (!publication || publication.state === 'failed' || publication.state === 'ambiguous');
+  const actionLabel = publication
+    ? (publication.state === 'ambiguous' ? 'Reconcile and retry' : 'Retry publication')
+    : requestedTarget === 'draft-pull-request' ? 'Push and open draft pull request' : 'Push branch';
+  return (
+    <section className="run-publication" data-publication-state={publication?.state ?? 'none'}>
+      <h3>Publication</h3>
+      {!publication && <p className="run-publication-note">This result stays local until you publish it. Nothing has been pushed.</p>}
+      {publication && (
+        <dl className="run-intent-grid">
+          <div>
+            <dt>State</dt>
+            <dd>
+              <span className={`work-run-status status-${publication.state}`}>{formatRunLabel(publication.state)}</span>
+              <span>{PUBLICATION_STATE_COPY[publication.state]}</span>
+            </dd>
+          </div>
+          <div><dt>Target</dt><dd>{formatRunLabel(publication.target)}</dd></div>
+          <div><dt>Authorized by</dt><dd>{publication.authorizedBy.displayName}<small>{new Date(publication.authorizedAt).toLocaleString()}</small></dd></div>
+          <div><dt>Commit</dt><dd><code>{publication.commit.slice(0, 12)}</code> on <code>{publication.branch}</code></dd></div>
+          {publication.result && (
+            <div>
+              <dt>Remote</dt>
+              <dd>
+                <code>{publication.result.remote.name}</code>
+                <small>{publication.result.remote.url}</small>
+                {publication.result.pullRequest && (
+                  <a href={publication.result.pullRequest.url} rel="noreferrer" target="_blank">
+                    Draft pull request #{publication.result.pullRequest.number}
+                  </a>
+                )}
+              </dd>
+            </div>
+          )}
+          {publication.reason && <div><dt>Why</dt><dd>{publication.reason}</dd></div>}
+          <div><dt>Executions</dt><dd>{publication.executions}</dd></div>
+        </dl>
+      )}
+      {canPublish && (
+        <button className="button button-primary" onClick={() => onPublish?.(run, publication?.target ?? requestedTarget)} type="button">
+          {actionLabel}
+        </button>
+      )}
+    </section>
+  );
+}
+
 /**
  * Ticket 10 AC5: CONTEXT.md's "Run result", presented as a structured
  * summary — never a prompt to go read the raw event log (AttemptReport's
@@ -180,12 +252,14 @@ interface Props {
   onStart?: (run: WorkRun) => void;
   /** Ticket 07: routes an operator decision for run.pendingAttention through the one Work Engine policy path (App.tsx's resolveRunAttention → POST /api/runs/:id/attention/:attentionId/{approve,deny,input}). */
   onResolveAttention?: (run: WorkRun, attentionId: string, decision: AttentionDecisionInput) => void;
+  /** Ticket 13: the admin's explicit publish authorization (App.tsx's publishRun → POST /api/runs/:id/publish). Absent means the action is not offered at all. */
+  onPublish?: (run: WorkRun, target: PublicationTarget) => void;
   /** Ticket 05: the structured Attempt panel is experimental and stays hidden until this feature gate is on. */
   structuredAttemptsEnabled?: boolean;
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onResolveAttention, structuredAttemptsEnabled = false,
+  run, onPrepare, onStart, onResolveAttention, onPublish, structuredAttemptsEnabled = false,
 }: Props) {
   const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
@@ -313,6 +387,16 @@ export function RunWorkspace({
           <RunResultPanel run={run} />
         </section>
       )}
+      {/*
+       * Ticket 13: publication is independent of the structured-attempts
+       * experimental panel above — it depends only on run.status and a
+       * delivery commit (findDeliveryCommit, inside PublicationPanel
+       * itself), never on structuredAttemptsEnabled or the Codex-specific
+       * eligibleForCodexAttempt check, so the admin's only way to authorize
+       * a publish isn't hidden behind an unrelated, default-off feature
+       * flag.
+       */}
+      <PublicationPanel onPublish={onPublish} run={run} />
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>
   );

@@ -9,7 +9,7 @@ import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
   AttemptEvent, Profile, RepositoryVerificationPolicy, RunActivity, RunActivityKind, RunActorDevice, RunEnvelopeState,
-  RunPreparation, RunPrincipal, RunVerificationPolicyState, WorkRun, WorkSpec,
+  RunPreparation, RunPrincipal, RunPublication, RunPublicationResult, RunVerificationPolicyState, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 import type {
@@ -204,6 +204,34 @@ function rowToRunActivity(r: RunActivityTableRow): RunActivity {
   };
   const device = fromJson<RunActorDevice>(r.device);
   return device !== undefined ? { ...activity, device } : activity;
+}
+
+interface RunPublicationTableRow {
+  id: string; run_id: string; idempotency_key: string; target: string; commit_sha: string; branch: string;
+  state: string; authorized_by: string; authorized_at: string; updated_at: string; executions: number;
+  result: string | null; reason: string | null;
+}
+
+function rowToRunPublication(r: RunPublicationTableRow): RunPublication {
+  const publication: RunPublication = {
+    id: r.id,
+    runId: r.run_id,
+    idempotencyKey: r.idempotency_key,
+    target: r.target as RunPublication['target'],
+    commit: r.commit_sha,
+    branch: r.branch,
+    state: r.state as RunPublication['state'],
+    authorizedBy: JSON.parse(r.authorized_by) as RunPrincipal,
+    authorizedAt: r.authorized_at,
+    updatedAt: r.updated_at,
+    executions: r.executions,
+  };
+  const result = fromJson<RunPublicationResult>(r.result);
+  return {
+    ...publication,
+    ...(result !== undefined ? { result } : {}),
+    ...(r.reason !== null ? { reason: r.reason } : {}),
+  };
 }
 
 // --- store -------------------------------------------------------------------
@@ -435,7 +463,7 @@ export class Store implements CollaboratorStore {
     return { record, events };
   }
 
-  /** Folds the durable event log into AttemptState and derives `status` from it (ticket 06 AC4) — see attempt-projection.ts for both reducers. */
+  /** Folds the durable event log into AttemptState and derives `status` from it (ticket 06 AC4) — see attempt-projection.ts for both reducers. Ticket 13: the Run's publication intent, if any, rides along the same way. */
   private attachAttempt(run: RawRun): WorkRun {
     const { record, events } = this.loadAttempt(run.id);
     const attempt = projectAttemptState(
@@ -444,9 +472,75 @@ export class Store implements CollaboratorStore {
     );
     const pendingAttention = deriveOpenAttentionRequest(attempt);
     const status = deriveRunStatus(run.status as WorkRun['status'], attempt, pendingAttention);
+    const publication = this.getRunPublication(run.id);
     return {
-      ...run, status, attempt, pendingAttention,
+      ...run, status, attempt, pendingAttention, ...(publication ? { publication } : {}),
     };
+  }
+
+  // -- Run publications (ticket 13) --
+  //
+  // One durable intent per Run (run_id UNIQUE), written BEFORE any push or
+  // pull-request command runs (AC3) and updated in place as execution
+  // progresses — the only Run-scoped record that is ever updated rather
+  // than appended, because its whole point is to be the single, current
+  // answer to "did this external effect happen?".
+
+  createRunPublication(publication: RunPublication): void {
+    this.db.prepare(
+      `INSERT INTO run_publications
+         (id, run_id, idempotency_key, target, commit_sha, branch, state, authorized_by, authorized_at, updated_at,
+          executions, result, reason)
+       VALUES (@id, @runId, @idempotencyKey, @target, @commit, @branch, @state, @authorizedBy, @authorizedAt, @updatedAt,
+          @executions, @result, @reason)`,
+    ).run(this.publicationParams(publication));
+  }
+
+  /**
+   * Ticket 13: updates every mutable field of an existing intent — not
+   * only state/executions/result/reason. A retarget (DurableWorkEngine.
+   * publish() re-authorizing a different target for the same Run) changes
+   * `target`, `authorizedBy`, and `authorizedAt` too; leaving those columns
+   * unwritten would silently keep reporting the original target forever
+   * even though the in-memory object (and the actual push/pull-request it
+   * drove) used the new one. `id`, `runId`, and `idempotencyKey` are the
+   * one row's permanent identity and are never part of an update.
+   */
+  updateRunPublication(publication: RunPublication): void {
+    this.db.prepare(
+      `UPDATE run_publications SET target = @target, commit_sha = @commit, branch = @branch, state = @state,
+         authorized_by = @authorizedBy, authorized_at = @authorizedAt, updated_at = @updatedAt,
+         executions = @executions, result = @result, reason = @reason WHERE id = @id`,
+    ).run(this.publicationParams(publication));
+  }
+
+  private publicationParams(publication: RunPublication): Record<string, unknown> {
+    return {
+      id: publication.id,
+      runId: publication.runId,
+      idempotencyKey: publication.idempotencyKey,
+      target: publication.target,
+      commit: publication.commit,
+      branch: publication.branch,
+      state: publication.state,
+      authorizedBy: JSON.stringify(publication.authorizedBy),
+      authorizedAt: publication.authorizedAt,
+      updatedAt: publication.updatedAt,
+      executions: publication.executions,
+      result: toJson(publication.result),
+      reason: publication.reason ?? null,
+    };
+  }
+
+  getRunPublication(runId: string): RunPublication | undefined {
+    const row = this.db.prepare('SELECT * FROM run_publications WHERE run_id = ?').get(runId) as RunPublicationTableRow | undefined;
+    return row ? rowToRunPublication(row) : undefined;
+  }
+
+  /** Every intent a restart must reconcile before anything else can touch it (AC5): authorized but never executed, or executing when the previous process stopped. */
+  listIncompleteRunPublications(): RunPublication[] {
+    return (this.db.prepare("SELECT * FROM run_publications WHERE state IN ('authorized', 'executing') ORDER BY authorized_at")
+      .all() as RunPublicationTableRow[]).map(rowToRunPublication);
   }
 
   // -- repos --

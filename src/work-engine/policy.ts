@@ -6,11 +6,13 @@
 // authorization path to drift out of sync with this one.
 import type { RunActor } from './types.js';
 
-export type PolicyActionKind = 'submit' | 'guide';
+export type PolicyActionKind = 'submit' | 'guide' | 'publish';
 
 export type PolicyAction =
   | { readonly kind: 'submit'; readonly repositoryId: string; readonly profileId: string | undefined }
-  | { readonly kind: 'guide'; readonly repositoryId: string };
+  | { readonly kind: 'guide'; readonly repositoryId: string }
+  /** Ticket 13 AC2: authorizing an external effect (push / draft pull request) for a verified local result — admin-only, never within any collaborator grant. */
+  | { readonly kind: 'publish'; readonly repositoryId: string };
 
 export interface PolicyDecision {
   readonly allowed: boolean;
@@ -33,10 +35,23 @@ const ALLOW_ADMIN: PolicyDecision = { allowed: true, rule: 'admin-full-authority
  * even reaches a Profile whose runtime it could apply); a 'guide' action
  * (prepare/start/cancel/resolveAttention/pause/resume — AC1's "launch and
  * guide") needs only the Run's already-frozen Repository granted, since
- * its Profile was already checked once, at submission.
+ * its Profile was already checked once, at submission. A 'publish' action
+ * (ticket 13) is never granted to a collaborator at all.
  */
 export function decidePolicy(actor: RunActor, action: PolicyAction): PolicyDecision {
   if (!actor.grants) return ALLOW_ADMIN;
+
+  // Ticket 13 AC2 / ticket 12 AC4 ("cannot ... publish"): publication is an
+  // external effect no Repository or Profile grant ever covers, so it is
+  // refused before the grant checks below — a collaborator never even
+  // learns whether the Repository is one they hold.
+  if (action.kind === 'publish') {
+    return {
+      allowed: false,
+      rule: 'publish-admin-only',
+      reason: 'Only the admin can authorize publishing a Run result.',
+    };
+  }
 
   if (!actor.grants.repositoryIds.includes(action.repositoryId)) {
     return {

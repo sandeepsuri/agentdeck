@@ -67,8 +67,8 @@ export interface Profile {
   readonly createdAt: string;
 }
 
-/** One row of the durable Run activity trail (ticket 12 AC2) — never mutated, only appended. */
-export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled';
+/** One row of the durable Run activity trail (ticket 12 AC2) — never mutated, only appended. Ticket 13 adds 'publish-authorized': the admin authorized an external effect for a verified result. */
+export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled' | 'publish-authorized';
 
 export interface RunActivity {
   readonly id: string;
@@ -487,6 +487,73 @@ export type AttentionDecisionInput =
   | { readonly kind: 'deny' }
   | { readonly kind: 'input'; readonly value: string };
 
+// Ticket 13: publication — push and draft pull-request creation — is an
+// explicit, durable, admin-authorized external effect that happens strictly
+// after local verified completion (ticket 10 never pushes). The intent is
+// its own durable record (run_publications), persisted BEFORE any command
+// runs (AC3), so a crash mid-push can never lose the fact that a push was
+// authorized and attempted; restart reconciles the observable remote state
+// before ever retrying it (AC5), and an outcome that cannot be proven
+// either way is an explicit 'ambiguous' state the admin must act on (AC6).
+
+export type PublicationTarget = 'push' | 'draft-pull-request';
+
+/**
+ * - 'authorized': the intent is durable; no external command has run yet.
+ * - 'executing': a push or pull-request command may be in flight — a
+ *   restart finding this state cannot assume anything about the remote.
+ * - 'succeeded': the remote branch was observed at the authorized commit
+ *   (and the draft pull request observed, when requested).
+ * - 'failed': provably did not happen — e.g. the branch diverged, or the
+ *   remote refused — and is safe for the admin to retry after fixing it.
+ * - 'ambiguous': neither success nor failure could be proven (the remote
+ *   became unobservable after a command was sent); requires admin action.
+ */
+export type RunPublicationState = 'authorized' | 'executing' | 'succeeded' | 'failed' | 'ambiguous';
+
+export interface RunPublicationPullRequest {
+  readonly number: number;
+  readonly url: string;
+  readonly title: string;
+  readonly draft: boolean;
+}
+
+/** AC4: what a successful publication actually produced — the remote, branch, commit, and (when requested) pull request. */
+export interface RunPublicationResult {
+  /** Always 'origin' — the same remote restriction git/publish.ts holds; `url` has any embedded credentials redacted before it is ever stored. */
+  readonly remote: { readonly name: 'origin'; readonly url: string };
+  readonly branch: string;
+  readonly commit: string;
+  readonly pullRequest?: RunPublicationPullRequest;
+}
+
+export interface RunPublication {
+  readonly id: string;
+  readonly runId: string;
+  /**
+   * AC3's stable idempotency identity: `run:<runId>:commit:<sha>`. Derived
+   * from what is being published, never from when or how often it was
+   * asked for — a repeated command, before or after a restart, names the
+   * same intent rather than creating a second one.
+   */
+  readonly idempotencyKey: string;
+  readonly target: PublicationTarget;
+  /** The exact local commit authorized for publication — the branch must still be at it whenever execution (re)starts, or the intent fails as diverged. */
+  readonly commit: string;
+  readonly branch: string;
+  readonly state: RunPublicationState;
+  /** AC4: the Principal whose authorization this intent carries — always admin authority (policy.ts refuses every collaborator). */
+  readonly authorizedBy: RunPrincipal;
+  readonly authorizedAt: string;
+  readonly updatedAt: string;
+  /** How many times execution has been (re)started — a first attempt is 1; a restart's retry increments it. */
+  readonly executions: number;
+  /** Only present once state is 'succeeded'. */
+  readonly result?: RunPublicationResult;
+  /** The precise explanation behind a 'failed' or 'ambiguous' state — never raw command output that could echo a credential. */
+  readonly reason?: string;
+}
+
 export interface WorkRun {
   readonly id: string;
   readonly taskId: string;
@@ -507,6 +574,8 @@ export interface WorkRun {
    * attempt.state is 'running' (see deriveOpenAttentionRequest).
    */
   readonly pendingAttention?: RunAttentionRequest;
+  /** Ticket 13: the one publication intent recorded for this Run, if the admin has ever authorized one — folded in on every read (Store.getRun), never a separate fetch. */
+  readonly publication?: RunPublication;
 }
 
 /** One resolved approval or input request, as it belongs in a Run result (ticket 10 AC4) — never the raw attention-requested/resolved event pair. */
@@ -553,6 +622,8 @@ export interface RunResult {
   readonly budget: RunBudget;
   /** The precise reason behind a non-verified outcome — a runtime failure, a hard-limit abort, an unrecoverable restart, or (still 'completed') a failed delivery commit. Absent only for an ordinary verified success with nothing to note. */
   readonly recoveryNotes?: string;
+  /** Ticket 13 AC4: the admin-authorized publication of this result, whatever state it reached — absent until one is authorized. */
+  readonly publication?: RunPublication;
 }
 
 /**
@@ -620,4 +691,17 @@ export interface WorkEngine {
   resume(runId: string, actor?: RunActor): Promise<WorkRun>;
   /** Ticket 12 AC2/AC5: the durable, append-only trail of every recorded action against this Run, oldest first — empty (not thrown) for an unknown Run id. */
   listActivity(runId: string): RunActivity[];
+  /**
+   * Ticket 13: authorizes and executes publication of a verified local
+   * result — push, or push plus a draft pull request. Admin-only (AC2:
+   * policy.ts refuses every collaborator actor, from every transport).
+   * Requires a Run in status 'completed' with a delivery commit; rejects
+   * with InvalidRunStateError otherwise. The intent is persisted before any
+   * command runs (AC3); a repeated call for the same Run returns or resumes
+   * the same intent rather than creating another. Resolves once execution
+   * has reached a settled state — see RunPublicationState — which the
+   * returned WorkRun's `publication` reports honestly, including
+   * 'ambiguous' (AC6) rather than throwing.
+   */
+  publish(runId: string, input?: { target?: PublicationTarget }, actor?: RunActor): Promise<WorkRun>;
 }

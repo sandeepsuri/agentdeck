@@ -7,8 +7,26 @@
 // (AC7): a failed, cancelled, unrecoverable, or completed-unverified Run
 // still gets an honest result reporting that outcome.
 import type {
-  AttemptEvent, RunResult, RunResultApproval, WorkRun,
+  AttemptEvent, RunResult, RunResultApproval, RunResultCommit, WorkRun,
 } from './types.js';
+
+/**
+ * Ticket 10 AC1/AC6, reused by ticket 13's publish(): the one delivery
+ * commit an ordinarily-successful, verified Attempt may have created —
+ * never more than one (deliverLocalCommit runs at most once per Attempt).
+ * Undefined for a Run that never reached local commit delivery (unverified,
+ * failed, working-tree delivery, or an empty diff).
+ */
+export function findDeliveryCommit(run: WorkRun): Extract<AttemptEvent, { kind: 'commit-created' }> | undefined {
+  if (run.attempt.state !== 'completed') return undefined;
+  return run.attempt.events.find((event): event is Extract<AttemptEvent, { kind: 'commit-created' }> => (
+    event.kind === 'commit-created'
+  ));
+}
+
+function toResultCommit(event: Extract<AttemptEvent, { kind: 'commit-created' }>): RunResultCommit {
+  return { sha: event.sha, branch: event.branch, signed: event.signed };
+}
 
 function deriveApprovals(events: readonly AttemptEvent[]): RunResultApproval[] {
   const requests = new Map<string, Extract<AttemptEvent, { kind: 'attention-requested' }>>();
@@ -36,9 +54,7 @@ export function deriveRunResult(run: WorkRun): RunResult | undefined {
   if (run.attempt.state === 'idle' || run.attempt.state === 'running') return undefined;
   const { events } = run.attempt;
 
-  const commitCreated = events.find((event): event is Extract<AttemptEvent, { kind: 'commit-created' }> => (
-    event.kind === 'commit-created'
-  ));
+  const commitCreated = findDeliveryCommit(run);
   const commitFailed = events.find((event): event is Extract<AttemptEvent, { kind: 'commit-failed' }> => (
     event.kind === 'commit-failed'
   ));
@@ -67,11 +83,12 @@ export function deriveRunResult(run: WorkRun): RunResult | undefined {
     acceptanceCriteria: run.spec.acceptanceCriteria,
     outcome: run.status,
     changedFiles: commitCreated?.changedFiles ?? [],
-    ...(commitCreated ? { commit: { sha: commitCreated.sha, branch: commitCreated.branch, signed: commitCreated.signed } } : {}),
+    ...(commitCreated ? { commit: toResultCommit(commitCreated) } : {}),
     verificationEvidence,
     approvals: deriveApprovals(events),
     ...(lastUsage ? { usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens } } : {}),
     budget: run.spec.budget,
     ...(recoveryNotes ? { recoveryNotes } : {}),
+    ...(run.publication ? { publication: run.publication } : {}),
   };
 }

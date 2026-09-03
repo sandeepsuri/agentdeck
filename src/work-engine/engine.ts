@@ -13,7 +13,15 @@ import { prepareRunWorktree, RunPreparationError } from './prepare.js';
 import { resolveLocalPrincipal } from './principal.js';
 import { decidePolicy } from './policy.js';
 import type { PolicyAction } from './policy.js';
+import {
+  buildPullRequestInput, createGitRunPublisher,
+} from './publication-git.js';
+import {
+  defaultPublicationTarget, executePublication, isPublicationTarget, redactSecrets,
+} from './publication.js';
+import type { RunPublisher } from './publication.js';
 import { describeUnrecoverableAttempt } from './recovery.js';
+import { findDeliveryCommit } from './run-result.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import {
   buildRepairObjective, createShellVerificationGateRunner, freezeVerificationPolicy, MAX_VERIFICATION_REPAIR_ATTEMPTS,
@@ -21,8 +29,8 @@ import {
 import type { FailingGateEvidence, VerificationGateRunner } from './verification.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './runtimes/adapter.js';
 import type {
-  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, RunActivity, RunActivityKind,
-  RunActor, RunPrincipal, WorkEngine, WorkRun, WorkSpec,
+  AttemptAttentionResolvedEvent, AttemptEvent, AttentionDecisionInput, CapabilityEnvelope, PublicationTarget, RunActivity,
+  RunActivityKind, RunActor, RunPrincipal, RunPublication, WorkEngine, WorkRun, WorkSpec,
 } from './types.js';
 
 /**
@@ -251,6 +259,18 @@ export class DurableWorkEngine implements WorkEngine {
   /** Ticket 10 AC2: resolves the Principal recorded against each newly-submitted Run — injected so tests never depend on the actual OS user running them. */
   private readonly principalSource: () => RunPrincipal;
 
+  /** Ticket 13: the port onto git/gh a publication executes through — the real one in production, a scripted one in tests. */
+  private readonly publisher: RunPublisher;
+
+  /**
+   * Ticket 13 AC3: the one in-flight execution per Run, if any. A second
+   * publish() for the same Run while one is executing joins this promise
+   * instead of starting another — the durable intent already carries the
+   * idempotency identity; this is only the in-process half that stops two
+   * concurrent callers from both reaching the remote.
+   */
+  private readonly livePublications = new Map<string, Promise<void>>();
+
   constructor(
     private readonly store: Store,
     runsRoot: string = path.join(defaultDataDir(), 'runs'),
@@ -259,6 +279,7 @@ export class DurableWorkEngine implements WorkEngine {
     verificationGateRunner: VerificationGateRunner = createShellVerificationGateRunner(),
     clock: Clock = systemClock,
     principalSource: () => RunPrincipal = resolveLocalPrincipal,
+    publisher: RunPublisher = createGitRunPublisher(),
   ) {
     this.runsRoot = runsRoot;
     this.runtimeReadiness = runtimeReadiness;
@@ -266,6 +287,7 @@ export class DurableWorkEngine implements WorkEngine {
     this.verificationGateRunner = verificationGateRunner;
     this.clock = clock;
     this.principalSource = principalSource;
+    this.publisher = publisher;
   }
 
   /** Ticket 12: every mutating method's `actor?` param resolves through here — omitted means the engine's own principalSource, unrestricted (`grants` absent), exactly pre-ticket-12 behavior. */
@@ -961,5 +983,175 @@ export class DurableWorkEngine implements WorkEngine {
       };
       this.store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: run.id, attemptId, event: failureEvent }));
     }
+    // Ticket 13 AC5: an intent the admin authorized but that never reached
+    // a settled state before the previous process stopped is resumed — the
+    // authorization is durable, so completing it needs no new decision —
+    // and resuming always begins by observing origin (executePublication),
+    // never by re-sending anything origin already has. An intent found
+    // 'executing' may have sent a command already, so an unobservable
+    // remote makes it 'ambiguous' (AC6) rather than a plain failure. Fire-
+    // and-forget, exactly like start(): a push against a slow network must
+    // not hold boot; progress is observed by rereading the Run.
+    for (const intent of this.store.listIncompleteRunPublications()) {
+      const run = this.store.getRun(intent.runId);
+      if (!run) continue;
+      void this.runPublication(run, intent, intent.state === 'executing');
+    }
+  }
+
+  /** See WorkEngine.publish's doc comment. */
+  async publish(runId: string, input: { target?: PublicationTarget } = {}, actor?: RunActor): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    // AC2: refused for every collaborator actor before anything else is
+    // even inspected — the same decidePolicy() every transport reaches.
+    this.enforcePolicy(resolvedActor, { kind: 'publish', repositoryId: existing.spec.repository.id });
+    if (input.target !== undefined && !isPublicationTarget(input.target)) {
+      throw new InvalidRunStateError('publication target must be push or draft-pull-request');
+    }
+    // AC1/AC2: only an ordinarily successful, verified Run ('completed' —
+    // never 'completed_unverified' or any failure) that actually delivered
+    // a local commit has anything to publish.
+    if (existing.status !== 'completed') {
+      throw new InvalidRunStateError(`only a verified, completed Run can be published (${existing.status})`);
+    }
+    const commit = findDeliveryCommit(existing);
+    if (!commit) throw new InvalidRunStateError('this Run produced no local commit to publish');
+    if (existing.preparation.state !== 'ready' || !existing.preparation.worktreePath) {
+      throw new InvalidRunStateError('this Run has no prepared worktree to publish from');
+    }
+    const target: PublicationTarget = input.target ?? defaultPublicationTarget(existing.spec.requestedDeliveryResult);
+
+    let intent = existing.publication;
+    // Captured before `intent` is possibly reassigned below — the flag
+    // executePublication needs (an unobservable remote before anything is
+    // sent this call is 'ambiguous' rather than 'failed' only if an
+    // earlier execution, under either target, may already have acted) has
+    // to reflect what this Run's history actually shows, not the freshly
+    // re-authorized 'authorized' state a re-target lands on.
+    const priorState = intent?.state;
+
+    if (intent && intent.target !== target) {
+      // AC3's "stable idempotency identity" is per Run + commit, not per
+      // (Run, target) — one durable row per Run either way (run_publications'
+      // run_id is UNIQUE). Re-authorizing a different target is refused only
+      // while the existing intent's outcome is still unsettled: 'executing'
+      // (a command may be in flight right now) or 'ambiguous' (AC6 — the
+      // admin must reconcile it, which means retrying the SAME target, before
+      // asking for a different one). A 'failed' intent is a proven no-op —
+      // nothing to reconcile — and a 'succeeded' one (e.g. a plain push) can
+      // still be legitimately re-authorized to additionally open a pull
+      // request; executePublication's own reconcile-first discipline handles
+      // either resulting combination correctly without any special-casing
+      // here.
+      if (intent.state === 'executing') {
+        throw new InvalidRunStateError('this Run\'s publication is currently executing; wait for it to settle before changing the target');
+      }
+      if (intent.state === 'ambiguous') {
+        throw new InvalidRunStateError(`this Run's ${intent.target} publication is ambiguous; reconcile it before authorizing a different target`);
+      }
+      const now = new Date().toISOString();
+      intent = {
+        ...intent, target, state: 'authorized', authorizedBy: resolvedActor.principal, authorizedAt: now, updatedAt: now, executions: 0,
+      };
+      delete (intent as { result?: unknown }).result;
+      delete (intent as { reason?: unknown }).reason;
+      this.store.updateRunPublication(intent);
+      this.recordActivity(runId, 'publish-authorized', resolvedActor);
+    } else if (intent) {
+      // AC3: the same Run + commit + target is the same intent — a
+      // repeated command resumes or returns it, never records a second
+      // authorization.
+      if (intent.state === 'succeeded') return this.get(runId)!;
+    } else {
+      const now = new Date().toISOString();
+      intent = {
+        id: randomUUID(),
+        runId,
+        idempotencyKey: `run:${runId}:commit:${commit.sha}`,
+        target,
+        commit: commit.sha,
+        branch: commit.branch,
+        state: 'authorized',
+        authorizedBy: resolvedActor.principal,
+        authorizedAt: now,
+        updatedAt: now,
+        executions: 0,
+      };
+      // Durable before any command runs (AC3) — and attributed (AC4) — so
+      // a crash between here and the push can never lose "this was
+      // authorized and may have started".
+      this.store.createRunPublication(intent);
+      this.recordActivity(runId, 'publish-authorized', resolvedActor);
+    }
+    // A prior execution may have already sent something only if it was
+    // interrupted mid-flight ('executing' with no live task — a restart
+    // that raced this call), already judged ambiguous, or already
+    // succeeded (a re-target building on a confirmed earlier effect);
+    // 'authorized' never sent anything and 'failed' is a proven no-op, so a
+    // retry of either starts clean.
+    const priorExecution = priorState === 'executing' || priorState === 'ambiguous' || priorState === 'succeeded';
+    await this.runPublication(existing, intent, priorExecution);
+    return this.get(runId)!;
+  }
+
+  /**
+   * One execution of a durable publication intent, shared by publish() and
+   * recover(): marks it 'executing' (with the execution count bumped and
+   * any earlier result/reason cleared), runs executePublication against
+   * the Run's own prepared worktree — never the Repository it came from
+   * (ticket 03's boundary) — and persists exactly the settled outcome it
+   * reports. Any unexpected throw is recorded as 'ambiguous' rather than
+   * left 'executing' forever: an unknown error mid-external-effect is, by
+   * definition, an outcome that cannot be proven either way (AC6).
+   */
+  private runPublication(run: WorkRun, intent: RunPublication, priorExecution: boolean): Promise<void> {
+    const live = this.livePublications.get(run.id);
+    if (live) return live;
+    const worktreePath = run.preparation.worktreePath;
+    // No prepared worktree to publish from is not survivable — settle the
+    // intent as failed rather than leaving it 'authorized'/'executing'
+    // forever (which listIncompleteRunPublications would otherwise re-pick
+    // every boot with no admin action able to move it).
+    if (!worktreePath) {
+      const failed: RunPublication = {
+        ...intent, state: 'failed', reason: 'This Run has no prepared worktree to publish from.', updatedAt: new Date().toISOString(),
+      };
+      this.store.updateRunPublication(failed);
+      return Promise.resolve();
+    }
+    const task = (async () => {
+      const executing: RunPublication = {
+        ...intent, state: 'executing', executions: intent.executions + 1, updatedAt: new Date().toISOString(),
+      };
+      delete (executing as { result?: unknown }).result;
+      delete (executing as { reason?: unknown }).reason;
+      let settled: RunPublication;
+      try {
+        this.store.updateRunPublication(executing);
+        const outcome = await executePublication(
+          this.publisher, executing, { worktreePath, pullRequest: buildPullRequestInput(run, executing) }, { priorExecution },
+        );
+        settled = outcome.state === 'succeeded'
+          ? { ...executing, state: 'succeeded', result: outcome.result, updatedAt: new Date().toISOString() }
+          : { ...executing, state: outcome.state, reason: outcome.reason, updatedAt: new Date().toISOString() };
+      } catch (error) {
+        // AC6: an outcome that could not be proven, whatever the cause —
+        // including a bug in this loop itself — is an explicit ambiguous
+        // state, never a silently stuck 'executing'. redactSecrets matches
+        // every other reason this module ever writes: the underlying error
+        // can be a raw git/gh failure that echoes a credential.
+        settled = {
+          ...executing,
+          state: 'ambiguous',
+          reason: `Publication stopped unexpectedly: ${redactSecrets(error instanceof Error ? error.message : String(error))}`,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      this.store.updateRunPublication(settled);
+    })().finally(() => { this.livePublications.delete(run.id); });
+    this.livePublications.set(run.id, task);
+    return task;
   }
 }

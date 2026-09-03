@@ -502,3 +502,38 @@ describe('run attention routes (ticket 07)', () => {
     expect(unknownRun.json()).toEqual({ error: 'no such run: does-not-exist' });
   });
 });
+
+describe('run publish route (ticket 13)', () => {
+  const collaboratorActor: RunActor = {
+    principal: { id: 'collab-1', displayName: 'Alice' },
+    device: { id: 'device-1', label: "Alice's phone" },
+    grants: { repositoryIds: [], profileIds: [] },
+  };
+
+  it('refuses a collaborator device with the policy rule, before the Run state is even inspected (AC2: collaborator refusal over REST)', async () => {
+    const { app, repoPath, engine } = makeApp(undefined, { resolveActor: () => collaboratorActor });
+    // Submitted by the admin (no actor) — a queued Run the admin would get a
+    // 400 "not eligible" for; the collaborator gets the policy 403 first.
+    const run = await engine.submit(submittedIntent(repoPath, 'main'));
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/publish` });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: expect.stringContaining('admin'), rule: 'publish-admin-only' });
+    expect(engine.get(run.id)?.publication).toBeUndefined();
+  });
+
+  it('returns 404 for an unknown Run and 400 for a malformed target or an ineligible Run', async () => {
+    const { app, repoPath } = makeApp();
+    expect((await app.inject({ method: 'POST', url: '/api/runs/unknown-run/publish' })).statusCode).toBe(404);
+
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json() as { id: string };
+    const malformed = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/publish`, payload: { target: 'force-push' } });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toEqual({ error: 'target must be push or draft-pull-request' });
+
+    const queued = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/publish` });
+    expect(queued.statusCode).toBe(400);
+    expect(queued.json()).toEqual({ error: expect.stringContaining('verified, completed Run') });
+  });
+});

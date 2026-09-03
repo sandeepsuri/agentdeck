@@ -4,7 +4,10 @@ import {
   InvalidRunStateError, InvalidWorkSpecError, PolicyDeniedError, RunAttentionNotPendingError, RunNotFoundError,
   RunPreparationError, UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
-import type { AttentionDecisionInput, RunActor, WorkEngine, WorkSpec } from '../work-engine/types.js';
+import { isPublicationTarget } from '../work-engine/publication.js';
+import type {
+  AttentionDecisionInput, PublicationTarget, RunActor, WorkEngine, WorkSpec,
+} from '../work-engine/types.js';
 import { nonEmptyString } from './validate.js';
 
 export interface WorkRoutesDeps {
@@ -122,6 +125,27 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
       if (error instanceof InvalidRunStateError || error instanceof UnsupportedRuntimeError) {
         return reply.code(400).send({ error: error.message });
       }
+      throw error;
+    }
+  });
+
+  // Ticket 13 AC2: publication is local-admin-only — never on app.ts's
+  // remote or collaborator allowlists, and DurableWorkEngine.publish() itself
+  // refuses any collaborator actor through the same decidePolicy() every
+  // transport shares, so a collaborator device reaching this path by any
+  // route still gets the same 403.
+  app.post('/api/runs/:id/publish', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const body = request.body as { target?: unknown } | undefined | null;
+    if (body?.target !== undefined && !isPublicationTarget(body.target)) {
+      return reply.code(400).send({ error: 'target must be push or draft-pull-request' });
+    }
+    try {
+      return await workEngine.publish(id, { target: body?.target as PublicationTarget | undefined }, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
       throw error;
     }
   });

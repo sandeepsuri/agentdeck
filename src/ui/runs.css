@@ -96,3 +96,15 @@
 @media (max-width: 700px) {
   .run-form-grid,.run-intent-grid { grid-template-columns: 1fr; }
 }
+
+/* Ticket 13: publication is its own explicit step after a verified result.
+   'succeeded' shares the success look; 'ambiguous' is deliberately the
+   waiting color, not error — the admin has to look, not retry blindly. */
+.run-publication { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--border-muted); }
+.run-publication h3 { margin: 14px 0 0; color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.run-publication-note { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; }
+.run-publication .button { margin-top: 4px; }
+.run-publication a { color: var(--status-working); }
+.work-run-status.status-succeeded,.work-run-status.status-authorized { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
+.work-run-status.status-executing { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
+.work-run-status.status-ambiguous { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
