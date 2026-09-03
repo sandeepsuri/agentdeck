@@ -543,3 +543,57 @@ describe('run publish route (ticket 13)', () => {
     expect(queued.json()).toEqual({ error: expect.stringContaining('verified, completed Run') });
   });
 });
+
+describe('DELETE /api/runs/:id', () => {
+  it('permanently deletes a Run once it has reached a terminal status', async () => {
+    const { app, repoPath, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+    store.updateRun({ ...run, status: 'completed' });
+
+    const response = await app.inject({ method: 'DELETE', url: `/api/runs/${run.id}` });
+    expect(response.statusCode).toBe(204);
+
+    const reopened = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(reopened.statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/runs' })).json()).toEqual([]);
+  });
+
+  it('refuses to delete a Run that is still in progress, leaving it untouched', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json(); // fresh submit() is 'queued' — never terminal
+
+    const response = await app.inject({ method: 'DELETE', url: `/api/runs/${run.id}` });
+    expect(response.statusCode).toBe(400);
+
+    const reopened = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    expect(reopened.statusCode).toBe(200);
+  });
+
+  it('404s for an unknown Run', async () => {
+    const { app } = makeApp();
+    const response = await app.inject({ method: 'DELETE', url: '/api/runs/does-not-exist' });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('refuses a collaborator actor with the policy rule, never deleting the Run (admin-only, exactly like publish)', async () => {
+    const { app, repoPath, store, engine } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+    store.updateRun({ ...run, status: 'completed' });
+
+    const collaboratorApp = Fastify();
+    const collaboratorActor: RunActor = {
+      principal: { id: 'collab-1', displayName: 'Alice' },
+      grants: { repositoryIds: [repoPath], profileIds: [] },
+    };
+    registerWorkRoutes(collaboratorApp, engine, { resolveActor: () => collaboratorActor });
+    apps.push(collaboratorApp);
+
+    const response = await collaboratorApp.inject({ method: 'DELETE', url: `/api/runs/${run.id}` });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: expect.stringContaining('admin'), rule: 'delete-admin-only' });
+    expect(engine.get(run.id)).toBeDefined();
+  });
+});

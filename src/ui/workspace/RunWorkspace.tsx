@@ -7,7 +7,7 @@ import type {
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
 } from './attemptActivity.js';
-import { formatRunLabel } from './runModel.js';
+import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
 function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: string } {
   switch (event.kind) {
@@ -299,16 +299,19 @@ interface Props {
   onResolveAttention?: (run: WorkRun, attentionId: string, decision: AttentionDecisionInput) => void;
   /** Ticket 13: the admin's explicit publish authorization (App.tsx's publishRun → POST /api/runs/:id/publish). Absent means the action is not offered at all. */
   onPublish?: (run: WorkRun, target: PublicationTarget) => void;
+  /** Permanently removes this Run from history (App.tsx's deleteRun → DELETE /api/runs/:id). Only offered once the Run has reached a terminal status — see isTerminalRunStatus. */
+  onDelete?: (run: WorkRun) => void;
   /** Ticket 05: the structured Attempt panel is experimental and stays hidden until this feature gate is on. */
   structuredAttemptsEnabled?: boolean;
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onApply, onReverify, onViewChanges, onResolveAttention, onPublish,
+  run, onPrepare, onStart, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
   structuredAttemptsEnabled = false,
 }: Props) {
   const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
+  const canDelete = isTerminalRunStatus(run.status) && Boolean(onDelete);
   // Both Codex and Claude have a real runtimes/*.ts Attempt adapter wired
   // into the engine's default runtimeAdapters (engine.ts) — any other
   // runtime preference is refused managed status before an envelope is ever
@@ -320,7 +323,22 @@ export function RunWorkspace({
     <article className="run-workspace">
       <header>
         <span><small>Run {run.id}</small><h1>{run.spec.objective}</h1></span>
-        <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
+        <span className="run-header-actions">
+          <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
+          {canDelete && (
+            <button
+              className="button danger-button"
+              onClick={() => {
+                if (window.confirm(`Delete this Run permanently? "${run.spec.objective}" and its full history will be removed. This cannot be undone.`)) {
+                  onDelete?.(run);
+                }
+              }}
+              type="button"
+            >
+              Delete
+            </button>
+          )}
+        </span>
       </header>
       <section><h2>Acceptance criteria</h2><ol>{run.spec.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ol></section>
       <dl className="run-intent-grid">

@@ -128,6 +128,24 @@ describe('RunWorkspace', () => {
     expect(html).toContain('Refused');
     expect(html).toContain('execution restrictions unsupported');
   });
+
+  it('offers no delete action for a Run still in progress, even with onDelete provided', () => {
+    const run: WorkRun = { ...baseRun(), status: 'running' };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, onDelete: () => undefined }));
+    expect(html).not.toContain('>Delete<');
+  });
+
+  it('offers no delete action for a terminal Run without an onDelete handler', () => {
+    const run: WorkRun = { ...baseRun(), status: 'completed' };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run }));
+    expect(html).not.toContain('>Delete<');
+  });
+
+  it('offers a delete action once a Run reaches a terminal status, with onDelete provided', () => {
+    const run: WorkRun = { ...baseRun(), status: 'cancelled' };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, onDelete: () => undefined }));
+    expect(html).toContain('>Delete<');
+  });
 });
 
 function eligibleRun(): WorkRun {

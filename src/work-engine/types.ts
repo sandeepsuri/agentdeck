@@ -736,4 +736,14 @@ export interface WorkEngine {
    * 'ambiguous' (AC6) rather than throwing.
    */
   publish(runId: string, input?: { target?: PublicationTarget }, actor?: RunActor): Promise<WorkRun>;
+  /**
+   * Permanently removes a Run and its durable record (Attempt event log,
+   * activity trail, publication intent) from history. Admin-only (policy.ts
+   * refuses every collaborator actor, exactly like publish). Refuses with
+   * InvalidRunStateError for a Run still in progress — only a Run whose
+   * status is already terminal (completed, completed_unverified,
+   * failed_verification, failed_budget, failed, cancelled) can be removed,
+   * so an active Run can never be deleted out from under itself.
+   */
+  remove(runId: string, actor?: RunActor): Promise<void>;
 }

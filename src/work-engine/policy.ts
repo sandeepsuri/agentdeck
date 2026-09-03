@@ -6,13 +6,15 @@
 // authorization path to drift out of sync with this one.
 import type { RunActor } from './types.js';
 
-export type PolicyActionKind = 'submit' | 'guide' | 'publish';
+export type PolicyActionKind = 'submit' | 'guide' | 'publish' | 'delete';
 
 export type PolicyAction =
   | { readonly kind: 'submit'; readonly repositoryId: string; readonly profileId: string | undefined }
   | { readonly kind: 'guide'; readonly repositoryId: string }
   /** Ticket 13 AC2: authorizing an external effect (push / draft pull request) for a verified local result — admin-only, never within any collaborator grant. */
-  | { readonly kind: 'publish'; readonly repositoryId: string };
+  | { readonly kind: 'publish'; readonly repositoryId: string }
+  /** Permanently removing a Run's durable record from history — admin-only, exactly like publish: never within any collaborator grant. */
+  | { readonly kind: 'delete'; readonly repositoryId: string };
 
 export interface PolicyDecision {
   readonly allowed: boolean;
@@ -50,6 +52,14 @@ export function decidePolicy(actor: RunActor, action: PolicyAction): PolicyDecis
       allowed: false,
       rule: 'publish-admin-only',
       reason: 'Only the admin can authorize publishing a Run result.',
+    };
+  }
+
+  if (action.kind === 'delete') {
+    return {
+      allowed: false,
+      rule: 'delete-admin-only',
+      reason: 'Only the admin can delete a Run.',
     };
   }
 

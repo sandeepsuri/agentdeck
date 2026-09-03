@@ -1123,6 +1123,18 @@ export class DurableWorkEngine implements WorkEngine {
     return this.get(runId)!;
   }
 
+  /** See WorkEngine.remove's doc comment. */
+  async remove(runId: string, actor?: RunActor): Promise<void> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'delete', repositoryId: existing.spec.repository.id });
+    if (!TERMINAL_STATUSES.has(existing.status)) {
+      throw new InvalidRunStateError(`cannot delete a Run that is still in progress: ${existing.status}`);
+    }
+    this.store.deleteRun(runId);
+  }
+
   /** See WorkEngine.recover's doc comment. */
   async recover(): Promise<void> {
     const readiness = await this.runtimeReadiness.get();

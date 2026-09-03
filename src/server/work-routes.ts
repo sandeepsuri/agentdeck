@@ -174,6 +174,23 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     }
   });
 
+  // Ticket 12 AC1/AC4: admin-only, exactly like publish — enforced inside
+  // DurableWorkEngine.remove() via the same decidePolicy() every transport
+  // reaches, never a REST-only check. A Run still in progress is refused
+  // (400), never silently stopped and removed in one step.
+  app.delete('/api/runs/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      await workEngine.remove(id, deps.resolveActor?.(request));
+      return reply.code(204).send();
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
   app.post('/api/runs/:id/cancel', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {
