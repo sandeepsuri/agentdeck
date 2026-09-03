@@ -1408,7 +1408,28 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     store.close();
   });
 
-  it('keeps a verified commit recoverable when the Repository checkout is dirty, then applies it on retry', async () => {
+  it('keeps a verified commit recoverable when uncommitted work collides with it, then applies it on retry', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+    // The same path the Run commit delivers — the one shape of dirt a
+    // fast-forward would actually destroy.
+    fs.writeFileSync(path.join(repository.path, 'delivered.txt'), 'mine\n');
+
+    await engine.start(prepared.id);
+    const blocked = await waitForSettled(engine, prepared.id);
+    expect(deriveRunResult(blocked)?.delivery).toMatchObject({ outcome: 'blocked' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('mine\n');
+
+    fs.unlinkSync(path.join(repository.path, 'delivered.txt'));
+    const applied = await engine.apply(prepared.id);
+    expect(deriveRunResult(applied)?.delivery).toMatchObject({ outcome: 'applied' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    store.close();
+  });
+
+  it('delivers a verified commit past uncommitted work the Run never touches', async () => {
     const { store, repository, engine } = setUp();
     store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
     const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
@@ -1416,14 +1437,11 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     fs.writeFileSync(path.join(repository.path, 'local.txt'), 'mine\n');
 
     await engine.start(prepared.id);
-    const blocked = await waitForSettled(engine, prepared.id);
-    expect(deriveRunResult(blocked)?.delivery).toMatchObject({ outcome: 'blocked' });
-    expect(fs.existsSync(path.join(repository.path, 'delivered.txt'))).toBe(false);
+    const settled = await waitForSettled(engine, prepared.id);
 
-    fs.unlinkSync(path.join(repository.path, 'local.txt'));
-    const applied = await engine.apply(prepared.id);
-    expect(deriveRunResult(applied)?.delivery).toMatchObject({ outcome: 'applied' });
+    expect(deriveRunResult(settled)?.delivery).toMatchObject({ outcome: 'applied' });
     expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    expect(fs.readFileSync(path.join(repository.path, 'local.txt'), 'utf8')).toBe('mine\n');
     store.close();
   });
 

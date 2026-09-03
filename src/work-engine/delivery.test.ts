@@ -65,7 +65,7 @@ describe('applyRunCommit', () => {
     expect(fs.readFileSync(path.join(repo, 'SUMMARY.md'), 'utf8')).toBe('# Summary\n');
   });
 
-  it('leaves a dirty checkout untouched and returns an actionable blocker', async () => {
+  it('leaves the checkout untouched when uncommitted work collides with the Run commit', async () => {
     const repo = initRepo();
     const base = git(repo, 'rev-parse', 'HEAD');
     const worktree = tempDir();
@@ -74,15 +74,74 @@ describe('applyRunCommit', () => {
     git(worktree, 'add', 'SUMMARY.md');
     git(worktree, 'commit', '-m', 'summary');
     const commit = git(worktree, 'rev-parse', 'HEAD');
-    fs.writeFileSync(path.join(repo, 'local.txt'), 'mine\n');
+    // The same path the Run commit adds — a fast-forward would overwrite it.
+    fs.writeFileSync(path.join(repo, 'SUMMARY.md'), 'mine\n');
 
     const result = await applyRunCommit({
       repositoryPath: repo, targetBranch: 'main', expectedBaseCommit: base, commit,
     });
 
     expect(result.kind).toBe('blocked');
-    expect(result.kind === 'blocked' ? result.reason : '').toContain('local changes');
+    expect(result.kind === 'blocked' ? result.reason : '').toContain('SUMMARY.md');
     expect(git(repo, 'rev-parse', 'HEAD')).toBe(base);
-    expect(fs.existsSync(path.join(repo, 'SUMMARY.md'))).toBe(false);
+    expect(fs.readFileSync(path.join(repo, 'SUMMARY.md'), 'utf8')).toBe('mine\n');
+  });
+
+  it('applies over unrelated untracked files instead of vetoing the whole result', async () => {
+    const repo = initRepo();
+    const base = git(repo, 'rev-parse', 'HEAD');
+    const worktree = tempDir();
+    git(repo, 'worktree', 'add', '-b', 'agentdeck/run/three', worktree, base);
+    fs.writeFileSync(path.join(worktree, 'SUMMARY.md'), '# Summary\n');
+    git(worktree, 'add', 'SUMMARY.md');
+    git(worktree, 'commit', '-m', 'summary');
+    const commit = git(worktree, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, 'local.txt'), 'mine\n');
+
+    await expect(applyRunCommit({
+      repositoryPath: repo, targetBranch: 'main', expectedBaseCommit: base, commit,
+    })).resolves.toEqual({ kind: 'applied', repositoryPath: repo, branch: 'main' });
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(commit);
+    expect(fs.readFileSync(path.join(repo, 'SUMMARY.md'), 'utf8')).toBe('# Summary\n');
+    expect(fs.readFileSync(path.join(repo, 'local.txt'), 'utf8')).toBe('mine\n');
+  });
+
+  it('preserves a local edit to a tracked file the Run commit never touches', async () => {
+    const repo = initRepo();
+    const base = git(repo, 'rev-parse', 'HEAD');
+    const worktree = tempDir();
+    git(repo, 'worktree', 'add', '-b', 'agentdeck/run/four', worktree, base);
+    fs.writeFileSync(path.join(worktree, 'SUMMARY.md'), '# Summary\n');
+    git(worktree, 'add', 'SUMMARY.md');
+    git(worktree, 'commit', '-m', 'summary');
+    const commit = git(worktree, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'edited in place\n');
+
+    await expect(applyRunCommit({
+      repositoryPath: repo, targetBranch: 'main', expectedBaseCommit: base, commit,
+    })).resolves.toEqual({ kind: 'applied', repositoryPath: repo, branch: 'main' });
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(commit);
+    expect(fs.readFileSync(path.join(repo, 'README.md'), 'utf8')).toBe('edited in place\n');
+  });
+
+  it('blocks a local edit to a tracked file the Run commit also changes', async () => {
+    const repo = initRepo();
+    const base = git(repo, 'rev-parse', 'HEAD');
+    const worktree = tempDir();
+    git(repo, 'worktree', 'add', '-b', 'agentdeck/run/five', worktree, base);
+    fs.writeFileSync(path.join(worktree, 'README.md'), 'changed by the Run\n');
+    git(worktree, 'add', 'README.md');
+    git(worktree, 'commit', '-m', 'readme');
+    const commit = git(worktree, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'edited by a human\n');
+
+    const result = await applyRunCommit({
+      repositoryPath: repo, targetBranch: 'main', expectedBaseCommit: base, commit,
+    });
+
+    expect(result.kind).toBe('blocked');
+    expect(result.kind === 'blocked' ? result.reason : '').toContain('README.md');
+    expect(git(repo, 'rev-parse', 'HEAD')).toBe(base);
+    expect(fs.readFileSync(path.join(repo, 'README.md'), 'utf8')).toBe('edited by a human\n');
   });
 });
