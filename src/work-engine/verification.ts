@@ -28,10 +28,24 @@ export const MAX_VERIFICATION_REPAIR_ATTEMPTS = 2;
 /** Evidence stays concise (AC5) — bounded so a runaway command's output can never blow up durable storage or the repair prompt. */
 const MAX_EVIDENCE_LENGTH = 2000;
 
+/**
+ * How much of the bound is spent on the opening of the output. Test runners,
+ * compilers and linters announce what they are doing at the top and report
+ * what went wrong at the bottom, so the tail is the half that carries the
+ * failure: a head-only bound hands the repair round (and the operator reading
+ * the Run) a screenful of passing checks and silently drops the error that
+ * actually failed the gate. The head is kept small but non-empty so the
+ * evidence still shows which command produced it.
+ */
+const EVIDENCE_HEAD_LENGTH = 400;
+
 function truncateEvidence(text: string): string {
   const trimmed = text.trim();
   if (trimmed.length <= MAX_EVIDENCE_LENGTH) return trimmed;
-  return `${trimmed.slice(0, MAX_EVIDENCE_LENGTH)}\n… (truncated)`;
+  const head = trimmed.slice(0, EVIDENCE_HEAD_LENGTH);
+  const tail = trimmed.slice(trimmed.length - (MAX_EVIDENCE_LENGTH - EVIDENCE_HEAD_LENGTH));
+  const elided = trimmed.length - MAX_EVIDENCE_LENGTH;
+  return `${head}\n… (${elided} characters elided; the end of the output is kept because that is where failures are reported)\n${tail}`;
 }
 
 export interface GateExecutionResult {

@@ -95,6 +95,24 @@ describe('createShellVerificationGateRunner', () => {
     expect(result).toEqual({ passed: true, exitCode: 0, evidence: 'here' });
   });
 
+  it('keeps the end of a long output — where a test runner reports what actually failed — not just its opening', async () => {
+    const runner = createShellVerificationGateRunner();
+    const worktree = tempDir();
+
+    // Stands in for any real gate: thousands of characters of progress
+    // output, with the one line that explains the failure printed last.
+    const result = await runner(
+      { name: 'noisy', command: 'for i in $(seq 1 400); do echo "PASS check $i"; done; echo "FAIL: better_sqlite3.node NODE_MODULE_VERSION 137 vs 108"; exit 1' },
+      worktree,
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toContain('FAIL: better_sqlite3.node NODE_MODULE_VERSION 137 vs 108');
+    expect(result.evidence).toContain('PASS check 1\n');
+    expect(result.evidence).toContain('elided');
+    expect(result.evidence.length).toBeLessThan(2300);
+  });
+
   it('kills a command that exceeds its timeout and reports it as a failing gate, never hanging the Run', async () => {
     const runner = createShellVerificationGateRunner(50);
     const worktree = tempDir();
