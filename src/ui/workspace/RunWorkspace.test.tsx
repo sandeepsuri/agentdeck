@@ -318,6 +318,50 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     expect(html).toContain('npm test');
   });
 
+  it('leads with the blocker when an apply-to-repository Run never reached the Repository', () => {
+    const eligible = eligibleRun();
+    const run: WorkRun = {
+      ...eligible,
+      spec: { ...eligible.spec, requestedDeliveryResult: 'apply-to-repository' },
+      status: 'completed_unverified',
+      attempt: {
+        state: 'completed',
+        runtime: 'claude',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' },
+          { kind: 'completion', sequence: 1, at: '2026-09-01T00:05:30.000Z', outcome: 'success' },
+          {
+            kind: 'commit-created', sequence: 2, at: '2026-09-01T00:05:32.000Z', sha: 'abc123def456', branch: 'agentdeck/run/eligible',
+            signed: false, changedFiles: ['TEST_SUMMARY.md'],
+          },
+          {
+            kind: 'delivery-outcome', sequence: 3, at: '2026-09-01T00:05:33.000Z', outcome: 'blocked',
+            reason: 'The Repository checkout has uncommitted changes to files this Run also changes (TEST_SUMMARY.md). Commit or stash them, then apply this result.',
+          },
+          { kind: 'verification-outcome', sequence: 4, at: '2026-09-01T00:06:00.000Z', outcome: 'unverified', repairAttempts: 0 },
+        ],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('run-delivery-blocked');
+    expect(html).toContain('Not applied to example');
+    expect(html).toContain('uncommitted changes to files this Run also changes');
+    // The reader is told where the work actually is, so a blocked delivery
+    // never reads as the Run having produced nothing.
+    expect(html).toContain('agentdeck/run/eligible');
+  });
+
+  it('names the Repository a Run worktree belongs to, so its path under AgentDeck data never reads as the wrong repository', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: true }));
+
+    expect(html).toContain('Git worktree of example');
+    expect(html).toContain('/repos/example');
+  });
+
   it('presents an honest non-success result for a failed Run, distinct from a successful one (ticket 10 AC7)', () => {
     const run: WorkRun = {
       ...eligibleRun(),

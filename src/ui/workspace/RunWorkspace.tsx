@@ -199,9 +199,26 @@ function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
 }) {
   const result = deriveRunResult(run);
   if (!result) return null;
+  // A finished Run that asked to land in the Repository but did not is the
+  // single most important thing on this screen: the work exists, it is safe on
+  // its own branch, and it is waiting on the operator. Buried in a definition
+  // list it read as nothing having happened at all.
+  const undelivered = result.commit
+    && run.spec.requestedDeliveryResult === 'apply-to-repository'
+    && result.delivery?.outcome !== 'applied';
   return (
     <section className="run-result">
       <h3>Run result</h3>
+      {undelivered && result.commit && (
+        <div className="run-delivery-blocked">
+          <strong>Not applied to {run.spec.repository.name}</strong>
+          <p>{result.delivery?.reason ?? 'Delivery to the Repository checkout has not been attempted yet.'}</p>
+          <p>
+            The work is safe: commit <code>{result.commit.sha.slice(0, 12)}</code> on branch{' '}
+            <code>{result.commit.branch}</code>. Resolve the above, then apply it.
+          </p>
+        </div>
+      )}
       <dl className="run-intent-grid">
         <div><dt>Outcome</dt><dd><span className={`work-run-status status-${result.outcome}`}>{formatRunLabel(result.outcome)}</span></dd></div>
         <div>
@@ -221,7 +238,7 @@ function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
           <div>
             <dt>Repository delivery</dt>
             <dd>
-              <strong>{formatRunLabel(result.delivery.outcome)}</strong>
+              <span className={`work-run-status status-${result.delivery.outcome}`}>{formatRunLabel(result.delivery.outcome)}</span>
               {result.delivery.repositoryPath && <small>{result.delivery.repositoryPath}{result.delivery.branch ? ` · ${result.delivery.branch}` : ''}</small>}
               {result.delivery.reason && <span>{result.delivery.reason}</span>}
             </dd>
@@ -322,7 +339,16 @@ export function RunWorkspace({
             <dd><span className={`work-run-status status-${preparation.state}`}>{formatRunLabel(preparation.state)}</span></dd>
           </div>
           <div><dt>Resolved base commit</dt><dd>{preparation.baseCommit ? <code>{preparation.baseCommit}</code> : 'Not yet resolved'}</dd></div>
-          <div><dt>Worktree</dt><dd>{preparation.worktreePath ? <code>{preparation.worktreePath}</code> : 'Not yet created'}</dd></div>
+          <div>
+            <dt>Worktree</dt>
+            <dd>
+              {preparation.worktreePath ? <code>{preparation.worktreePath}</code> : 'Not yet created'}
+              {/* The path lives under AgentDeck's data directory in $HOME, but the
+                  worktree belongs to the selected Repository — say so, because the
+                  bare path reads as though the Run ran in the wrong repository. */}
+              <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
+            </dd>
+          </div>
           {preparation.error && <div><dt>Last error</dt><dd>{preparation.error}</dd></div>}
         </dl>
         {canPrepare && (
@@ -344,7 +370,13 @@ export function RunWorkspace({
             return (
               <>
                 <div><dt>Runtime</dt><dd>{formatRunLabel(runtime)}</dd></div>
-                <div><dt>Writable worktree</dt><dd><code>{profile.writableWorktree}</code></dd></div>
+                <div>
+                  <dt>Writable worktree</dt>
+                  <dd>
+                    <code>{profile.writableWorktree}</code>
+                    <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
+                  </dd>
+                </div>
                 <div><dt>Readable roots</dt><dd>{profile.readableRoots.map((root) => <code key={root}>{root}</code>)}</dd></div>
                 <div>
                   <dt>Allowed network domains</dt>

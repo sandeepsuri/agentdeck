@@ -106,5 +106,15 @@
 .run-publication .button { margin-top: 4px; }
 .run-publication a { color: var(--status-working); }
 .work-run-status.status-succeeded,.work-run-status.status-authorized { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
+/* A finished Run whose result never reached the Repository checkout. Styled as
+   waiting, not error, and lifted out of the result grid: nothing failed, the
+   commit is intact on its own branch, and an operator has to clear the way. */
+.run-delivery-blocked { margin: 18px 0 0; padding: 12px 14px; border: 1px solid var(--status-waiting); border-radius: 6px; background: var(--status-waiting-bg); }
+.run-delivery-blocked strong { display: block; color: var(--status-waiting); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
+.run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.run-delivery-blocked code { padding: 2px 5px; border-radius: 4px; background: var(--surface-code); font: 11px var(--font-mono); }
+.work-run-status.status-applied { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
+.work-run-status.status-blocked { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
+
 .work-run-status.status-executing { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
 .work-run-status.status-ambiguous { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
