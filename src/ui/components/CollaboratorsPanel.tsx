@@ -6,6 +6,7 @@ import {
 } from '../collaborators.js';
 import type { Profile } from '../../work-engine/types.js';
 import { lines } from './RunSubmissionModal.js';
+import './CollaboratorsPanel.css';
 
 /**
  * Ticket 12 AC1: the admin's minimal Profile roster — create-only (a
@@ -51,29 +52,51 @@ function CreateProfileForm({ onCreated }: { onCreated: (profile: Profile) => voi
 
   return (
     <div className="collaborators-create-profile">
-      <input aria-label="Profile name" onChange={(event) => setName(event.target.value)} placeholder="Profile name, e.g. Standard Codex run" value={name} />
-      <div className="run-choice-row">
-        {(['codex', 'claude'] as const).map((runtime) => (
-          <label key={runtime}>
-            <input checked={runtimePreference.includes(runtime)} onChange={() => toggleRuntime(runtime)} type="checkbox" />
-            {runtime === 'codex' ? 'Codex' : 'Claude'}
-          </label>
-        ))}
+      <label className="collaborators-field">
+        <span>Profile name</span>
+        <input aria-label="Profile name" onChange={(event) => setName(event.target.value)} placeholder="e.g. Standard Codex run" value={name} />
+      </label>
+
+      <div className="collaborators-form-row">
+        <div className="collaborators-field">
+          <span>Runtime</span>
+          <div className="run-choice-row">
+            {(['codex', 'claude'] as const).map((runtime) => (
+              <label key={runtime}>
+                <input checked={runtimePreference.includes(runtime)} onChange={() => toggleRuntime(runtime)} type="checkbox" />
+                {runtime === 'codex' ? 'Codex' : 'Claude'}
+              </label>
+            ))}
+          </div>
+        </div>
+        <label className="collaborators-field">
+          <span>Wall-clock minutes</span>
+          <input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} type="number" value={wallClockMinutes} />
+        </label>
       </div>
-      <label>Wall-clock minutes<input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} type="number" value={wallClockMinutes} /></label>
-      <label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Verification required</label>
+
+      <label className="run-check">
+        <input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />
+        Verification required
+      </label>
       {verificationRequired && (
-        <textarea
-          aria-label="Verification commands"
-          onChange={(event) => setVerificationCommands(event.target.value)}
-          placeholder="One command per line, e.g. npm test"
-          value={verificationCommands}
-        />
+        <label className="collaborators-field">
+          <span>Verification commands</span>
+          <textarea
+            aria-label="Verification commands"
+            onChange={(event) => setVerificationCommands(event.target.value)}
+            placeholder="One command per line, e.g. npm test"
+            value={verificationCommands}
+          />
+        </label>
       )}
-      <button className="button" disabled={creating || !name.trim() || runtimePreference.length === 0} onClick={() => void create()} type="button">
-        {creating ? 'Creating…' : 'Create Profile'}
-      </button>
-      {error && <div className="form-error">{error}</div>}
+
+      <div className="collaborators-form-actions">
+        {error && <div className="form-error">{error}</div>}
+        <button className="button" disabled={creating || !name.trim() || runtimePreference.length === 0} onClick={() => void create()} type="button">
+          {creating ? 'Creating…' : 'Create Profile'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -162,93 +185,119 @@ export function CollaboratorsPanel({ repos }: { repos: Repo[] }) {
         bearer value again once issued.
       </p>
 
-      <p className="field-hint-block">
-        Profiles are admin-approved configurations for how a collaborator&rsquo;s Run may run — runtime, budget,
-        and verification. A collaborator can only launch a Run against a Profile granted to them; the Work
-        Engine derives the Run entirely from the Profile, never from anything the collaborator submits.
-      </p>
-      <CreateProfileForm onCreated={(profile) => setProfiles((current) => [...current, profile])} />
-
-      <div className="collaborators-invite-row">
-        <input
-          aria-label="Collaborator name"
-          onChange={(event) => setDisplayName(event.target.value)}
-          placeholder="Collaborator name"
-          value={displayName}
-        />
-        {repos.length > 0 && (
-          <div className="collaborators-repo-grants">
-            <span className="field-hint">Repositories</span>
-            {repos.map((repo) => (
-              <label key={repo.id}>
-                <input
-                  checked={selectedRepoIds.includes(repo.id)}
-                  onChange={() => toggleRepo(repo.id)}
-                  type="checkbox"
-                />
-                {repo.name}
-              </label>
-            ))}
-          </div>
-        )}
-        {profiles.length > 0 && (
-          <div className="collaborators-profile-grants">
-            <span className="field-hint">Profiles</span>
-            {profiles.map((profile) => (
-              <label key={profile.id}>
-                <input
-                  checked={selectedProfileIds.includes(profile.id)}
-                  onChange={() => toggleProfile(profile.id)}
-                  type="checkbox"
-                />
-                {profile.name}
-              </label>
-            ))}
-          </div>
-        )}
-        <button className="button button-primary" disabled={!displayName.trim()} onClick={() => void create()} type="button">
-          Create invitation
-        </button>
+      <div className="collaborators-section">
+        <h3 className="collaborators-subheading">Profiles</h3>
+        <p className="field-hint-block">
+          Profiles are admin-approved configurations for how a collaborator&rsquo;s Run may run — runtime, budget,
+          and verification. A collaborator can only launch a Run against a Profile granted to them; the Work
+          Engine derives the Run entirely from the Profile, never from anything the collaborator submits.
+        </p>
+        <CreateProfileForm onCreated={(profile) => setProfiles((current) => [...current, profile])} />
       </div>
 
-      {issuedCode && (
-        <div className="collaborators-issued-code" role="status">
-          <strong>{issuedCode.displayName}&rsquo;s invitation code</strong>
-          <code>{issuedCode.code}</code>
-          <p className="field-hint">Share this once, out of band — it cannot be shown again.</p>
-          <button onClick={() => setIssuedCode(null)} type="button">Dismiss</button>
-        </div>
-      )}
-
-      {loading && <div className="rail-empty">Loading collaborators…</div>}
-      {!loading && collaborators.length === 0 && <div className="rail-empty">No collaborators yet.</div>}
-      {!loading && collaborators.length > 0 && (
-        <ul className="collaborators-list">
-          {collaborators.map((collaborator) => (
-            <li key={collaborator.id}>
-              <strong>{collaborator.displayName}</strong>
-              <span className="field-hint">
-                {collaborator.grantedRepositoryIds.length} repositor{collaborator.grantedRepositoryIds.length === 1 ? 'y' : 'ies'},
-                {' '}{collaborator.grantedProfileIds.length} profile{collaborator.grantedProfileIds.length === 1 ? '' : 's'} granted
-              </span>
-              <button onClick={() => void reinvite(collaborator.id, collaborator.displayName)} type="button">New device invitation</button>
-              <ul>
-                {collaborator.devices.map((device) => (
-                  <li key={device.id}>
-                    <span>{device.deviceLabel}{device.revokedAt ? ' — revoked' : ''}</span>
-                    {!device.revokedAt && (
-                      <button aria-label={`Revoke ${device.deviceLabel}`} onClick={() => void revoke(device.id)} type="button">
-                        Revoke
-                      </button>
-                    )}
-                  </li>
+      <div className="collaborators-section">
+        <h3 className="collaborators-subheading">Invite a collaborator</h3>
+        <div className="collaborators-invite-row">
+          <label className="collaborators-field">
+            <span>Collaborator name</span>
+            <input
+              aria-label="Collaborator name"
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder="Collaborator name"
+              value={displayName}
+            />
+          </label>
+          {repos.length > 0 && (
+            <div className="collaborators-repo-grants">
+              <span className="collaborators-grant-label">Repositories</span>
+              <div className="collaborators-chip-row">
+                {repos.map((repo) => (
+                  <label className={`collaborators-chip${selectedRepoIds.includes(repo.id) ? ' is-selected' : ''}`} key={repo.id}>
+                    <input
+                      checked={selectedRepoIds.includes(repo.id)}
+                      onChange={() => toggleRepo(repo.id)}
+                      type="checkbox"
+                    />
+                    {repo.name}
+                  </label>
                 ))}
-                {collaborator.devices.length === 0 && <li className="field-hint">No devices yet.</li>}
-              </ul>
-            </li>
-          ))}
-        </ul>
-      )}
+              </div>
+            </div>
+          )}
+          {profiles.length > 0 && (
+            <div className="collaborators-profile-grants">
+              <span className="collaborators-grant-label">Profiles</span>
+              <div className="collaborators-chip-row">
+                {profiles.map((profile) => (
+                  <label className={`collaborators-chip${selectedProfileIds.includes(profile.id) ? ' is-selected' : ''}`} key={profile.id}>
+                    <input
+                      checked={selectedProfileIds.includes(profile.id)}
+                      onChange={() => toggleProfile(profile.id)}
+                      type="checkbox"
+                    />
+                    {profile.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="collaborators-form-actions">
+            <button className="button button-primary" disabled={!displayName.trim()} onClick={() => void create()} type="button">
+              Create invitation
+            </button>
+          </div>
+        </div>
+
+        {issuedCode && (
+          <div className="collaborators-issued-code" role="status">
+            <div className="collaborators-issued-code-head">
+              <strong>{issuedCode.displayName}&rsquo;s invitation code</strong>
+              <button onClick={() => setIssuedCode(null)} type="button">Dismiss</button>
+            </div>
+            <code>{issuedCode.code}</code>
+            <p className="field-hint">Share this once, out of band — it cannot be shown again.</p>
+          </div>
+        )}
+      </div>
+
+      <div className="collaborators-section">
+        <h3 className="collaborators-subheading">Team</h3>
+        {loading && <div className="rail-empty">Loading collaborators…</div>}
+        {!loading && collaborators.length === 0 && <div className="rail-empty">No collaborators yet.</div>}
+        {!loading && collaborators.length > 0 && (
+          <ul className="collaborators-list">
+            {collaborators.map((collaborator) => (
+              <li className="collaborators-card" key={collaborator.id}>
+                <div className="collaborators-card-head">
+                  <span>
+                    <strong>{collaborator.displayName}</strong>
+                    <span className="field-hint">
+                      {collaborator.grantedRepositoryIds.length} repositor{collaborator.grantedRepositoryIds.length === 1 ? 'y' : 'ies'},
+                      {' '}{collaborator.grantedProfileIds.length} profile{collaborator.grantedProfileIds.length === 1 ? '' : 's'} granted
+                    </span>
+                  </span>
+                  <button className="button" onClick={() => void reinvite(collaborator.id, collaborator.displayName)} type="button">
+                    New device invitation
+                  </button>
+                </div>
+                <ul className="collaborators-devices">
+                  {collaborator.devices.map((device) => (
+                    <li className="collaborators-device-row" key={device.id}>
+                      <span>{device.deviceLabel}{device.revokedAt ? ' — revoked' : ''}</span>
+                      {!device.revokedAt && (
+                        <button aria-label={`Revoke ${device.deviceLabel}`} onClick={() => void revoke(device.id)} type="button">
+                          Revoke
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                  {collaborator.devices.length === 0 && <li className="field-hint">No devices yet.</li>}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       {error && <div className="form-error">{error}</div>}
     </fieldset>
