@@ -45,7 +45,8 @@ export type EventDurabilityClass = 'durable' | 'transient';
 const DURABLE_ATTEMPT_EVENT_KINDS: ReadonlySet<AttemptEvent['kind']> = new Set([
   'lifecycle', 'message', 'tool-activity', 'usage', 'completion', 'failure',
   'attention-requested', 'attention-resolved', 'verification-check', 'verification-outcome',
-  'budget-exceeded', 'pause-requested', 'paused', 'resumed', 'commit-created', 'commit-failed',
+  'budget-exceeded', 'pause-requested', 'paused', 'resumed', 'worktree-changes',
+  'commit-created', 'commit-failed', 'delivery-outcome',
 ]);
 
 export function classifyEventDurability(kind: AttemptEvent['kind']): EventDurabilityClass {

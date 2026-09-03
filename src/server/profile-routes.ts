@@ -14,7 +14,7 @@ const MAX_RUNTIME_PREFERENCE = 10;
 const MAX_VERIFICATION_COMMANDS = 100;
 const MAX_COMMAND_LENGTH = 4096;
 const RUNTIMES: AgentType[] = ['codex', 'claude'];
-const DELIVERY_RESULTS: RequestedDeliveryResult[] = ['working-tree', 'local-commit', 'pull-request'];
+const DELIVERY_RESULTS: RequestedDeliveryResult[] = ['working-tree', 'local-commit', 'apply-to-repository', 'pull-request'];
 // Every field RunBudget (work-engine/types.ts) actually declares — unlike
 // engine.ts's own validateWorkSpec (which only checks budget *values*, not
 // key names, for every WorkSpec including an admin's own), this admin-only

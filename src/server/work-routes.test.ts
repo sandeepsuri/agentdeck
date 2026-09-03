@@ -452,6 +452,12 @@ describe('run attention routes (ticket 07)', () => {
     const repeat = await app.inject({ method: 'POST', url: `/api/runs/${runId}/attention/${attentionId}/deny` });
     expect(repeat.statusCode).toBe(404);
     expect(repeat.json().error).toMatch(/no pending attention request/);
+
+    // Denial resumes the Attempt (this fixture finishes its script exactly
+    // like an approval) rather than ending it outright — let it fully settle
+    // before this test's own afterEach tears down the worktree and store out
+    // from under whatever verification/delivery work is still in flight.
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).json()).status === 'completed_unverified');
   });
 
   it('provides clarifying input through .../input, requiring a non-empty value', async () => {

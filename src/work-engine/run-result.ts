@@ -58,6 +58,12 @@ export function deriveRunResult(run: WorkRun): RunResult | undefined {
   const commitFailed = events.find((event): event is Extract<AttemptEvent, { kind: 'commit-failed' }> => (
     event.kind === 'commit-failed'
   ));
+  const lastWorktreeChanges = [...events].reverse().find((event): event is Extract<AttemptEvent, { kind: 'worktree-changes' }> => (
+    event.kind === 'worktree-changes'
+  ));
+  const deliveryOutcome = [...events].reverse().find((event): event is Extract<AttemptEvent, { kind: 'delivery-outcome' }> => (
+    event.kind === 'delivery-outcome'
+  ));
   const verificationEvidence = events.filter((event): event is Extract<AttemptEvent, { kind: 'verification-check' }> => (
     event.kind === 'verification-check'
   ));
@@ -74,7 +80,7 @@ export function deriveRunResult(run: WorkRun): RunResult | undefined {
   // "why" narrative alongside it.
   const recoveryNotes = run.attempt.state === 'failed'
     ? run.attempt.reason
-    : commitFailed?.reason ?? (verificationOutcome?.outcome === 'failed_verification'
+    : deliveryOutcome?.reason ?? commitFailed?.reason ?? (verificationOutcome?.outcome === 'failed_verification'
       ? `Verification did not pass after ${verificationOutcome.repairAttempts} repair attempt(s).`
       : undefined);
 
@@ -82,8 +88,14 @@ export function deriveRunResult(run: WorkRun): RunResult | undefined {
     objective: run.spec.objective,
     acceptanceCriteria: run.spec.acceptanceCriteria,
     outcome: run.status,
-    changedFiles: commitCreated?.changedFiles ?? [],
+    changedFiles: lastWorktreeChanges?.changedFiles ?? commitCreated?.changedFiles ?? [],
     ...(commitCreated ? { commit: toResultCommit(commitCreated) } : {}),
+    ...(deliveryOutcome ? { delivery: {
+      outcome: deliveryOutcome.outcome,
+      ...(deliveryOutcome.repositoryPath ? { repositoryPath: deliveryOutcome.repositoryPath } : {}),
+      ...(deliveryOutcome.branch ? { branch: deliveryOutcome.branch } : {}),
+      ...(deliveryOutcome.reason ? { reason: deliveryOutcome.reason } : {}),
+    } } : {}),
     verificationEvidence,
     approvals: deriveApprovals(events),
     ...(lastUsage ? { usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens } } : {}),

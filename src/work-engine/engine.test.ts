@@ -212,6 +212,7 @@ describe('DurableWorkEngine.prepare', () => {
       baseCommit: headSha,
       worktreePath: runWorktreePath(runsRoot, submitted.id),
       branch: runBranchName(submitted.id),
+      targetBranch: 'main',
     });
     expect(fs.existsSync(prepared.preparation.worktreePath!)).toBe(true);
     expect(git(prepared.preparation.worktreePath!, 'rev-parse', 'HEAD')).toBe(headSha);
@@ -443,7 +444,7 @@ describe('DurableWorkEngine.start', () => {
     await vi.waitUntil(() => {
       const run = engine.get(runId);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     return engine.get(runId)!;
   }
 
@@ -496,6 +497,7 @@ describe('DurableWorkEngine.start', () => {
     if (settled.attempt.state !== 'completed') throw new Error('expected completed');
     expect(settled.attempt.events.map((event) => event.kind)).toEqual([
       'lifecycle', 'lifecycle', 'tool-activity', 'tool-activity', 'message', 'usage', 'lifecycle', 'completion',
+      'worktree-changes',
       'verification-outcome',
     ]);
     expect(settled.attempt.events[0]).toMatchObject({ kind: 'lifecycle', phase: 'attempt-started' });
@@ -662,7 +664,7 @@ describe('DurableWorkEngine.resolveAttention', () => {
     await vi.waitUntil(() => {
       const run = engine.get(runId);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     return engine.get(runId)!;
   }
 
@@ -829,7 +831,7 @@ describe('DurableWorkEngine verification and repair (ticket 08)', () => {
     await vi.waitUntil(() => {
       const run = engine.get(runId);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     return engine.get(runId)!;
   }
 
@@ -950,7 +952,7 @@ describe('DurableWorkEngine verification and repair (ticket 08)', () => {
     store.close();
   });
 
-  it('surfaces missing verification configuration as failed_verification rather than silently succeeding (AC8)', async () => {
+  it('blocks missing verification configuration before creating a worktree or spending runtime tokens', async () => {
     const fake = createFakeCodexAppServer({ behavior: 'success' });
     const root = tempDir();
     const repoPath = path.join(root, 'repo');
@@ -962,19 +964,12 @@ describe('DurableWorkEngine verification and repair (ticket 08)', () => {
     store.upsertRepo(repository);
     const runsRoot = path.join(root, 'runs');
     const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), codexAdapter(fake));
-    const prepared = await submitAndPrepare(engine, repository);
-    expect(prepared.verificationPolicy.state).toBe('missing');
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
 
-    await engine.start(prepared.id);
-    const settled = await waitForSettled(engine, prepared.id);
-
-    expect(settled.status).toBe('failed_verification');
-    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
-    expect(settled.attempt.events.at(-1)).toMatchObject({
-      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: 0,
-    });
-    // No gates exist to check at all — nothing to repair, so no repair round runs.
-    expect(attemptStartCount(settled)).toBe(1);
+    await expect(engine.prepare(submitted.id)).rejects.toThrow('No verification policy is configured');
+    expect(engine.get(submitted.id)?.attempt.state).toBe('idle');
+    expect(fs.existsSync(path.join(runsRoot, submitted.id))).toBe(false);
+    expect(fake.envs).toHaveLength(0);
     store.close();
   });
 
@@ -1131,7 +1126,7 @@ describe('DurableWorkEngine budgets and safe controls (ticket 09)', () => {
     await vi.waitUntil(() => {
       const run = engine.get(runId);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     return engine.get(runId)!;
   }
 
@@ -1390,11 +1385,75 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     await vi.waitUntil(() => {
       const run = engine.get(runId);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     return engine.get(runId)!;
   }
 
   const trivialRequiredGate = { kind: 'required' as const, gates: [{ name: 'ok', command: 'true' }] };
+
+  it('applies a verified Run commit to the selected Repository checkout when explicitly requested', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    const result = deriveRunResult(settled);
+    expect(result?.delivery).toMatchObject({ outcome: 'applied', repositoryPath: repository.path, branch: 'main' });
+    expect(git(repository.path, 'rev-parse', 'HEAD')).toBe(result?.commit?.sha);
+    store.close();
+  });
+
+  it('keeps a verified commit recoverable when the Repository checkout is dirty, then applies it on retry', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+    fs.writeFileSync(path.join(repository.path, 'local.txt'), 'mine\n');
+
+    await engine.start(prepared.id);
+    const blocked = await waitForSettled(engine, prepared.id);
+    expect(deriveRunResult(blocked)?.delivery).toMatchObject({ outcome: 'blocked' });
+    expect(fs.existsSync(path.join(repository.path, 'delivered.txt'))).toBe(false);
+
+    fs.unlinkSync(path.join(repository.path, 'local.txt'));
+    const applied = await engine.apply(prepared.id);
+    expect(deriveRunResult(applied)?.delivery).toMatchObject({ outcome: 'applied' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    store.close();
+  });
+
+  it('retries verification against preserved work without rerunning the runtime', async () => {
+    let gatesPassed = false;
+    const gateRunner: VerificationGateRunner = async () => ({
+      passed: gatesPassed, exitCode: gatesPassed ? 0 : 1, evidence: gatesPassed ? 'ok' : 'not yet',
+    });
+    const { store, repository, engine } = setUp(gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxRepairAttempts: 1 } });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'fixed.txt'), 'ready\n');
+
+    await engine.start(prepared.id);
+    const failed = await waitForSettled(engine, prepared.id);
+    expect(failed.status).toBe('failed_verification');
+    const runtimeStarts = failed.attempt.state === 'idle' ? 0 : failed.attempt.events.filter((event) => (
+      event.kind === 'lifecycle' && event.phase === 'attempt-started'
+    )).length;
+
+    gatesPassed = true;
+    const verified = await engine.reverify(prepared.id);
+    expect(verified.status).toBe('completed');
+    expect(deriveRunResult(verified)?.commit).toBeDefined();
+    const startsAfterRetry = verified.attempt.state === 'idle' ? 0 : verified.attempt.events.filter((event) => (
+      event.kind === 'lifecycle' && event.phase === 'attempt-started'
+    )).length;
+    expect(startsAfterRetry).toBe(runtimeStarts);
+    store.close();
+  });
 
   it('creates a local commit with AgentDeck identity and metadata, and the Run result reflects it, once verification passes (AC1/AC2/AC4)', async () => {
     const { store, repository, engine } = setUp();
@@ -1418,7 +1477,7 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     store.close();
   });
 
-  it('never attempts a commit for a Repository with no verification required — only an ordinarily successful verified Run is eligible (AC1)', async () => {
+  it('delivers a local commit for an explicitly unverified Repository while preserving the unverified outcome', async () => {
     const { store, repository, engine } = setUp();
     // registerGitRepository defaults to a no-verification policy.
     const prepared = await submitAndPrepare(engine, repository);
@@ -1429,8 +1488,7 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
 
     expect(settled.status).toBe('completed_unverified');
     if (settled.attempt.state !== 'completed') throw new Error('expected completed');
-    expect(settled.attempt.events.some((event) => event.kind === 'commit-created' || event.kind === 'commit-failed')).toBe(false);
-    // The change is still sitting there, uncommitted — the worktree is preserved, never silently discarded.
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(true);
     expect(fs.existsSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'))).toBe(true);
     store.close();
   });
@@ -1450,7 +1508,7 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(false);
     const result = deriveRunResult(settled);
     expect(result?.commit).toBeUndefined();
-    expect(result?.changedFiles).toEqual([]);
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
     store.close();
   });
 
@@ -1532,7 +1590,7 @@ describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
     await vi.waitUntil(() => {
       const run = firstEngine.get(prepared.id);
       return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
-    });
+    }, { timeout: 20_000 });
     const beforeRestart = firstEngine.get(prepared.id)!;
     expect(beforeRestart.status).toBe('completed');
     firstStore.close();

@@ -129,6 +129,30 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     }
   });
 
+  app.post('/api/runs/:id/reverify', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.reverify(id, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.post('/api/runs/:id/apply', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.apply(id, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
   // Ticket 13 AC2: publication is local-admin-only — never on app.ts's
   // remote or collaborator allowlists, and DurableWorkEngine.publish() itself
   // refuses any collaborator actor through the same decidePolicy() every

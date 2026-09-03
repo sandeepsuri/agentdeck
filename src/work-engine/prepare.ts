@@ -35,6 +35,8 @@ export interface PreparedWorktree {
   baseCommit: string;
   worktreePath: string;
   branch: string;
+  /** Local branch the requested base named at preparation time; absent for a tag/SHA/detached HEAD. */
+  targetBranch?: string;
 }
 
 /**
@@ -59,8 +61,18 @@ export async function prepareRunWorktree(
   }
 
   let baseCommit: string;
+  let targetBranch: string | undefined;
   try {
     baseCommit = await git(repository.path, ['rev-parse', '--verify', `${requestedBaseReference}^{commit}`]);
+    const symbolicBase = await git(repository.path, ['rev-parse', '--symbolic-full-name', requestedBaseReference]);
+    if (symbolicBase.startsWith('refs/heads/')) targetBranch = symbolicBase.slice('refs/heads/'.length);
+    if (requestedBaseReference === 'HEAD') {
+      try {
+        targetBranch = await git(repository.path, ['symbolic-ref', '--short', 'HEAD']);
+      } catch {
+        targetBranch = undefined;
+      }
+    }
   } catch {
     throw new RunPreparationError(`Base reference does not exist locally: ${requestedBaseReference}`);
   }
@@ -85,5 +97,5 @@ export async function prepareRunWorktree(
     throw new RunPreparationError(`Failed to create worktree: ${detail}`);
   }
 
-  return { baseCommit, worktreePath, branch };
+  return { baseCommit, worktreePath, branch, ...(targetBranch ? { targetBranch } : {}) };
 }

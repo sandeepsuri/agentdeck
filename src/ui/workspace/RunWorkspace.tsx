@@ -21,6 +21,11 @@ function describeAttemptEvent(event: AttemptEvent): { label: string; detail?: st
     case 'attention-resolved': return { label: formatRunLabel(event.decision), detail: event.input };
     case 'commit-created': return { label: `Committed ${event.sha.slice(0, 12)}`, detail: `${event.branch} · ${event.changedFiles.length} file(s)` };
     case 'commit-failed': return { label: 'Commit failed', detail: event.reason };
+    case 'worktree-changes': return { label: `${event.changedFiles.length} changed file(s) observed`, detail: event.changedFiles.join(', ') };
+    case 'delivery-outcome': return {
+      label: `Delivery ${event.outcome}`,
+      detail: event.reason ?? (event.repositoryPath && event.branch ? `${event.repositoryPath} · ${event.branch}` : undefined),
+    };
     default: return { label: String(event) };
   }
 }
@@ -186,7 +191,12 @@ function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: 
  * it). Renders once the Attempt has settled, whatever the outcome —
  * AC7's honest non-success result gets the same treatment as a verified one.
  */
-function RunResultPanel({ run }: { run: WorkRun }) {
+function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
+  run: WorkRun;
+  onApply?: (run: WorkRun) => void;
+  onReverify?: (run: WorkRun) => void;
+  onViewChanges?: (run: WorkRun) => void;
+}) {
   const result = deriveRunResult(run);
   if (!result) return null;
   return (
@@ -204,6 +214,16 @@ function RunResultPanel({ run }: { run: WorkRun }) {
             <dd>
               <code>{result.commit.sha.slice(0, 12)}</code> on <code>{result.commit.branch}</code>
               {result.commit.signed && <span> · signed</span>}
+            </dd>
+          </div>
+        )}
+        {result.delivery && (
+          <div>
+            <dt>Repository delivery</dt>
+            <dd>
+              <strong>{formatRunLabel(result.delivery.outcome)}</strong>
+              {result.delivery.repositoryPath && <small>{result.delivery.repositoryPath}{result.delivery.branch ? ` · ${result.delivery.branch}` : ''}</small>}
+              {result.delivery.reason && <span>{result.delivery.reason}</span>}
             </dd>
           </div>
         )}
@@ -242,6 +262,11 @@ function RunResultPanel({ run }: { run: WorkRun }) {
         </div>
         {result.recoveryNotes && <div><dt>Recovery notes</dt><dd>{result.recoveryNotes}</dd></div>}
       </dl>
+      <div className="run-attention-actions">
+        {result.changedFiles.length > 0 && onViewChanges && <button className="button" onClick={() => onViewChanges(run)} type="button">View changes</button>}
+        {run.status === 'failed_verification' && onReverify && <button className="button button-primary" onClick={() => onReverify(run)} type="button">{run.verificationPolicy.state === 'missing' ? 'Recover result' : 'Retry verification'}</button>}
+        {result.commit && result.delivery?.outcome !== 'applied' && onApply && <button className="button button-primary" onClick={() => onApply(run)} type="button">Apply to repository</button>}
+      </div>
     </section>
   );
 }
@@ -250,6 +275,9 @@ interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
   onStart?: (run: WorkRun) => void;
+  onApply?: (run: WorkRun) => void;
+  onReverify?: (run: WorkRun) => void;
+  onViewChanges?: (run: WorkRun) => void;
   /** Ticket 07: routes an operator decision for run.pendingAttention through the one Work Engine policy path (App.tsx's resolveRunAttention → POST /api/runs/:id/attention/:attentionId/{approve,deny,input}). */
   onResolveAttention?: (run: WorkRun, attentionId: string, decision: AttentionDecisionInput) => void;
   /** Ticket 13: the admin's explicit publish authorization (App.tsx's publishRun → POST /api/runs/:id/publish). Absent means the action is not offered at all. */
@@ -259,13 +287,18 @@ interface Props {
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onResolveAttention, onPublish, structuredAttemptsEnabled = false,
+  run, onPrepare, onStart, onApply, onReverify, onViewChanges, onResolveAttention, onPublish,
+  structuredAttemptsEnabled = false,
 }: Props) {
   const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
-  const eligibleForCodexAttempt = preparation.state === 'ready' && envelope.state === 'ready'
-    && envelope.capabilityEnvelope.runtime === 'codex';
-  const canStart = structuredAttemptsEnabled && eligibleForCodexAttempt && attempt.state === 'idle' && Boolean(onStart);
+  // Both Codex and Claude have a real runtimes/*.ts Attempt adapter wired
+  // into the engine's default runtimeAdapters (engine.ts) — any other
+  // runtime preference is refused managed status before an envelope is ever
+  // built (buildRunEnvelope, envelope.ts), so 'ready' here always means a
+  // Run this section can actually start.
+  const eligibleForStructuredAttempt = preparation.state === 'ready' && envelope.state === 'ready';
+  const canStart = structuredAttemptsEnabled && eligibleForStructuredAttempt && attempt.state === 'idle' && Boolean(onStart);
   return (
     <article className="run-workspace">
       <header>
@@ -336,7 +369,7 @@ export function RunWorkspace({
           })()}
         </dl>
       </section>
-      {structuredAttemptsEnabled && eligibleForCodexAttempt && (
+      {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
         <section className="run-attempt">
           <h2>Attempt</h2>
           <dl className="run-intent-grid">
@@ -384,15 +417,15 @@ export function RunWorkspace({
             );
           })()}
           {attempt.state !== 'idle' && <AttemptReport events={attempt.events} />}
-          <RunResultPanel run={run} />
         </section>
       )}
+      <RunResultPanel onApply={onApply} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />
       {/*
        * Ticket 13: publication is independent of the structured-attempts
        * experimental panel above — it depends only on run.status and a
        * delivery commit (findDeliveryCommit, inside PublicationPanel
-       * itself), never on structuredAttemptsEnabled or the Codex-specific
-       * eligibleForCodexAttempt check, so the admin's only way to authorize
+       * itself), never on structuredAttemptsEnabled or the
+       * eligibleForStructuredAttempt check above, so the admin's only way to authorize
        * a publish isn't hidden behind an unrelated, default-off feature
        * flag.
        */}

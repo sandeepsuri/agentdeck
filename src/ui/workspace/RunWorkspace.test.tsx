@@ -160,7 +160,7 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     expect(html).not.toContain('Attempt state');
   });
 
-  it('stays hidden for a Run whose envelope runtime is not Codex, even with the gate on', () => {
+  it('offers a Start Attempt action for a Claude Run too — both runtimes have a real Attempt adapter', () => {
     const base = eligibleRun();
     if (base.envelope.state !== 'ready') throw new Error('expected a ready envelope');
     const run: WorkRun = {
@@ -168,9 +168,10 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
       envelope: { state: 'ready', capabilityEnvelope: { ...base.envelope.capabilityEnvelope, runtime: 'claude' } },
     };
 
-    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onStart: () => undefined }));
 
-    expect(html).not.toContain('Attempt state');
+    expect(html).toContain('Attempt state');
+    expect(html).toContain('Start Attempt');
   });
 
   it('offers a Start Attempt action for an idle, eligible Run once the gate is on', () => {
@@ -531,7 +532,7 @@ describe('RunWorkspace publication (ticket 13)', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run: verifiedRun(), onPublish: () => undefined }));
     expect(html).toContain('Nothing has been pushed');
     expect(html).toContain('Push branch');
-    expect(html).not.toContain('Run result');
+    expect(html).toContain('Run result');
   });
 
   it('offers a draft pull request when that is what the requester asked for', () => {

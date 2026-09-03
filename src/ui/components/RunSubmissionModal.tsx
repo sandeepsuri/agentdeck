@@ -3,7 +3,9 @@ import type {
   RuntimeReadinessReport, RuntimeReadinessStatus,
 } from '../../sessions/runtime-readiness-contract.js';
 import type { AgentType, Repo } from '../../types.js';
-import type { RequestedDeliveryResult, WorkRun, WorkSpec } from '../../work-engine/types.js';
+import type {
+  RepositoryVerificationPolicy, RequestedDeliveryResult, WorkRun, WorkSpec,
+} from '../../work-engine/types.js';
 import { apiFetch } from '../apiFetch.js';
 
 // Mirrors LaunchModal's READINESS_LABELS — kept local rather than shared
@@ -25,6 +27,18 @@ export async function submitWorkRun(spec: WorkSpec, fetcher: RunFetcher = apiFet
   const body = await response.json() as WorkRun & { error?: string };
   if (!response.ok) throw new Error(body.error ?? 'Run submission failed.');
   return body;
+}
+
+export async function saveRepositoryVerificationPolicy(
+  repoId: string,
+  policy: RepositoryVerificationPolicy,
+  fetcher: RunFetcher = apiFetch,
+): Promise<void> {
+  const response = await fetcher('/api/repos/verification-policy', {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repoId, policy }),
+  });
+  const body = await response.json() as { error?: string };
+  if (!response.ok) throw new Error(body.error ?? 'Saving the Repository verification policy failed.');
 }
 
 interface Props {
@@ -50,9 +64,10 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
   const [modelTurns, setModelTurns] = useState('50');
   const [verificationRequired, setVerificationRequired] = useState(true);
   const [verificationCommands, setVerificationCommands] = useState('npm test\nnpm run typecheck');
-  const [delivery, setDelivery] = useState<RequestedDeliveryResult>('local-commit');
+  const [delivery, setDelivery] = useState<RequestedDeliveryResult>('apply-to-repository');
   const [submitting, setSubmitting] = useState(false);
   const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadinessReport | null>(null);
+  const [verificationPolicyState, setVerificationPolicyState] = useState<'loading' | 'configured' | 'missing'>('loading');
 
   useEffect(() => {
     let disposed = false;
@@ -63,6 +78,30 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
     return () => { disposed = true; };
   }, []);
 
+  useEffect(() => {
+    if (!repositoryId) return;
+    let disposed = false;
+    setVerificationPolicyState('loading');
+    apiFetch(`/api/repos/verification-policy?repoId=${encodeURIComponent(repositoryId)}`)
+      .then(async (response) => {
+        const body = await response.json() as { policy?: RepositoryVerificationPolicy | null };
+        if (!response.ok) throw new Error('Could not load verification policy.');
+        return body.policy ?? null;
+      })
+      .then((policy) => {
+        if (disposed) return;
+        setVerificationPolicyState(policy ? 'configured' : 'missing');
+        if (policy?.kind === 'required') {
+          setVerificationRequired(true);
+          setVerificationCommands(policy.gates.map((gate) => gate.command).join('\n'));
+        } else if (policy?.kind === 'no-verification') {
+          setVerificationRequired(false);
+        }
+      })
+      .catch(() => { if (!disposed) setVerificationPolicyState('missing'); });
+    return () => { disposed = true; };
+  }, [repositoryId]);
+
   const toggleRuntime = (runtime: AgentType) => {
     setRuntimePreference((current) => current.includes(runtime)
       ? current.filter((item) => item !== runtime)
@@ -72,6 +111,13 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!repository) return onError('Choose a repository before submitting work.');
+    const commands = lines(verificationCommands);
+    if (verificationRequired && commands.length === 0) {
+      return onError('Add at least one verification command or explicitly allow unverified work.');
+    }
+    const repositoryPolicy: RepositoryVerificationPolicy = verificationRequired
+      ? { kind: 'required', gates: commands.map((command) => ({ name: command, command })) }
+      : { kind: 'no-verification' };
     const spec: WorkSpec = {
       objective,
       acceptanceCriteria: lines(acceptanceCriteria),
@@ -82,11 +128,15 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
         maxWallClockMs: Number(wallClockMinutes) * 60_000,
         maxModelTurns: Number(modelTurns),
       },
-      verificationIntent: { required: verificationRequired, commands: lines(verificationCommands) },
+      // Required Repository gates are stored outside the worktree so the
+      // runtime cannot rewrite them. This Run adds no duplicate supplemental
+      // gates of its own.
+      verificationIntent: { required: false, commands: [] },
       requestedDeliveryResult: delivery,
     };
     setSubmitting(true);
     try {
+      await saveRepositoryVerificationPolicy(repository.id, repositoryPolicy);
       onSubmitted(await submitWorkRun(spec));
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -121,8 +171,14 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
             );
           })}</div></fieldset>
           <fieldset><legend>Budget</legend><div className="run-form-grid"><label>Wall-clock minutes<input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} required type="number" value={wallClockMinutes} /></label><label>Model turns<input min="1" onChange={(event) => setModelTurns(event.target.value)} required type="number" value={modelTurns} /></label></div></fieldset>
-          <fieldset><legend>Verification intent</legend><label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Verification is required</label><label>Commands<textarea onChange={(event) => setVerificationCommands(event.target.value)} value={verificationCommands} /></label></fieldset>
-          <label>Requested delivery result<select onChange={(event) => setDelivery(event.target.value as RequestedDeliveryResult)} value={delivery}><option value="working-tree">Working tree</option><option value="local-commit">Local commit</option><option value="pull-request">Pull request</option></select></label>
+          <fieldset>
+            <legend>Repository verification policy</legend>
+            <label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Require these commands to pass before delivery</label>
+            <label>Commands<textarea disabled={!verificationRequired} onChange={(event) => setVerificationCommands(event.target.value)} value={verificationCommands} /></label>
+            <small>{verificationPolicyState === 'loading' ? 'Loading saved policy…' : verificationPolicyState === 'configured' ? 'Saved for this Repository. Submitting updates it.' : 'Not configured yet. Submitting will save this policy before the Run starts.'}</small>
+            {!verificationRequired && <small>This Run will be marked unverified, but its requested local result can still be delivered.</small>}
+          </fieldset>
+          <label>Requested delivery result<select onChange={(event) => setDelivery(event.target.value as RequestedDeliveryResult)} value={delivery}><option value="apply-to-repository">Apply to repository (recommended)</option><option value="local-commit">Create run branch and commit</option><option value="pull-request">Open draft pull request</option><option value="working-tree">Keep in AgentDeck for review</option></select></label>
           <footer><button className="button" onClick={onClose} type="button">Cancel</button><button className="button button-primary" disabled={submitting || runtimePreference.length === 0 || repos.length === 0} type="submit">{submitting ? 'Submitting…' : 'Queue run'}</button></footer>
         </form>
       </section>

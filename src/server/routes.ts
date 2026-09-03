@@ -25,7 +25,7 @@ import type { AgentType, LaunchSpec } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
-import type { WorkEngine } from '../work-engine/types.js';
+import type { RepositoryVerificationPolicy, WorkEngine } from '../work-engine/types.js';
 import type { CollaboratorService } from '../collaborators/service.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -373,6 +373,55 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     } catch {
       return scopeRepos(ctx.store.listRepos(), req);
     }
+  });
+
+  // Repository-owned verification is configured by the local admin before
+  // a Run can consume model time. These routes are intentionally absent from
+  // both remote allowlists in app.ts.
+  app.get('/api/repos/verification-policy', async (req, reply) => {
+    if (!ctx.store) return reply.code(503).send({ error: 'repository storage is unavailable' });
+    const { repoId } = req.query as { repoId?: unknown };
+    if (typeof repoId !== 'string' || !ctx.store.listRepos().some((repo) => repo.id === repoId)) {
+      return reply.code(404).send({ error: 'no such repository' });
+    }
+    return { policy: ctx.store.getRepositoryVerificationPolicy(repoId) ?? null };
+  });
+
+  app.put('/api/repos/verification-policy', async (req, reply) => {
+    if (!ctx.store) return reply.code(503).send({ error: 'repository storage is unavailable' });
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return reply.code(400).send({ error: 'body must be a JSON object' });
+    }
+    const { repoId, policy } = req.body as { repoId?: unknown; policy?: unknown };
+    if (typeof repoId !== 'string' || !ctx.store.listRepos().some((repo) => repo.id === repoId)) {
+      return reply.code(404).send({ error: 'no such repository' });
+    }
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+      return reply.code(400).send({ error: 'policy must be required gates or an explicit no-verification declaration' });
+    }
+    const candidate = policy as { kind?: unknown; gates?: unknown };
+    let parsed: RepositoryVerificationPolicy;
+    if (candidate.kind === 'no-verification') {
+      parsed = { kind: 'no-verification' };
+    } else if (candidate.kind === 'required' && Array.isArray(candidate.gates) && candidate.gates.length > 0
+      && candidate.gates.length <= 100 && candidate.gates.every((gate) => {
+        if (!gate || typeof gate !== 'object') return false;
+        const { name, command } = gate as { name?: unknown; command?: unknown };
+        return typeof name === 'string' && name.trim().length > 0 && name.length <= 200
+          && typeof command === 'string' && command.trim().length > 0 && command.length <= 4096;
+      })) {
+      parsed = {
+        kind: 'required',
+        gates: candidate.gates.map((gate) => {
+          const { name, command } = gate as { name: string; command: string };
+          return { name: name.trim(), command: command.trim() };
+        }),
+      };
+    } else {
+      return reply.code(400).send({ error: 'required verification must include at least one valid gate' });
+    }
+    ctx.store.setRepositoryVerificationPolicy(repoId, parsed);
+    return { policy: parsed };
   });
 
   app.post('/api/launch/preflight', async (req, reply) => {

@@ -45,19 +45,21 @@ export function projectAttemptState(
 ): AttemptState {
   if (!record) return { state: 'idle' };
   const { runtime, startedAt } = record;
-  const last = events.at(-1);
-  if (last?.kind === 'failure') {
+  const terminal = [...events].reverse().find((event) => (
+    event.kind === 'failure' || event.kind === 'budget-exceeded' || event.kind === 'verification-outcome'
+  ));
+  if (terminal?.kind === 'failure') {
     return {
-      state: 'failed', runtime, startedAt, events, failedAt: last.at, reason: last.reason,
+      state: 'failed', runtime, startedAt, events, failedAt: terminal.at, reason: terminal.reason,
     };
   }
-  if (last?.kind === 'budget-exceeded') {
+  if (terminal?.kind === 'budget-exceeded') {
     return {
-      state: 'failed', runtime, startedAt, events, failedAt: last.at, reason: describeBudgetExceeded(last),
+      state: 'failed', runtime, startedAt, events, failedAt: terminal.at, reason: describeBudgetExceeded(terminal),
     };
   }
-  if (last?.kind === 'verification-outcome') {
-    const completedAt = [...events].reverse().find((event) => event.kind === 'completion')?.at ?? last.at;
+  if (terminal?.kind === 'verification-outcome') {
+    const completedAt = [...events].reverse().find((event) => event.kind === 'completion')?.at ?? terminal.at;
     return {
       state: 'completed', runtime, startedAt, events, completedAt,
     };
@@ -168,10 +170,8 @@ export function deriveRunStatus(
     return attempt.events.at(-1)?.kind === 'budget-exceeded' ? 'failed_budget' : 'failed';
   }
   if (attempt.state === 'completed') {
-    const outcome = attempt.events.at(-1);
-    // projectAttemptState only ever freezes 'completed' from a trailing
-    // verification-outcome event — see its own doc comment.
-    if (outcome?.kind !== 'verification-outcome') throw new Error('expected a trailing verification-outcome event');
+    const outcome = [...attempt.events].reverse().find((event) => event.kind === 'verification-outcome');
+    if (!outcome || outcome.kind !== 'verification-outcome') throw new Error('expected a verification-outcome event');
     return VERIFICATION_OUTCOME_STATUS[outcome.outcome];
   }
   if (rawStatus === 'cancelled') return 'cancelled';

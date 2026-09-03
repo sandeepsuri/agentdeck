@@ -7,6 +7,7 @@ import type { AgentType, Task } from '../types.js';
 import { systemClock } from './clock.js';
 import type { Clock, TimerHandle } from './clock.js';
 import { buildCommitMessage, createLocalCommit } from './commit.js';
+import { applyRunCommit, observeRunChanges } from './delivery.js';
 import { buildAttemptEventEnvelope } from './durable-events.js';
 import { buildRunEnvelope } from './envelope.js';
 import { prepareRunWorktree, RunPreparationError } from './prepare.js';
@@ -22,6 +23,7 @@ import {
 import type { RunPublisher } from './publication.js';
 import { describeUnrecoverableAttempt } from './recovery.js';
 import { findDeliveryCommit } from './run-result.js';
+import { createClaudeAttemptAdapter } from './runtimes/claude.js';
 import { createCodexAttemptAdapter } from './runtimes/codex.js';
 import {
   buildRepairObjective, createShellVerificationGateRunner, freezeVerificationPolicy, MAX_VERIFICATION_REPAIR_ATTEMPTS,
@@ -156,6 +158,7 @@ function validateWorkSpec(input: WorkSpec): void {
     throw new InvalidWorkSpecError('verificationIntent.commands is required when verification is required');
   }
   if (spec.requestedDeliveryResult !== 'working-tree' && spec.requestedDeliveryResult !== 'local-commit'
+    && spec.requestedDeliveryResult !== 'apply-to-repository'
     && spec.requestedDeliveryResult !== 'pull-request') {
     throw new InvalidWorkSpecError('requestedDeliveryResult is invalid');
   }
@@ -275,7 +278,10 @@ export class DurableWorkEngine implements WorkEngine {
     private readonly store: Store,
     runsRoot: string = path.join(defaultDataDir(), 'runs'),
     runtimeReadiness: RuntimeReadinessSource = createRuntimeReadinessSource(),
-    runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = { codex: createCodexAttemptAdapter() },
+    runtimeAdapters: Partial<Record<AgentType, RuntimeAttemptAdapter>> = {
+      codex: createCodexAttemptAdapter(),
+      claude: createClaudeAttemptAdapter(),
+    },
     verificationGateRunner: VerificationGateRunner = createShellVerificationGateRunner(),
     clock: Clock = systemClock,
     principalSource: () => RunPrincipal = resolveLocalPrincipal,
@@ -392,6 +398,15 @@ export class DurableWorkEngine implements WorkEngine {
     // with themselves) — a repeated call, e.g. after a restart, is a no-op.
     if (existing.preparation.state === 'ready') return frozenCopy(existing);
 
+    const repositoryVerificationPolicy = this.store.getRepositoryVerificationPolicy(existing.spec.repository.id);
+    if (!repositoryVerificationPolicy) {
+      const error = 'No verification policy is configured for this Repository. Configure required gates or explicitly allow unverified work before starting the Run.';
+      this.store.updateRun(frozenCopy<WorkRun>({
+        ...existing, status: 'preparing', preparation: { state: 'failed', error },
+      }));
+      throw new RunPreparationError(error);
+    }
+
     this.store.updateRun(frozenCopy<WorkRun>({
       ...existing, status: 'preparing', preparation: { state: 'in_progress' },
     }));
@@ -414,7 +429,7 @@ export class DurableWorkEngine implements WorkEngine {
       // change to the approved policy (an admin edit, or a hostile one)
       // never reaches this already-frozen Run again.
       const verificationPolicy = freezeVerificationPolicy(
-        this.store.getRepositoryVerificationPolicy(existing.spec.repository.id),
+        repositoryVerificationPolicy,
       );
       const ready = frozenCopy<WorkRun>({
         ...existing, status: 'preparing', preparation: { state: 'ready', ...prepared }, envelope, verificationPolicy,
@@ -799,6 +814,20 @@ export class DurableWorkEngine implements WorkEngine {
     };
     const policy = base.verificationPolicy;
 
+    const snapshotChanges = async (scope: string): Promise<void> => {
+      try {
+        persistEvent({
+          kind: 'worktree-changes', sequence: 0, at: now(),
+          changedFiles: await observeRunChanges(envelope.profile.writableWorktree),
+        }, scope);
+      } catch {
+        // A missing/corrupt worktree is reported by the verification or
+        // delivery operation itself. A snapshot is evidence, not authority
+        // to replace the terminal outcome with a different failure.
+      }
+    };
+    await snapshotChanges('changes-initial');
+
     if (policy.state === 'missing') {
       // AC8: never silently treated as success — a Repository with no
       // approved policy at all cannot reach a verified outcome.
@@ -808,6 +837,10 @@ export class DurableWorkEngine implements WorkEngine {
       return;
     }
     if (policy.state === 'declared-unverified') {
+      // An explicit admin-approved no-verification policy is still allowed
+      // to deliver the requested local artifact; the Run remains honestly
+      // labelled completed_unverified and can never be published as verified.
+      await this.deliverLocalCommit(base, envelope, persistEvent);
       persistEvent({
         kind: 'verification-outcome', sequence: 0, at: now(), outcome: 'unverified', repairAttempts: 0,
       });
@@ -822,7 +855,9 @@ export class DurableWorkEngine implements WorkEngine {
 
     const gates: readonly { gate: { name: string; command: string }; required: boolean }[] = [
       ...policy.requiredGates.map((gate) => ({ gate, required: true as const })),
-      ...base.spec.verificationIntent.commands.map((command) => ({ gate: { name: command, command }, required: false as const })),
+      ...base.spec.verificationIntent.commands.map((command) => ({
+        gate: { name: command, command }, required: base.spec.verificationIntent.required,
+      })),
     ];
     // Ticket 09 AC1: the "Attempt count" / "repair cycles" hard limit —
     // configurable per Run, defaulting to ticket 08's original constant.
@@ -831,6 +866,7 @@ export class DurableWorkEngine implements WorkEngine {
     let repairAttempts = 0;
     for (;;) {
       if (await observeControls()) return;
+      if (repairAttempts > 0) await snapshotChanges(`changes-verify-${repairAttempts}`);
 
       // Ticket 08: each verification pass gets its own dedupe scope — a gate
       // that fails with byte-identical evidence on this pass and the last
@@ -856,7 +892,7 @@ export class DurableWorkEngine implements WorkEngine {
           exitCode: result.exitCode,
           evidence: result.evidence,
         }, passScope);
-        if (!result.passed) failing.push({ gate, required, result });
+        if (!result.passed && required) failing.push({ gate, required, result });
       }
 
       if (failing.length === 0) {
@@ -901,7 +937,7 @@ export class DurableWorkEngine implements WorkEngine {
    * reports an honest non-success result instead, with no commit attempted
    * at all). Creates a local commit with AgentDeck's own identity when the
    * requester actually wants one delivered (requestedDeliveryResult
-   * 'local-commit' or 'pull-request' — a later ticket's publish step still
+   * 'local-commit', 'apply-to-repository', or 'pull-request' — a later ticket's publish step still
    * needs a local commit to push from; only 'working-tree' skips this
    * entirely). Never pushes, never opens a pull request itself (AC6). A
    * durable 'commit-created' or 'commit-failed' event records how it went —
@@ -926,9 +962,130 @@ export class DurableWorkEngine implements WorkEngine {
         signed: result.signed,
         changedFiles: result.changedFiles,
       });
+      if (base.spec.requestedDeliveryResult === 'apply-to-repository') {
+        const applied = await applyRunCommit({
+          repositoryPath: base.spec.repository.path,
+          targetBranch: base.preparation.state === 'ready' ? base.preparation.targetBranch : undefined,
+          expectedBaseCommit: base.preparation.state === 'ready' ? base.preparation.baseCommit! : '',
+          commit: result.sha,
+        });
+        persistEvent({
+          kind: 'delivery-outcome', sequence: 0, at: new Date().toISOString(), outcome: applied.kind,
+          ...(applied.kind === 'applied'
+            ? { repositoryPath: applied.repositoryPath, branch: applied.branch }
+            : { reason: applied.reason }),
+        });
+      }
     } else if (result.kind === 'failed') {
       persistEvent({ kind: 'commit-failed', sequence: 0, at: new Date().toISOString(), reason: result.reason });
     }
+  }
+
+  /** Appends recovery/delivery evidence after an Attempt has already settled. */
+  private settledEventAppender(run: WorkRun, scope: string): (event: AttemptEvent) => AttemptEvent {
+    const attemptId = this.store.getAttemptId(run.id);
+    if (!attemptId || run.attempt.state === 'idle') throw new InvalidRunStateError('this Run has no Attempt event log');
+    let sequence = run.attempt.events.at(-1)?.sequence ?? -1;
+    return (event) => {
+      const sequenced = { ...event, sequence: ++sequence } as AttemptEvent;
+      const envelope = buildAttemptEventEnvelope({ runId: run.id, attemptId, event: sequenced, dedupeScope: scope });
+      this.store.appendAttemptEvent(envelope);
+      return sequenced;
+    };
+  }
+
+  async reverify(runId: string, actor?: RunActor): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
+    if (existing.status !== 'failed_verification' || existing.attempt.state !== 'completed') {
+      throw new InvalidRunStateError('only a Run that failed verification can retry verification');
+    }
+    if (existing.preparation.state !== 'ready' || existing.envelope.state !== 'ready') {
+      throw new InvalidRunStateError('this Run has no prepared worktree to verify');
+    }
+    const configuredPolicy = this.store.getRepositoryVerificationPolicy(existing.spec.repository.id);
+    // Legacy Runs could finish before submission-time policy configuration
+    // existed. An explicit local recovery action may adopt that frozen Run's
+    // own intent once, without rerunning the runtime or changing the
+    // Repository-wide policy behind the operator's back.
+    const recoveryPolicy = configuredPolicy ?? (existing.spec.verificationIntent.required
+      ? {
+        kind: 'required' as const,
+        gates: existing.spec.verificationIntent.commands.map((command) => ({ name: command, command })),
+      }
+      : { kind: 'no-verification' as const });
+    const policy = freezeVerificationPolicy(recoveryPolicy);
+    if (policy.state === 'missing' || policy.state === 'pending') throw new InvalidRunStateError('no verification policy is available');
+    const updated = frozenCopy<WorkRun>({ ...existing, verificationPolicy: policy });
+    this.store.updateRun(updated);
+    const persistEvent = this.settledEventAppender(updated, `reverify-${randomUUID()}`);
+    try {
+      persistEvent({
+        kind: 'worktree-changes', sequence: 0, at: new Date().toISOString(),
+        changedFiles: await observeRunChanges(existing.preparation.worktreePath!),
+      });
+    } catch { /* gate evidence below remains authoritative */ }
+
+    if (policy.state === 'declared-unverified') {
+      await this.deliverLocalCommit(updated, existing.envelope.capabilityEnvelope, persistEvent);
+      persistEvent({ kind: 'verification-outcome', sequence: 0, at: new Date().toISOString(), outcome: 'unverified', repairAttempts: 0 });
+    } else {
+      const gates = [
+        ...policy.requiredGates.map((gate) => ({ gate, required: true })),
+        ...(configuredPolicy ? existing.spec.verificationIntent.commands : []).map((command) => ({
+          gate: { name: command, command }, required: existing.spec.verificationIntent.required,
+        })),
+      ];
+      let requiredFailure = false;
+      for (const { gate, required } of gates) {
+        const result = await this.verificationGateRunner(gate, existing.preparation.worktreePath!);
+        persistEvent({
+          kind: 'verification-check', sequence: 0, at: new Date().toISOString(), gate: gate.name,
+          command: gate.command, required, passed: result.passed, exitCode: result.exitCode, evidence: result.evidence,
+        });
+        if (required && !result.passed) requiredFailure = true;
+      }
+      if (requiredFailure) {
+        persistEvent({ kind: 'verification-outcome', sequence: 0, at: new Date().toISOString(), outcome: 'failed_verification', repairAttempts: 0 });
+      } else {
+        await this.deliverLocalCommit(updated, existing.envelope.capabilityEnvelope, persistEvent);
+        persistEvent({ kind: 'verification-outcome', sequence: 0, at: new Date().toISOString(), outcome: 'verified', repairAttempts: 0 });
+      }
+    }
+    this.recordActivity(runId, 'verification-retried', resolvedActor);
+    return this.get(runId)!;
+  }
+
+  async apply(runId: string, actor?: RunActor): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
+    if (existing.attempt.state !== 'completed' || existing.preparation.state !== 'ready') {
+      throw new InvalidRunStateError('this Run has no completed result to apply');
+    }
+    const commit = findDeliveryCommit(existing);
+    if (!commit) throw new InvalidRunStateError('this Run produced no local commit to apply');
+    const previous = [...existing.attempt.events].reverse().find((event) => event.kind === 'delivery-outcome');
+    if (previous?.kind === 'delivery-outcome' && previous.outcome === 'applied') return frozenCopy(existing);
+
+    const result = await applyRunCommit({
+      repositoryPath: existing.spec.repository.path,
+      targetBranch: existing.preparation.targetBranch,
+      expectedBaseCommit: existing.preparation.baseCommit!,
+      commit: commit.sha,
+    });
+    const persistEvent = this.settledEventAppender(existing, `apply-${randomUUID()}`);
+    persistEvent({
+      kind: 'delivery-outcome', sequence: 0, at: new Date().toISOString(), outcome: result.kind,
+      ...(result.kind === 'applied'
+        ? { repositoryPath: result.repositoryPath, branch: result.branch }
+        : { reason: result.reason }),
+    });
+    this.recordActivity(runId, 'delivery-requested', resolvedActor);
+    return this.get(runId)!;
   }
 
   /** See WorkEngine.resolveAttention's doc comment. */

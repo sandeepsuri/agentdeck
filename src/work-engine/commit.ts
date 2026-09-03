@@ -13,6 +13,7 @@
 // work, and never carries raw signer output (which can echo key ids or
 // passphrase prompts) into the durable failure reason.
 import { git } from '../git/scan.js';
+import { observeRunChanges } from './delivery.js';
 import type { RunPrincipal } from './types.js';
 
 const COMMIT_TIMEOUT_MS = 30_000;
@@ -108,7 +109,12 @@ export async function createLocalCommit(worktreePath: string, message: string): 
   };
   const gitOptions = { env, timeoutMs: COMMIT_TIMEOUT_MS };
   try {
-    await git(worktreePath, ['add', '-A'], gitOptions);
+    // Stage exactly the task-authored paths observed by the delivery module.
+    // AgentDeck's own coordination directories operate the Run and are never
+    // allowed to leak into a delivery commit.
+    const taskChanges = await observeRunChanges(worktreePath);
+    if (taskChanges.length === 0) return { kind: 'no-changes' };
+    await git(worktreePath, ['add', '-A', '--', ...taskChanges], gitOptions);
     const staged = await git(worktreePath, ['diff', '--cached', '--name-only'], gitOptions);
     const changedFiles = staged.split('\n').map((line) => line.trim()).filter(Boolean);
     if (changedFiles.length === 0) return { kind: 'no-changes' };

@@ -90,6 +90,22 @@ describe('createLocalCommit', () => {
     expect([...result.changedFiles].sort()).toEqual(['README.md', 'added.txt']);
   });
 
+  it('never commits AgentDeck coordination metadata as task output', async () => {
+    const repo = tempDir();
+    initGitRepo(repo);
+    fs.mkdirSync(path.join(repo, '.agents'));
+    fs.writeFileSync(path.join(repo, '.agents', 'bus.jsonl'), '{}\n');
+    fs.writeFileSync(path.join(repo, 'result.txt'), 'task output\n');
+
+    const result = await createLocalCommit(repo, buildCommitMessage('Deliver result', 'run-metadata', principal));
+
+    expect(result.kind).toBe('committed');
+    if (result.kind !== 'committed') throw new Error('expected committed');
+    expect(result.changedFiles).toEqual(['result.txt']);
+    expect(git(repo, 'show', '--name-only', '--format=', 'HEAD')).toBe('result.txt');
+    expect(fs.existsSync(path.join(repo, '.agents', 'bus.jsonl'))).toBe(true);
+  });
+
   it('never touches the Repository the worktree was cloned from — only this one isolated worktree (AC8: Git boundary)', async () => {
     const origin = tempDir();
     initGitRepo(origin);

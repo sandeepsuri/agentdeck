@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { WorkRun, WorkSpec } from '../../work-engine/types.js';
-import { RunSubmissionModal, submitWorkRun } from './RunSubmissionModal.js';
+import { RunSubmissionModal, saveRepositoryVerificationPolicy, submitWorkRun } from './RunSubmissionModal.js';
 
 const spec: WorkSpec = {
   objective: 'Ship the feature',
@@ -56,7 +56,21 @@ describe('RunSubmissionModal', () => {
     expect(html).toContain('Requested base reference');
     expect(html).toContain('Runtime preference');
     expect(html).toContain('Budget');
-    expect(html).toContain('Verification intent');
+    expect(html).toContain('Repository verification policy');
     expect(html).toContain('Requested delivery result');
+    expect(html).toContain('Apply to repository (recommended)');
+  });
+});
+
+describe('saveRepositoryVerificationPolicy', () => {
+  it('saves required gates before a Run is submitted', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ policy: { kind: 'required' } }), { status: 200 }));
+    const policy = { kind: 'required' as const, gates: [{ name: 'tests', command: 'npm test' }] };
+
+    await saveRepositoryVerificationPolicy('/repos/example', policy, fetcher);
+
+    expect(fetcher).toHaveBeenCalledWith('/api/repos/verification-policy', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repoId: '/repos/example', policy }),
+    });
   });
 });

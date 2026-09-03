@@ -108,6 +108,10 @@ function setUp() {
   const store = new Store(':memory:');
   const repository: RunRepository = { id: repoPath, name: 'example', path: repoPath };
   store.upsertRepo(repository);
+  // Recovery is the subject of these tests. Explicitly allow unverified work
+  // so preparation reaches the crash points under test instead of being
+  // rejected by the repository-policy preflight.
+  store.setRepositoryVerificationPolicy(repoPath, { kind: 'no-verification' });
   const runsRoot = path.join(root, 'runs');
   return {
     store, repository, runsRoot,

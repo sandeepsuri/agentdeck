@@ -68,7 +68,8 @@ export interface Profile {
 }
 
 /** One row of the durable Run activity trail (ticket 12 AC2) — never mutated, only appended. Ticket 13 adds 'publish-authorized': the admin authorized an external effect for a verified result. */
-export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled' | 'publish-authorized';
+export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled'
+  | 'verification-retried' | 'delivery-requested' | 'publish-authorized';
 
 export interface RunActivity {
   readonly id: string;
@@ -104,7 +105,7 @@ export interface VerificationIntent {
   commands: string[];
 }
 
-export type RequestedDeliveryResult = 'working-tree' | 'local-commit' | 'pull-request';
+export type RequestedDeliveryResult = 'working-tree' | 'local-commit' | 'apply-to-repository' | 'pull-request';
 
 /** The complete user intent frozen when a durable Run is submitted. */
 export interface WorkSpec {
@@ -164,6 +165,8 @@ export interface RunPreparation {
   readonly baseCommit?: string;
   readonly worktreePath?: string;
   readonly branch?: string;
+  /** Local branch represented by requestedBaseReference when the worktree was prepared. */
+  readonly targetBranch?: string;
   /** Precise, recoverable explanation set only when state is 'failed'. */
   readonly error?: string;
 }
@@ -411,6 +414,21 @@ export interface AttemptCommitFailedEvent extends AttemptEventBase {
   readonly reason: string;
 }
 
+/** Task-authored paths observed before verification or delivery, independent of whether a commit can be created. */
+export interface AttemptWorktreeChangesEvent extends AttemptEventBase {
+  readonly kind: 'worktree-changes';
+  readonly changedFiles: readonly string[];
+}
+
+/** The result of explicitly asking AgentDeck to bring a Run commit into the selected Repository checkout. */
+export interface AttemptDeliveryOutcomeEvent extends AttemptEventBase {
+  readonly kind: 'delivery-outcome';
+  readonly outcome: 'applied' | 'blocked' | 'failed';
+  readonly repositoryPath?: string;
+  readonly branch?: string;
+  readonly reason?: string;
+}
+
 export type AttemptEvent =
   | AttemptLifecycleEvent
   | AttemptMessageEvent
@@ -426,8 +444,10 @@ export type AttemptEvent =
   | AttemptPauseRequestedEvent
   | AttemptPausedEvent
   | AttemptResumedEvent
+  | AttemptWorktreeChangesEvent
   | AttemptCommitCreatedEvent
-  | AttemptCommitFailedEvent;
+  | AttemptCommitFailedEvent
+  | AttemptDeliveryOutcomeEvent;
 
 /**
  * The one canonical field list per AttemptEvent kind — the single source of
@@ -451,8 +471,10 @@ export const ATTEMPT_EVENT_FIELDS: Readonly<Record<AttemptEvent['kind'], readonl
   'pause-requested': ['kind', 'sequence', 'at'],
   paused: ['kind', 'sequence', 'at'],
   resumed: ['kind', 'sequence', 'at'],
+  'worktree-changes': ['kind', 'sequence', 'at', 'changedFiles'],
   'commit-created': ['kind', 'sequence', 'at', 'sha', 'branch', 'signed', 'changedFiles'],
   'commit-failed': ['kind', 'sequence', 'at', 'reason'],
+  'delivery-outcome': ['kind', 'sequence', 'at', 'outcome', 'repositoryPath', 'branch', 'reason'],
 };
 
 interface AttemptRunBase {
@@ -616,6 +638,12 @@ export interface RunResult {
   readonly changedFiles: readonly string[];
   /** Absent whenever no local commit was created — an unverified/failed/cancelled outcome (AC7), a 'working-tree' delivery request, no changes to commit, or delivery itself failing (see recoveryNotes then). */
   readonly commit?: RunResultCommit;
+  readonly delivery?: {
+    readonly outcome: 'applied' | 'blocked' | 'failed';
+    readonly repositoryPath?: string;
+    readonly branch?: string;
+    readonly reason?: string;
+  };
   readonly verificationEvidence: readonly AttemptVerificationCheckEvent[];
   readonly approvals: readonly RunResultApproval[];
   readonly usage?: RunResultUsage;
@@ -689,6 +717,10 @@ export interface WorkEngine {
   pause(runId: string, actor?: RunActor): Promise<WorkRun>;
   /** Ticket 09 AC4: lets a paused (or pause-requested) Attempt proceed past the safe boundary it was waiting at. */
   resume(runId: string, actor?: RunActor): Promise<WorkRun>;
+  /** Re-runs the currently approved Repository gates against preserved work without invoking the runtime again. */
+  reverify(runId: string, actor?: RunActor): Promise<WorkRun>;
+  /** Safely attempts to fast-forward the selected Repository checkout to this Run's delivery commit. */
+  apply(runId: string, actor?: RunActor): Promise<WorkRun>;
   /** Ticket 12 AC2/AC5: the durable, append-only trail of every recorded action against this Run, oldest first — empty (not thrown) for an unknown Run id. */
   listActivity(runId: string): RunActivity[];
   /**

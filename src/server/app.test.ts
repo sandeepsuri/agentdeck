@@ -25,6 +25,43 @@ function makeApp(overrides: Partial<AppContext> = {}) {
   });
 }
 
+describe('Repository verification policy routes', () => {
+  let app: ReturnType<typeof Fastify>;
+  let store: Store;
+  afterEach(async () => { await app.close(); store.close(); });
+
+  it('lets the local admin configure and read required gates before a Run starts', async () => {
+    store = new Store(':memory:');
+    store.upsertRepo({ id: '/repos/example', name: 'example', path: '/repos/example' });
+    app = makeApp({ store });
+    const policy = { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] };
+
+    const saved = await app.inject({
+      method: 'PUT', url: '/api/repos/verification-policy', payload: { repoId: '/repos/example', policy },
+    });
+    const read = await app.inject({
+      method: 'GET', url: '/api/repos/verification-policy?repoId=%2Frepos%2Fexample',
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toEqual({ policy });
+  });
+
+  it('rejects empty required policies', async () => {
+    store = new Store(':memory:');
+    store.upsertRepo({ id: '/repos/example', name: 'example', path: '/repos/example' });
+    app = makeApp({ store });
+
+    const response = await app.inject({
+      method: 'PUT', url: '/api/repos/verification-policy',
+      payload: { repoId: '/repos/example', policy: { kind: 'required', gates: [] } },
+    });
+
+    expect(response.statusCode).toBe(400);
+  });
+});
+
 describe('host/origin/CSP agreement (ticket 05)', () => {
   let app: ReturnType<typeof Fastify>;
   afterEach(async () => { await app.close(); });
