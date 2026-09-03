@@ -661,3 +661,84 @@ describe('Run publications (ticket 13)', () => {
     expect(store.listIncompleteRunPublications().map((item) => item.runId).sort()).toEqual(['run-a', 'run-b']);
   });
 });
+
+describe('Store.deleteRun', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: 'Delete me', status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'completed',
+        spec: {
+          objective: 'Delete me',
+          acceptanceCriteria: ['It is deleted'],
+          repository,
+          requestedBaseReference: 'main',
+          runtimePreference: ['codex'],
+          budget: {},
+          verificationIntent: { required: false, commands: [] },
+          requestedDeliveryResult: 'working-tree',
+        },
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('removes the run row and every durable record scoped to it', () => {
+    createRun('run-1');
+    store.startAttempt({ id: 'attempt-1', runId: 'run-1', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-1',
+      attemptId: 'attempt-1',
+      event: { kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Working on it.' },
+    }));
+    store.appendRunActivity({
+      id: 'activity-1', runId: 'run-1', kind: 'submitted', principal: { id: 'local:test', displayName: 'test' }, at: '2026-09-01T00:00:00.000Z',
+    });
+    store.createRunPublication({
+      id: 'pub-1', runId: 'run-1', idempotencyKey: 'run:run-1:commit:abc123', target: 'push', commit: 'abc123',
+      branch: 'agentdeck/run/run-1', state: 'authorized', authorizedBy: { id: 'local:admin', displayName: 'admin' },
+      authorizedAt: '2026-09-02T00:00:00.000Z', updatedAt: '2026-09-02T00:00:00.000Z', executions: 0,
+    });
+
+    store.deleteRun('run-1');
+
+    expect(store.getRun('run-1')).toBeUndefined();
+    expect(store.listRuns()).toEqual([]);
+    expect(store.getAttemptId('run-1')).toBeUndefined();
+    expect(store.listRunActivity('run-1')).toEqual([]);
+    expect(store.getRunPublication('run-1')).toBeUndefined();
+    // The Task a Run points to is left alone — runs.task_id references
+    // tasks(id), not the other way around.
+    expect(store.getTask('task-run-1')).toBeDefined();
+  });
+
+  it('leaves an unrelated Run and its own durable records untouched', () => {
+    createRun('run-1');
+    createRun('run-2');
+    store.startAttempt({ id: 'attempt-2', runId: 'run-2', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-2',
+      attemptId: 'attempt-2',
+      event: { kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Still here.' },
+    }));
+
+    store.deleteRun('run-1');
+
+    expect(store.getRun('run-2')).toBeDefined();
+    expect(store.getRun('run-2')?.attempt).toMatchObject({ state: 'running' });
+  });
+
+  it('is a no-op for a run id that does not exist', () => {
+    expect(() => store.deleteRun('no-such-run')).not.toThrow();
+  });
+});

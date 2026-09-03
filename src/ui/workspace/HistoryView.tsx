@@ -7,6 +7,8 @@ interface Props {
   /** Ended managed sessions that have aged out of the rail (see history.ts). */
   sessions: Session[];
   repos: Repo[];
+  /** Permanently removes a session from history (App.tsx's deleteSession → DELETE /api/sessions/:id). Absent means the action is not offered at all. */
+  onDelete?: (session: Session) => void;
 }
 
 function formatDateTime(iso: string): string {
@@ -43,7 +45,7 @@ function HistoryScrollback({ sessionId }: { sessionId: string }) {
   return <pre className="history-scrollback-text">{state.scrollback}</pre>;
 }
 
-export function HistoryView({ sessions, repos }: Props) {
+export function HistoryView({ sessions, repos, onDelete }: Props) {
   const ordered = useMemo(
     () => [...sessions].sort((a, b) => new Date(b.endedAt ?? b.lastActivityAt).getTime() - new Date(a.endedAt ?? a.lastActivityAt).getTime()),
     [sessions],
@@ -71,16 +73,28 @@ export function HistoryView({ sessions, repos }: Props) {
       <aside className="history-list">
         <div className="sidebar-section-label"><span>Ended sessions</span><span>{ordered.length}</span></div>
         {ordered.map((session) => (
-          <button
-            className={`history-row${session.id === selectedId ? ' is-selected' : ''}`}
-            key={session.id}
-            onClick={() => setSelectedId(session.id)}
-            type="button"
-          >
-            <strong title={sessionLabel(session)}>{sessionLabel(session)}</strong>
-            <span>{repoDisplayName(session, repos)}{session.branch ? ` / ${session.branch}` : ''}</span>
-            <small>{session.endedAt ? formatTime(session.endedAt) : '—'}</small>
-          </button>
+          <div className={`history-row${session.id === selectedId ? ' is-selected' : ''}`} key={session.id}>
+            <button className="history-row-select" onClick={() => setSelectedId(session.id)} type="button">
+              <strong title={sessionLabel(session)}>{sessionLabel(session)}</strong>
+              <span>{repoDisplayName(session, repos)}{session.branch ? ` / ${session.branch}` : ''}</span>
+              <small>{session.endedAt ? formatTime(session.endedAt) : '—'}</small>
+            </button>
+            {onDelete && (
+              <button
+                aria-label="Delete session"
+                className="row-delete-button"
+                onClick={() => {
+                  if (window.confirm(`Delete "${sessionLabel(session)}" permanently? Its transcript and summary will be removed. This cannot be undone.`)) {
+                    onDelete(session);
+                  }
+                }}
+                title="Delete session"
+                type="button"
+              >
+                ×
+              </button>
+            )}
+          </div>
         ))}
       </aside>
       <div className="history-detail">

@@ -1,7 +1,7 @@
 import type { DiscoveryStatus, Repo, Session } from '../../types.js';
 import type { WorkRun } from '../../work-engine/types.js';
 import { SparkBars, StatusBadge, isEndedSession, sessionLabel } from './model.js';
-import { formatRunLabel } from './runModel.js';
+import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
 interface Props {
   sessions: Session[];
@@ -12,25 +12,45 @@ interface Props {
   discoveryStatus: DiscoveryStatus | null;
   onSelect: (session: Session) => void;
   onSelectRun?: (run: WorkRun) => void;
+  onDeleteRun?: (run: WorkRun) => void;
   onSubmitRun?: () => void;
   onLaunch: () => void;
   onRefreshDiscovery: () => void;
 }
 
-function RunRow({ run, selected, onSelect }: {
+function RunRow({ run, selected, onSelect, onDelete }: {
   run: WorkRun;
   selected: boolean;
   onSelect: () => void;
+  onDelete?: (run: WorkRun) => void;
 }) {
+  const canDelete = isTerminalRunStatus(run.status) && Boolean(onDelete);
   return (
-    <button className={`work-run-row${selected ? ' is-selected' : ''}`} onClick={onSelect} type="button">
-      <span className="work-run-glyph">RUN</span>
-      <span className="work-run-content">
-        <strong title={run.spec.objective}>{run.spec.objective}</strong>
-        <small>{run.spec.repository.name} · {run.spec.requestedBaseReference}</small>
-      </span>
-      <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
-    </button>
+    <div className={`work-run-row${selected ? ' is-selected' : ''}`}>
+      <button className="work-run-select" onClick={onSelect} type="button">
+        <span className="work-run-glyph">RUN</span>
+        <span className="work-run-content">
+          <strong title={run.spec.objective}>{run.spec.objective}</strong>
+          <small>{run.spec.repository.name} · {run.spec.requestedBaseReference}</small>
+        </span>
+        <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
+      </button>
+      {canDelete && (
+        <button
+          aria-label="Delete run"
+          className="row-delete-button"
+          onClick={() => {
+            if (window.confirm(`Delete this Run permanently? "${run.spec.objective}" and its full history will be removed. This cannot be undone.`)) {
+              onDelete?.(run);
+            }
+          }}
+          title="Delete run"
+          type="button"
+        >
+          ×
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -77,6 +97,7 @@ export function SessionSidebar({
   discoveryStatus,
   onSelect,
   onSelectRun,
+  onDeleteRun,
   onSubmitRun,
   onLaunch,
   onRefreshDiscovery,
@@ -102,6 +123,7 @@ export function SessionSidebar({
         {runs.map((run) => (
           <RunRow
             key={run.id}
+            onDelete={onDeleteRun}
             onSelect={() => onSelectRun?.(run)}
             run={run}
             selected={run.id === selectedRunId}

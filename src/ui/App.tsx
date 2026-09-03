@@ -448,6 +448,28 @@ export function App() {
     setRuns((current) => current.map((item) => item.id === body.id ? body : item));
   };
 
+  const deleteRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      setError(body.error ?? 'Deleting the Run failed.');
+      return;
+    }
+    setRuns((current) => current.filter((item) => item.id !== run.id));
+    setSelectedRunId((current) => current === run.id ? null : current);
+  };
+
+  const deleteSession = async (session: Session) => {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      setError(body.error ?? 'Deleting the session failed.');
+      return;
+    }
+    setSessions((current) => current.filter((item) => item.id !== session.id));
+    setSelectedId((current) => current === session.id ? null : current);
+  };
+
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
     const body = await response.json() as Session & { error?: string };
@@ -578,14 +600,14 @@ export function App() {
       {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
 
       <div className="app-body">
-        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
+        <SessionSidebar discoveryStatus={discoveryStatus} onDeleteRun={(run) => void deleteRun(run)} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
           <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
-          <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView repos={repos} sessions={historySessions} /></div>
+          <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`}>
           <button

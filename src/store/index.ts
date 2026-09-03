@@ -405,6 +405,25 @@ export class Store implements CollaboratorStore {
       .map((row) => this.attachAttempt(rowToRun(row)));
   }
 
+  /**
+   * Permanently removes a Run and every durable record scoped to it —
+   * its Attempt event log, activity trail, and publication intent. All
+   * FK-referencing tables (`foreign_keys = ON`, see the constructor) are
+   * deleted first, in one transaction, so a crash mid-delete never leaves
+   * an orphaned child row behind. The Task a Run points to is left alone —
+   * runs.task_id references tasks(id), not the other way around, so
+   * nothing else depends on this Run existing.
+   */
+  deleteRun(id: string): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM attempt_events WHERE attempt_id IN (SELECT id FROM attempts WHERE run_id = ?)').run(id);
+      this.db.prepare('DELETE FROM attempts WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM run_activity WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM run_publications WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM runs WHERE id = ?').run(id);
+    })();
+  }
+
   /** Updates a Run's status, preparation, envelope, and verification policy. The frozen spec never changes; Attempt state is durable elsewhere (see appendAttemptEvent). */
   updateRun(run: Pick<WorkRun, 'id' | 'status' | 'preparation' | 'envelope' | 'verificationPolicy'>): void {
     this.db.prepare(

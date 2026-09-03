@@ -63,4 +63,42 @@ describe('SessionSidebar', () => {
     expect(html).toContain('New run');
     expect(html).toContain('New session');
   });
+
+  it('offers no delete affordance for a Run still in progress, even with onDeleteRun provided', () => {
+    const html = renderToStaticMarkup(createElement(SessionSidebar, {
+      discoveryStatus: null,
+      onDeleteRun: () => undefined,
+      onLaunch: () => undefined,
+      onRefreshDiscovery: () => undefined,
+      onSelect: () => undefined,
+      onSelectRun: () => undefined,
+      onSubmitRun: () => undefined,
+      repos: [],
+      runs: [run], // status: 'queued' — never terminal
+      selectedId: null,
+      selectedRunId: null,
+      sessions: [],
+    }));
+
+    expect(html).not.toContain('Delete run');
+  });
+
+  it('offers a delete affordance once a Run reaches a terminal status, with onDeleteRun provided', () => {
+    const html = renderToStaticMarkup(createElement(SessionSidebar, {
+      discoveryStatus: null,
+      onDeleteRun: () => undefined,
+      onLaunch: () => undefined,
+      onRefreshDiscovery: () => undefined,
+      onSelect: () => undefined,
+      onSelectRun: () => undefined,
+      onSubmitRun: () => undefined,
+      repos: [],
+      runs: [{ ...run, status: 'completed' }],
+      selectedId: null,
+      selectedRunId: null,
+      sessions: [],
+    }));
+
+    expect(html).toContain('Delete run');
+  });
 });

@@ -718,6 +718,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return { ok: true }; // the row is kept, marked ended
   });
 
+  // Permanently removes a session from history. Managed-only (external
+  // sessions have no stored transcript of AgentDeck's own to clean up, and
+  // reappear on the next discovery poll regardless) and live-only-blocked —
+  // an active session cannot be deleted out from under itself.
+  app.delete('/api/sessions/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'only managed sessions can be deleted' });
+    }
+    if (manager.isLive(id)) return reply.code(400).send({ error: 'session is still running' });
+    try {
+      await manager.deleteSession(id);
+      return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // Ticket 09: reopening an ended managed session. There is no WS path for
   // this — attach/replay only serve a live transcript snapshot, and an
   // ended session has no live PTY behind it — so a REST read of the
