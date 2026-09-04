@@ -334,8 +334,20 @@ export class DurableWorkEngine implements WorkEngine {
       });
       const profile = this.store.getProfile(input.profileId!);
       if (!profile) throw new InvalidWorkSpecError(`no such Profile: ${input.profileId}`);
+      // The Repository is resolved from the store by id for the same reason
+      // the Profile-controlled fields above are: it is not the submitter's
+      // to assert. A collaborator is never told a Repository's absolute path
+      // (server/routes.ts's scopeRepos projects it away, and
+      // server/collaborator-run-view.ts drops it from every Run), so they
+      // could not supply a matching one even in good faith -- and the
+      // known-Repository check below would reject the request. Resolving it
+      // here means the frozen spec still names the real Repository, without
+      // that path ever having made a round trip through a device.
+      const repository = this.store.listRepos().find((known) => known.id === input.repository?.id);
+      if (!repository) throw new InvalidWorkSpecError('repository is not known to AgentDeck');
       input2 = {
         ...input,
+        repository: { id: repository.id, name: repository.name, path: repository.path },
         runtimePreference: [...profile.runtimePreference],
         budget: { ...profile.budget },
         verificationIntent: { ...profile.verificationIntent, commands: [...profile.verificationIntent.commands] },

@@ -251,6 +251,9 @@ export type RunEnvelopeState =
 /** An exact token count, or 'unknown' when the runtime did not report one — never coerced to zero. */
 export type AttemptUsageAmount = number | 'unknown';
 
+/** How a narrated Attempt step stands. Defined here rather than in attempt-narrative.ts so the Collaborator projection shapes below can name it without importing that module back. */
+export type ActivityStatus = 'started' | 'completed' | 'failed';
+
 interface AttemptEventBase {
   /** Strictly increasing within one Attempt, starting at 0 — the ordering contract every adapter must honor. */
   readonly sequence: number;
@@ -652,6 +655,83 @@ export interface RunResult {
   readonly recoveryNotes?: string;
   /** Ticket 13 AC4: the admin-authorized publication of this result, whatever state it reached — absent until one is authorized. */
   readonly publication?: RunPublication;
+}
+
+// ---------------------------------------------------------------------------
+// The Collaborator-safe view of a Run.
+//
+// These shapes live here, beside WorkRun itself, for the same reason Profile
+// and WorkSpec do: both the server that produces them and the UI that renders
+// them need them, and src/types.ts (the UI's other shared-shape home) is
+// deliberately import-free and could not name RunStatus or RunResultApproval
+// without duplicating them. The projection LOGIC — what is dropped and why —
+// is not here: it is server/collaborator-run-view.ts, which is the only place
+// one of these is ever constructed.
+// ---------------------------------------------------------------------------
+
+/** One narrated step, without `detail` — that field is the raw command a runtime ran. */
+export interface CollaboratorRunStep {
+  readonly label: string;
+  readonly status: ActivityStatus;
+  readonly sequence: number;
+}
+
+export interface CollaboratorRunNarrative {
+  readonly answer?: string;
+  readonly steps: readonly CollaboratorRunStep[];
+  /** True when the Attempt produced more steps than a response carries; the newest are kept. */
+  readonly stepsTruncated: boolean;
+  readonly outcome?: { readonly kind: 'success' | 'no-changes' | 'failure'; readonly detail?: string };
+  readonly usage?: RunResultUsage;
+}
+
+/** A Verification gate's verdict, without the command that produced it or its raw output. */
+export interface CollaboratorRunGate {
+  readonly gate: string;
+  readonly required: boolean;
+  readonly passed: boolean;
+}
+
+export interface CollaboratorRunResult {
+  readonly outcome: RunStatus;
+  /** Repository-relative already — see work-engine/delivery.ts's observeRunChanges. */
+  readonly changedFiles: readonly string[];
+  readonly commit?: RunResultCommit;
+  /** `repositoryPath` dropped: it is the operator's absolute checkout location. */
+  readonly delivery?: {
+    readonly outcome: 'applied' | 'blocked' | 'failed';
+    readonly branch?: string;
+    readonly reason?: string;
+  };
+  readonly verification: readonly CollaboratorRunGate[];
+  readonly approvals: readonly RunResultApproval[];
+  readonly usage?: RunResultUsage;
+  readonly recoveryNotes?: string;
+}
+
+/** A row in a Repository's Run feed. */
+export interface CollaboratorRunSummary {
+  readonly id: string;
+  readonly status: RunStatus;
+  readonly objective: string;
+  readonly acceptanceCriteria: readonly string[];
+  /** Never `path`. */
+  readonly repository: { readonly id: string; readonly name: string };
+  readonly submittedAt: string;
+  /** Display name only — never the Principal id. */
+  readonly requestedBy: string;
+  /** State only; the worktree path, base commit and branch are dropped, and `note` is re-authored for this reader. */
+  readonly preparation: { readonly state: RunPreparationState; readonly note?: string };
+  readonly attemptState: AttemptState['state'];
+  readonly pendingAttentionKind?: AttentionRequestKind;
+}
+
+export interface CollaboratorRunDetail extends CollaboratorRunSummary {
+  readonly requestedBaseReference: string;
+  readonly profileId?: string;
+  readonly narrative: CollaboratorRunNarrative;
+  readonly pendingAttention?: RunAttentionRequest;
+  readonly result?: CollaboratorRunResult;
 }
 
 /**

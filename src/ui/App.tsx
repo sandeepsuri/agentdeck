@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session } from '../types.js';
 import type {
-  AttentionDecisionInput, Profile, PublicationTarget, WorkRun,
+  AttentionDecisionInput, CollaboratorRunSummary, Profile, PublicationTarget, WorkRun,
 } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { listCollaboratorRuns } from './collaboratorRuns.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
@@ -122,6 +123,8 @@ export function App() {
   const [collaboratorPrincipal, setCollaboratorPrincipal] = useState<{ id: string; displayName: string } | null>(null);
   const [collaboratorRepos, setCollaboratorRepos] = useState<Repo[]>([]);
   const [collaboratorProfiles, setCollaboratorProfiles] = useState<Profile[]>([]);
+  /** Kept apart from `runs` above: a collaborator device receives the narrowed projection (server/collaborator-run-view.ts), not a WorkRun, and the desktop's deep-link/selection logic reads `runs` expecting the full shape. */
+  const [collaboratorRuns, setCollaboratorRuns] = useState<CollaboratorRunSummary[]>([]);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
@@ -193,6 +196,22 @@ export function App() {
     }
   }).catch(() => undefined), []);
   const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
+  const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then(setCollaboratorRuns).catch(() => undefined), []);
+  // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
+  // Repositories and Profiles — GET /api/repos and GET /api/profiles are
+  // already grant-filtered (and, for Repositories, narrowed) server-side, so
+  // this is the same shape refreshRepos would do for the desktop path, just
+  // scoped to when there's actually a collaborator Principal to fetch for.
+  // Polled rather than fetched once: the Repository drawer is now the
+  // collaborator's persistent navigation, so a grant revoked mid-session has
+  // to stop appearing in it.
+  const refreshCollaboratorGrants = useCallback(() => Promise.all([
+    apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).catch(() => []),
+    apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []),
+  ]).then(([grantedRepos, grantedProfiles]) => {
+    setCollaboratorRepos(grantedRepos);
+    setCollaboratorProfiles(grantedProfiles);
+  }), []);
   const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
   const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
   const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
@@ -208,14 +227,29 @@ export function App() {
     // deriveRunAttentionItems). Response validation above also makes the
     // brief pre-classification requests harmless if their 403s arrive late.
     if (connectionKind === 'remote') {
-      refreshRunAttention();
-      const background = setInterval(refreshRunAttention, 5000);
+      // A named collaborator device also polls its own Run list, and its
+      // grants alongside it. The `collaboratorPrincipal` guard is
+      // load-bearing, not cosmetic: GET /api/runs, /api/repos and
+      // /api/profiles are on isCollaboratorAllowedRoute ONLY, so the admin's
+      // own phone (the legacy shared token, no Principal) would 403 on all
+      // three every tick. Re-reading the grants each time is also how a
+      // revoked Repository stops appearing in the drawer mid-session —
+      // enforcement was always server-side, but the display used to go
+      // stale until reload.
+      const refreshCollaborator = () => {
+        refreshRunAttention();
+        if (!collaboratorPrincipal) return;
+        refreshCollaboratorRuns();
+        refreshCollaboratorGrants();
+      };
+      refreshCollaborator();
+      const background = setInterval(refreshCollaborator, collaboratorPrincipal ? 3000 : 5000);
       return () => { clearInterval(background); };
     }
     refreshRepos(); refreshRuns(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
     const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
+  }, [collaboratorPrincipal, connectionKind, refreshClaims, refreshCollaboratorGrants, refreshCollaboratorRuns, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     if (connectionKind === 'remote') return;
@@ -330,26 +364,6 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
-  // Repositories and Profiles — GET /api/repos and GET /api/profiles are
-  // already grant-filtered server-side (routes.ts/profile-routes.ts), so
-  // this is the same shape refreshRepos would do for the desktop path,
-  // just scoped to when there's actually a collaborator Principal to fetch
-  // for. Re-fetches only once on identifying as a collaborator device —
-  // grants rarely change mid-session, and the launch form re-opens fresh.
-  useEffect(() => {
-    if (!collaboratorPrincipal) return;
-    let cancelled = false;
-    Promise.all([
-      apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).catch(() => []),
-      apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []),
-    ]).then(([grantedRepos, grantedProfiles]) => {
-      if (cancelled) return;
-      setCollaboratorRepos(grantedRepos);
-      setCollaboratorProfiles(grantedProfiles);
-    });
-    return () => { cancelled = true; };
-  }, [collaboratorPrincipal]);
 
   const submitToken = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -566,8 +580,10 @@ export function App() {
           collaboratorPrincipal={collaboratorPrincipal}
           collaboratorProfiles={collaboratorProfiles}
           collaboratorRepos={collaboratorRepos}
+          collaboratorRuns={collaboratorRuns}
           onError={setError}
           onResolveRunAttention={resolveRunAttention}
+          onRunsStale={refreshCollaboratorRuns}
           onSelect={selectSession}
           runAttention={runAttention}
           session={selected}

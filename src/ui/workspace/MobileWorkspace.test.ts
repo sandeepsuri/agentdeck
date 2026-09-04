@@ -243,18 +243,33 @@ describe('MobileWorkspace (static render)', () => {
     expect(html).not.toContain('Message the agent');
   });
 
-  it('ticket 12 AC6: never offers "Launch a Run" for the ordinary admin phone (no collaboratorPrincipal)', () => {
+  // The dispatch itself. Everything above this point is the admin-phone tree,
+  // which a resolved collaborator device must never see: it is built around
+  // Sessions, and app.ts refuses that device GET /api/sessions outright.
+  it('renders the session tree for the ordinary admin phone (no collaboratorPrincipal)', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
     }));
-    expect(html).not.toContain('Launch a Run');
+    expect(html).toContain('Select a session');
+    expect(html).not.toContain('Your repositories');
   });
 
-  it('ticket 12 AC1/AC6: offers "Launch a Run" for a resolved collaborator device', () => {
+  it('renders the repo-scoped Collaborator workspace, never the session tree, for a resolved collaborator device', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
       collaboratorPrincipal: { id: 'collab-1', displayName: 'Alice' },
     }));
-    expect(html).toContain('Launch a Run');
+    expect(html).toContain('Your repositories');
+    expect(html).toContain('Signed in as Alice');
+    expect(html).not.toContain('Select a session');
+    expect(html).not.toContain('Managed sessions');
+  });
+
+  it('shows a collaborator device with no granted Repositories where to go, rather than an empty session drawer', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+      collaboratorPrincipal: { id: 'collab-1', displayName: 'Alice' },
+    }));
+    expect(html).toContain('No Repositories have been granted to you');
   });
 });

@@ -6,12 +6,12 @@
 // the same shape (see docs/specs/session-persistence-and-remote-access.md,
 // Stage 4 step 3, and src/sessions/live-reflow.ts for the server side).
 import { useEffect, useState } from 'react';
-import type { AgentType, Repo, RunAttentionItem, Session } from '../../types.js';
-import type { AttentionDecisionInput, Profile, WorkSpec } from '../../work-engine/types.js';
+import type { Repo, RunAttentionItem, Session } from '../../types.js';
+import type { AttentionDecisionInput, CollaboratorRunSummary, Profile } from '../../work-engine/types.js';
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
 import { apiFetch } from '../apiFetch.js';
+import { CollaboratorWorkspace } from './CollaboratorWorkspace.js';
 import { ControlKeys } from '../components/ControlKeys.js';
-import { lines, submitWorkRun } from '../components/RunSubmissionModal.js';
 import { STATUS_LABELS, isEndedSession, relativeTime, sessionLabel } from './model.js';
 
 interface Props {
@@ -29,6 +29,10 @@ interface Props {
   /** Ticket 12 AC1: this Principal's granted Repositories and Profiles (already server-filtered — GET /api/repos, GET /api/profiles). Empty by default so existing callers/tests need no change. */
   collaboratorRepos?: Repo[];
   collaboratorProfiles?: Profile[];
+  /** This Principal's granted Runs, already filtered and narrowed by the server (GET /api/runs). Only ever populated alongside collaboratorPrincipal. */
+  collaboratorRuns?: CollaboratorRunSummary[];
+  /** Asks App to refresh the Run list now rather than at the next poll — used the moment a request creates one. */
+  onRunsStale?: () => void;
 }
 
 /**
@@ -157,110 +161,38 @@ function SessionDrawer({ open, sessions, selectedId, onClose, onSelect }: {
 }
 
 /**
- * Ticket 12 AC1/AC6: a named collaborator's own "launch a Run" form —
- * scoped to exactly their granted Repositories and Profiles (both already
- * server-filtered before this ever renders). Reuses RunSubmissionModal's
- * submitWorkRun (same POST /api/runs, same apiFetch auth header) rather
- * than a parallel implementation. The runtime/budget/verification/delivery
- * fields on the submitted WorkSpec are filled from the selected Profile
- * purely so this form's own summary matches what will actually run — the
- * Work Engine overwrites them from the Profile server-side regardless (see
- * engine.ts's submit()), so nothing here could expand capabilities even if
- * it were tampered with in transit.
+ * The remote surface, which is two different things wearing one name.
+ *
+ * With no `collaboratorPrincipal` this is the admin's own phone on the legacy
+ * shared tailnet token: a session view, unchanged in every respect. With one,
+ * it is a named Collaborator, who cannot reach a Session at all (app.ts
+ * refuses them GET /api/sessions; ws.ts refuses them 'attach') and gets
+ * CollaboratorWorkspace's repo-scoped Run workspace instead.
+ *
+ * Dispatching here, before any session state exists, is what keeps the admin
+ * path provably untouched — the two trees share no hooks, so neither can
+ * regress the other.
  */
-function CollaboratorLaunchPanel({ principal, repos, profiles, onClose, onError }: {
-  principal: { id: string; displayName: string };
-  repos: Repo[];
-  profiles: Profile[];
-  onClose: () => void;
-  onError: (message: string) => void;
-}) {
-  const [objective, setObjective] = useState('');
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState('');
-  const [repositoryId, setRepositoryId] = useState(repos[0]?.id ?? '');
-  const [profileId, setProfileId] = useState(profiles[0]?.id ?? '');
-  const repository = repos.find((item) => item.id === repositoryId);
-  const profile = profiles.find((item) => item.id === profileId);
-  const [requestedBaseReference, setRequestedBaseReference] = useState(repository?.currentBranch ?? 'main');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!repository || !profile) return onError('Choose a Repository and a Profile before launching.');
-    const spec: WorkSpec = {
-      objective,
-      acceptanceCriteria: lines(acceptanceCriteria),
-      repository: { id: repository.id, name: repository.name, path: repository.path },
-      requestedBaseReference,
-      runtimePreference: [...profile.runtimePreference] as AgentType[],
-      budget: { ...profile.budget },
-      verificationIntent: { ...profile.verificationIntent },
-      requestedDeliveryResult: profile.requestedDeliveryResult,
-      profileId: profile.id,
-    };
-    setSubmitting(true);
-    try {
-      await submitWorkRun(spec);
-      setSubmitted(true);
-      setObjective('');
-      setAcceptanceCriteria('');
-    } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (repos.length === 0 || profiles.length === 0) {
+export function MobileWorkspace(props: Props) {
+  const { collaboratorPrincipal } = props;
+  if (collaboratorPrincipal) {
     return (
-      <section aria-label="Launch a Run" className="mobile-launch-panel" role="dialog">
-        <header><strong>Launch a Run</strong><button aria-label="Close" onClick={onClose} type="button">×</button></header>
-        <p className="mobile-launch-empty">
-          {repos.length === 0 ? 'No Repositories have been granted to you yet.' : 'No Profiles have been granted to you yet.'}
-          {' '}Ask the admin to grant access.
-        </p>
-      </section>
+      <CollaboratorWorkspace
+        onError={props.onError}
+        onResolveRunAttention={(runId, attentionId, decision) => props.onResolveRunAttention?.(runId, attentionId, decision)}
+        onRunsStale={props.onRunsStale ?? (() => undefined)}
+        principal={collaboratorPrincipal}
+        profiles={props.collaboratorProfiles ?? []}
+        repos={props.collaboratorRepos ?? []}
+        runs={props.collaboratorRuns ?? []}
+      />
     );
   }
-
-  return (
-    <section aria-label="Launch a Run" className="mobile-launch-panel" role="dialog">
-      <header><strong>Launch a Run as {principal.displayName}</strong><button aria-label="Close" onClick={onClose} type="button">×</button></header>
-      <form onSubmit={(event) => { void submit(event); }}>
-        <label>Objective<textarea onChange={(event) => setObjective(event.target.value)} required value={objective} /></label>
-        <label>Acceptance criteria<textarea onChange={(event) => setAcceptanceCriteria(event.target.value)} placeholder="One per line" required value={acceptanceCriteria} /></label>
-        <label>
-          Repository
-          <select
-            onChange={(event) => {
-              setRepositoryId(event.target.value);
-              const selected = repos.find((item) => item.id === event.target.value);
-              if (selected?.currentBranch) setRequestedBaseReference(selected.currentBranch);
-            }}
-            required
-            value={repositoryId}
-          >
-            {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
-          </select>
-        </label>
-        <label>
-          Profile
-          <select onChange={(event) => setProfileId(event.target.value)} required value={profileId}>
-            {profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </label>
-        <label>Base reference<input onChange={(event) => setRequestedBaseReference(event.target.value)} required value={requestedBaseReference} /></label>
-        {submitted && <p className="mobile-launch-success" role="status">Run queued.</p>}
-        <button className="is-primary" disabled={submitting} type="submit">{submitting ? 'Launching…' : 'Launch'}</button>
-      </form>
-    </section>
-  );
+  return <SessionWorkspace {...props} />;
 }
 
-export function MobileWorkspace({
+function SessionWorkspace({
   session, sessions, ws, wsReady, onSelect, onError, runAttention = [], onResolveRunAttention,
-  collaboratorPrincipal = null, collaboratorRepos = [], collaboratorProfiles = [],
 }: Props) {
   // Remote access deliberately covers managed PTYs only. The server filters
   // the list and update stream, while this last-mile filter prevents a stale
@@ -273,7 +205,6 @@ export function MobileWorkspace({
   const [sending, setSending] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [controlKeysOpen, setControlKeysOpen] = useState(false);
-  const [launchOpen, setLaunchOpen] = useState(false);
 
   useEffect(() => {
     setReflowText('');
@@ -332,20 +263,8 @@ export function MobileWorkspace({
               : 'Remote sessions'}
           </small>
         </span>
-        {collaboratorPrincipal
-          ? <button aria-label="Launch a Run" className="mobile-icon-button" onClick={() => setLaunchOpen(true)} type="button">+</button>
-          : <span aria-hidden="true" className="mobile-topbar-spacer" />}
+        <span aria-hidden="true" className="mobile-topbar-spacer" />
       </header>
-
-      {launchOpen && collaboratorPrincipal && (
-        <CollaboratorLaunchPanel
-          onClose={() => setLaunchOpen(false)}
-          onError={onError}
-          principal={collaboratorPrincipal}
-          profiles={collaboratorProfiles}
-          repos={collaboratorRepos}
-        />
-      )}
 
       {runAttention.length > 0 && (() => {
         const pending = runAttention[0]!;

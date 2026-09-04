@@ -1235,6 +1235,41 @@ describe('collaborator device WebSocket access (ticket 11)', () => {
 
     ws.close();
   });
+
+  it('a collaborator device receives no session_update or session_removed frame for a managed session (the same boundary attach draws, and the one app.ts draws by refusing it GET /api/sessions)', async () => {
+    const token = issueDeviceToken();
+    const collabWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+    const localWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws`, { headers: { host: `127.0.0.1:${collabPort}` } });
+    await Promise.all([collabWs, localWs].map((socket) => new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
+    })));
+
+    const collabFrames: ServerFrame[] = [];
+    const localFrames: ServerFrame[] = [];
+    collabWs.on('message', (raw) => collabFrames.push(JSON.parse(String(raw)) as ServerFrame));
+    localWs.on('message', (raw) => localFrames.push(JSON.parse(String(raw)) as ServerFrame));
+
+    // Launching a managed session produces session_update frames, and
+    // deleting it a session_removed — the exact pair a remote socket on the
+    // legacy shared token still receives.
+    const launched = await collabApp.inject({
+      method: 'POST', url: '/api/sessions', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(SPEC),
+    });
+    const { id } = launched.json() as { id: string };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await collabApp.inject({ method: 'DELETE', url: `/api/sessions/${id}` });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The local socket proves the frames were actually broadcast at all, so
+    // an empty collaborator list means "filtered", never "nothing happened".
+    expect(localFrames.some((f) => f.t === 'session_update' && f.session.id === id)).toBe(true);
+    expect(collabFrames.some((f) => f.t === 'session_update')).toBe(false);
+    expect(collabFrames.some((f) => f.t === 'session_removed')).toBe(false);
+
+    collabWs.close();
+    localWs.close();
+  });
 });
 
 describe('ticket 07: run_attention_resolve WS authorization — the same DurableWorkEngine.resolveAttention() REST reaches', () => {
