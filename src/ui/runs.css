@@ -54,6 +54,7 @@
 .run-attempt-answer p.is-empty { color: var(--text-muted); font-style: italic; }
 .run-attempt-steps { margin: 18px 0 0; }
 .run-attempt-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.run-attempt-steps .run-attempt-activity { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
 .run-detail-toggle { padding: 5px 9px; border: 1px solid var(--border-muted); border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 10px; cursor: pointer; }
 .run-detail-toggle:hover { background: var(--surface-hover); }
 .run-attempt-step { display: grid; grid-template-columns: 16px minmax(0,1fr); align-items: baseline; gap: 8px; padding: 6px 0; border: 0; background: none; }
