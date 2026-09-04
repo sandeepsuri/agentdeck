@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '../../types.js';
 import type { ServerFrame } from '../../protocol.js';
 import { ElapsedTime, StatusBadge, StatusLamp, sessionLabel } from './model.js';
@@ -30,21 +30,27 @@ function stripAnsi(value: string): string {
 }
 
 function TerminalPreview({ session, tail }: { session: Session; tail: string }) {
+  const previewRef = useRef<HTMLDivElement>(null);
   const lines = useMemo(() => stripAnsi(tail).split('\n').filter(Boolean).slice(-7), [tail]);
+
+  useEffect(() => {
+    const preview = previewRef.current;
+    if (preview) preview.scrollTop = preview.scrollHeight;
+  }, [tail]);
 
   if (session.origin !== 'managed') {
     return (
-      <div className="grid-terminal-preview">
+      <div aria-label="Activity log" className="grid-terminal-preview" role="log">
         <span className="preview-muted">External terminal preview is available in its host application.</span>
       </div>
     );
   }
 
   return (
-    <div className="grid-terminal-preview">
+    <div aria-label="Activity log" aria-live="polite" className="grid-terminal-preview" ref={previewRef} role="log">
       {lines.length === 0 && <span className="preview-muted">Waiting for terminal output…</span>}
-      {lines.map((line, index) => <span key={`${line}-${index}`}>{line}</span>)}
-      {session.status === 'waiting_input' && <strong>· waiting for input</strong>}
+      {lines.map((line, index) => <span className="preview-entry" key={`${line}-${index}`}>{line}</span>)}
+      {session.status === 'waiting_input' && <strong className="preview-attention">Waiting for input</strong>}
     </div>
   );
 }
@@ -85,9 +91,9 @@ export function GridView({ sessions, onOpen, ws }: { sessions: Session[]; onOpen
               <strong>{sessionLabel(session)}</strong>
               <StatusBadge status={session.status} />
             </header>
-            <div className="tile-chrome">
-              <span><i /><i /><i /></span>
-              <em>zsh — {session.agent}-worker · pid {session.pid ?? '—'}</em>
+            <div className="tile-activity-header">
+              <span className={session.status === 'starting' || session.status === 'working' || session.status === 'waiting_input' ? 'tile-live-dot is-active' : 'tile-live-dot'} />
+              <strong>Live activity</strong>
             </div>
             <TerminalPreview session={session} tail={(previews[session.id] ?? []).join('')} />
             <footer>
