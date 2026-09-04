@@ -174,6 +174,32 @@ describe('POST /api/collaborators/devices/:deviceId/revoke', () => {
   });
 });
 
+describe('DELETE /api/collaborators/:id', () => {
+  it('removes the collaborator so it no longer appears in the roster', async () => {
+    const { collaborators: service } = makeApp();
+    const { collaborator } = service.inviteCollaborator({ displayName: 'Alice' });
+    const response = await app.inject({ method: 'DELETE', url: `/api/collaborators/${collaborator.id}` });
+    expect(response.statusCode).toBe(204);
+    const list = await app.inject({ method: 'GET', url: '/api/collaborators' });
+    expect(list.json()).toEqual([]);
+  });
+
+  it('leaves other collaborators untouched', async () => {
+    const { collaborators: service } = makeApp();
+    const { collaborator: alice } = service.inviteCollaborator({ displayName: 'Alice' });
+    const { collaborator: bob } = service.inviteCollaborator({ displayName: 'Bob' });
+    await app.inject({ method: 'DELETE', url: `/api/collaborators/${alice.id}` });
+    const list = await app.inject({ method: 'GET', url: '/api/collaborators' });
+    expect((list.json() as { id: string }[]).map((c) => c.id)).toEqual([bob.id]);
+  });
+
+  it('404s an unknown collaborator id', async () => {
+    makeApp();
+    const response = await app.inject({ method: 'DELETE', url: '/api/collaborators/nope' });
+    expect(response.statusCode).toBe(404);
+  });
+});
+
 describe('GET /api/collaborators', () => {
   it('lists every collaborator with its devices, never a bearer secret', async () => {
     const { collaborators: service } = makeApp();

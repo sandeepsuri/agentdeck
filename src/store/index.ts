@@ -732,6 +732,15 @@ export class Store implements CollaboratorStore {
     this.db.prepare('UPDATE collaborator_devices SET revoked_at = ? WHERE id = ?').run(revokedAt, id);
   }
 
+  /** Hard delete: children first to satisfy the `REFERENCES collaborators(id)` FK (foreign_keys pragma is ON), then the collaborator row itself. Leaves every other collaborator and all repository/profile/run data untouched. */
+  removeCollaborator(id: string): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM collaborator_devices WHERE collaborator_id = ?').run(id);
+      this.db.prepare('DELETE FROM collaborator_invitations WHERE collaborator_id = ?').run(id);
+      this.db.prepare('DELETE FROM collaborators WHERE id = ?').run(id);
+    })();
+  }
+
   // -- profiles (ticket 12) --
   //
   // Immutable once created — no update method, only a new row — exactly

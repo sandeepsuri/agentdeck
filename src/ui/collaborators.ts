@@ -78,6 +78,12 @@ export async function revokeDevice(deviceId: string): Promise<DeviceCredential> 
   return responseJson(response);
 }
 
+/** Deletes the collaborator (and their devices/invitations) outright -- unlike revokeDevice, there's no body to parse: a 204 means it's gone. */
+export async function removeCollaborator(collaboratorId: string): Promise<void> {
+  const response = await apiFetch(`/api/collaborators/${collaboratorId}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(`request failed: ${response.status}`);
+}
+
 /** The authenticated collaborator identity a device credential resolves to (CONTEXT.md's Principal). */
 export interface CollaboratorPrincipal {
   id: string;

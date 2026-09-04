@@ -58,6 +58,15 @@ class FakeCollaboratorStore implements CollaboratorStore {
     const row = this.devices.get(id);
     if (row) row.revokedAt = revokedAt;
   }
+  removeCollaborator(id: string): void {
+    this.collaborators.delete(id);
+    for (const [deviceId, row] of this.devices) {
+      if (row.collaboratorId === id) this.devices.delete(deviceId);
+    }
+    for (const [invitationId, row] of this.invitations) {
+      if (row.collaboratorId === id) this.invitations.delete(invitationId);
+    }
+  }
 }
 
 function build(now = () => new Date('2026-01-01T00:00:00.000Z')) {
@@ -275,5 +284,41 @@ describe('CollaboratorService.updateGrants', () => {
   it('rejects an unknown collaborator', () => {
     const { service } = build();
     expect(() => service.updateGrants('nope', { repositoryIds: ['repo-1'] })).toThrow(CollaboratorNotFoundError);
+  });
+});
+
+describe('CollaboratorService.removeCollaborator', () => {
+  it('deletes the collaborator outright -- gone from the roster, not merely revoked', () => {
+    const { service, store } = build();
+    const { collaborator } = service.inviteCollaborator({ displayName: 'Alice' });
+    service.removeCollaborator(collaborator.id);
+    expect(store.getCollaborator(collaborator.id)).toBeUndefined();
+    expect(service.listCollaborators()).toEqual([]);
+  });
+
+  it('revokes every active device and notifies onRevoke listeners so a live session ends immediately', () => {
+    const { service } = build();
+    const { code } = service.inviteCollaborator({ displayName: 'Alice' });
+    const { token, device } = service.exchangeInvitation(code, 'phone');
+    const seen: string[] = [];
+    service.onRevoke((deviceId) => seen.push(deviceId));
+
+    service.removeCollaborator(device.collaboratorId);
+
+    expect(seen).toEqual([device.id]);
+    expect(service.resolveDevice(token)).toBeUndefined();
+  });
+
+  it('does not affect any other collaborator', () => {
+    const { service } = build();
+    const { collaborator: alice } = service.inviteCollaborator({ displayName: 'Alice' });
+    const { collaborator: bob } = service.inviteCollaborator({ displayName: 'Bob' });
+    service.removeCollaborator(alice.id);
+    expect(service.listCollaborators()).toEqual([bob]);
+  });
+
+  it('rejects an unknown collaborator id', () => {
+    const { service } = build();
+    expect(() => service.removeCollaborator('nope')).toThrow(CollaboratorNotFoundError);
   });
 });

@@ -96,6 +96,20 @@ export function registerCollaboratorRoutes(app: FastifyInstance, collaborators: 
     }
   });
 
+  // Unlike device revoke above, this deletes the collaborator (and their
+  // devices/invitations) outright, so they disappear from GET
+  // /api/collaborators immediately instead of lingering revoked.
+  app.delete('/api/collaborators/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      collaborators.removeCollaborator(id);
+      return reply.code(204).send();
+    } catch (error) {
+      if (error instanceof CollaboratorNotFoundError) return reply.code(404).send({ error: error.message });
+      throw error;
+    }
+  });
+
   // AC1: the one collaborator-facing route -- a brand-new device has no
   // bearer token yet, so this must work pre-authentication, the same
   // exemption app.ts already carves out for GET /api/connection.
