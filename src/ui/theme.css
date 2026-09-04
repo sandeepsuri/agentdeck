@@ -31,12 +31,21 @@
   --status-completed: #2563a8;
   --status-exited: #686b66;
   --status-error: #b4232d;
+  --status-running: #276f8f;
+  --status-reviewing: #6750a4;
+  --status-unverified: #7a5195;
+  --status-budget: #a34f12;
   --warning: #8a5a00;
 
+  --status-neutral-bg: #eceae4;
   --status-working-bg: #e1f3e8;
   --status-waiting-bg: #f4ead0;
   --status-error-bg: #f8e2e3;
   --status-starting-bg: #e3edf8;
+  --status-running-bg: #e2eff3;
+  --status-reviewing-bg: #eee9f7;
+  --status-unverified-bg: #f0e8f4;
+  --status-budget-bg: #f6e8dc;
   --diff-add-text: #146c43;
   --diff-add-bg: #e1f3e8;
   --diff-delete-text: #a61b27;
@@ -83,12 +92,21 @@
   --status-completed: #6ca8ff;
   --status-exited: #7c817c;
   --status-error: #f07178;
+  --status-running: #71bdd5;
+  --status-reviewing: #ad9add;
+  --status-unverified: #c397d3;
+  --status-budget: #e3a05f;
   --warning: #f5b94c;
 
+  --status-neutral-bg: rgba(124, 129, 124, 0.11);
   --status-working-bg: rgba(85, 217, 139, 0.11);
   --status-waiting-bg: rgba(245, 185, 76, 0.11);
   --status-error-bg: rgba(240, 113, 120, 0.11);
   --status-starting-bg: rgba(108, 168, 255, 0.11);
+  --status-running-bg: rgba(113, 189, 213, 0.11);
+  --status-reviewing-bg: rgba(173, 154, 221, 0.11);
+  --status-unverified-bg: rgba(195, 151, 211, 0.11);
+  --status-budget-bg: rgba(227, 160, 95, 0.11);
   --diff-add-text: #75e39d;
   --diff-add-bg: rgba(85, 217, 139, 0.11);
   --diff-delete-text: #f5969b;

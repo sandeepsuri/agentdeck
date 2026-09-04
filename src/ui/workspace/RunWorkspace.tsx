@@ -322,7 +322,7 @@ export function RunWorkspace({
   return (
     <article className="run-workspace">
       <header>
-        <span><small>Run {run.id}</small><h1>{run.spec.objective}</h1></span>
+        <span><small>Run {run.id}</small><h1 title={run.spec.objective}>{run.spec.objective}</h1></span>
         <span className="run-header-actions">
           <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
           {canDelete && (
