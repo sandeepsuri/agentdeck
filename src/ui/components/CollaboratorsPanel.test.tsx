@@ -132,6 +132,61 @@ describe('CollaboratorsPanel', () => {
     expect(host.textContent).toContain('phone — revoked');
   });
 
+  it('removes a collaborator from the roster after confirming', async () => {
+    let listCall = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        listCall += 1;
+        return jsonResponse(listCall === 1
+          ? [{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] }]
+          : []);
+      }
+      if (url === '/api/collaborators/c1' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('confirm', vi.fn(() => true));
+
+    const host = await mount();
+    expect(host.textContent).toContain('Alice');
+    const removeButton = host.querySelector('button[aria-label="Remove Alice"]') as HTMLButtonElement;
+
+    await act(async () => {
+      removeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(host.textContent).toContain('No collaborators yet.');
+  });
+
+  it('does not remove a collaborator when the confirmation is declined', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] }]);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('confirm', vi.fn(() => false));
+
+    const host = await mount();
+    const removeButton = host.querySelector('button[aria-label="Remove Alice"]') as HTMLButtonElement;
+
+    await act(async () => {
+      removeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/collaborators/c1', expect.objectContaining({ method: 'DELETE' }));
+    expect(host.textContent).toContain('Alice');
+  });
+
   it('offers a repository grant checkbox for every passed-in repo', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
     const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }];

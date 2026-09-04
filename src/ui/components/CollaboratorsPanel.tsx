@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { AgentType, Repo } from '../../types.js';
 import {
-  createProfile, inviteCollaborator, inviteExistingCollaborator, listCollaborators, listProfiles, revokeDevice,
-  type Collaborator,
+  createProfile, inviteCollaborator, inviteExistingCollaborator, listCollaborators, listProfiles, removeCollaborator,
+  revokeDevice, type Collaborator,
 } from '../collaborators.js';
 import type { Profile } from '../../work-engine/types.js';
 import { lines } from './RunSubmissionModal.js';
@@ -176,6 +176,17 @@ export function CollaboratorsPanel({ repos }: { repos: Repo[] }) {
     }
   };
 
+  const remove = async (collaboratorId: string, name: string) => {
+    if (!window.confirm(`Remove ${name}? They will immediately lose all access, and this cannot be undone.`)) return;
+    setError(null);
+    try {
+      await removeCollaborator(collaboratorId);
+      await refresh();
+    } catch {
+      setError('Unable to remove that collaborator.');
+    }
+  };
+
   return (
     <fieldset className="collaborators-panel">
       <legend>Collaborators</legend>
@@ -274,6 +285,14 @@ export function CollaboratorsPanel({ repos }: { repos: Repo[] }) {
                   </span>
                 </span>
                 <button className="button" onClick={() => void reinvite(collaborator.id, collaborator.displayName)} type="button">New device invitation</button>
+                <button
+                  aria-label={`Remove ${collaborator.displayName}`}
+                  className="text-button danger-button"
+                  onClick={() => void remove(collaborator.id, collaborator.displayName)}
+                  type="button"
+                >
+                  Remove
+                </button>
               </div>
               <ul className="collaborators-devices">
                 {collaborator.devices.map((device) => (

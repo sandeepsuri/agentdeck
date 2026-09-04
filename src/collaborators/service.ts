@@ -63,6 +63,7 @@ export interface CollaboratorStore {
   getDevice(id: string): DeviceRow | undefined;
   listDevices(collaboratorId?: string): DeviceRow[];
   revokeDevice(id: string, revokedAt: string): void;
+  removeCollaborator(id: string): void;
 }
 
 function sha256Hex(value: string): string {
@@ -249,5 +250,25 @@ export class CollaboratorService {
       for (const listener of this.revokeListeners) listener(deviceId);
     }
     return toDevice(this.store.getDevice(deviceId)!);
+  }
+
+  /**
+   * Removes a collaborator (and their invitations/devices) entirely, so
+   * they immediately disappear from the roster rather than lingering
+   * revoked like a device does. Fires the same onRevoke hook as
+   * revokeDevice for every still-active device first, so ws.ts kills any
+   * open WebSocket right now -- access ends the instant this returns, not
+   * on that device's next request. Scoped to exactly this collaborator;
+   * every other collaborator and all repository/profile/run data is
+   * untouched.
+   */
+  removeCollaborator(collaboratorId: string): void {
+    if (!this.store.getCollaborator(collaboratorId)) throw new CollaboratorNotFoundError();
+    for (const device of this.store.listDevices(collaboratorId)) {
+      if (device.revokedAt === undefined) {
+        for (const listener of this.revokeListeners) listener(device.id);
+      }
+    }
+    this.store.removeCollaborator(collaboratorId);
   }
 }
