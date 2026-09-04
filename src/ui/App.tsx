@@ -12,7 +12,7 @@ import { LaunchModal } from './components/LaunchModal.js';
 import { RunSubmissionModal } from './components/RunSubmissionModal.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
-import { type ThemePreference, useTheme } from './theme.js';
+import { THEME_OPTIONS, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
 import { GridView } from './workspace/GridView.js';
@@ -28,12 +28,6 @@ import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication } from './remote-auth.js';
-
-const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
-  { value: 'system', label: 'System', glyph: '◐' },
-  { value: 'light', label: 'Light', glyph: '☀' },
-  { value: 'dark', label: 'Dark', glyph: '☾' },
-];
 
 // Owns its own 1 Hz interval so the footer clock ticks without re-rendering
 // the rest of the app (see docs/specs: "Stop the global setNow re-render").

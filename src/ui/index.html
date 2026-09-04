@@ -11,13 +11,14 @@
         let preference = 'system';
         try {
           const stored = localStorage.getItem(key);
-          if (stored === 'light' || stored === 'dark' || stored === 'system') preference = stored;
+          const themes = ['system', 'light', 'dark', 'midnight', 'slate', 'nord', 'solar', 'forest', 'signature'];
+          if (themes.includes(stored)) preference = stored;
         } catch {}
-        const dark = preference === 'dark'
-          || (preference === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
-        const resolved = dark ? 'dark' : 'light';
+        const resolved = preference === 'system'
+          ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : preference;
         document.documentElement.dataset.theme = resolved;
-        document.documentElement.style.colorScheme = resolved;
+        document.documentElement.style.colorScheme = resolved === 'light' ? 'light' : 'dark';
       })();
     </script>
   </head>
