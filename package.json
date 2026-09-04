@@ -26,7 +26,7 @@
     "build:notch": "node scripts/build-notch.mjs",
     "start": "node bin/agentdeck.mjs",
     "prepack": "npm run build",
-    "test": "vitest run",
+    "test": "NODE_ENV=test vitest run",
     "typecheck": "tsc --noEmit",
     "snapshot:codex-protocol": "node scripts/snapshot-codex-protocol.mjs",
     "test:notch": "xcrun swift test --package-path native/AgentDeckNotch --scratch-path .native-build",

@@ -3,22 +3,28 @@
 .work-run-row { width: 100%; min-height: 68px; display: flex; align-items: center; gap: 2px; padding: 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-primary); }
 .work-run-row:hover { background: var(--surface-hover); }
 .work-run-row.is-selected { border-color: var(--status-waiting); background: var(--status-waiting-bg); }
-.work-run-select { flex: 1; min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 9px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.work-run-select { flex: 1; min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr); grid-template-areas: "glyph content" "glyph status"; align-items: center; column-gap: 9px; row-gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .row-delete-button { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; }
 .work-run-row:hover .row-delete-button, .history-row:hover .row-delete-button { opacity: 1; }
 .row-delete-button:hover { background: var(--status-error-bg); color: var(--status-error); }
-.work-run-glyph { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--status-waiting); border-radius: 8px; color: var(--status-waiting); font: 700 8px var(--font-mono); letter-spacing: .08em; }
-.work-run-content { min-width: 0; }
-.work-run-content strong,.work-run-content small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.work-run-content strong { font-size: 11px; }
-.work-run-content small { margin-top: 5px; color: var(--text-muted); font: 8.5px var(--font-mono); }
-.work-run-status { padding: 4px 6px; border: 1px solid var(--border-muted); border-radius: 999px; color: var(--text-secondary); font: 8px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
-.work-run-status.status-queued,.work-run-status.status-pending { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
-.work-run-status.status-preparing,.work-run-status.status-in_progress { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
-.work-run-status.status-ready,.work-run-status.status-completed { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
-.work-run-status.status-failed,.work-run-status.status-refused { border-color: var(--status-error); color: var(--status-error); background: var(--status-error-bg); }
-.work-run-status.status-cancelled { border-color: var(--status-exited); color: var(--status-exited); }
-.work-run-status.status-running { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
+.work-run-glyph { grid-area: glyph; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--status-waiting); border-radius: 8px; color: var(--status-waiting); font: 700 8px var(--font-mono); letter-spacing: .08em; }
+.work-run-content { grid-area: content; min-width: 0; }
+.work-run-content strong,.work-run-content small { display: block; overflow: hidden; text-overflow: ellipsis; }
+.work-run-content strong { display: -webkit-box; font-size: 11px; line-height: 1.35; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.work-run-content small { margin-top: 5px; color: var(--text-muted); font: 8.5px var(--font-mono); white-space: nowrap; }
+.work-run-select > .work-run-status { grid-area: status; justify-self: start; }
+.work-run-status { --run-status-color: var(--text-secondary); --run-status-bg: var(--status-neutral-bg); display: inline-flex; width: fit-content; align-items: center; padding: 4px 7px; border: 1px solid color-mix(in srgb, var(--run-status-color) 62%, transparent); border-radius: 999px; background: var(--run-status-bg); color: var(--run-status-color); font: 8px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.work-run-status.status-queued,.work-run-status.status-pending,.work-run-status.status-idle { --run-status-color: var(--status-idle); --run-status-bg: var(--status-neutral-bg); }
+.work-run-status.status-preparing,.work-run-status.status-in_progress { --run-status-color: var(--status-starting); --run-status-bg: var(--status-starting-bg); }
+.work-run-status.status-starting,.work-run-status.status-running,.work-run-status.status-working,.work-run-status.status-executing { --run-status-color: var(--status-running); --run-status-bg: var(--status-running-bg); }
+.work-run-status.status-waiting_approval,.work-run-status.status-waiting_input,.work-run-status.status-waiting_dependency,.work-run-status.status-pause_requested,.work-run-status.status-blocked,.work-run-status.status-ambiguous { --run-status-color: var(--status-waiting); --run-status-bg: var(--status-waiting-bg); }
+.work-run-status.status-verifying { --run-status-color: var(--status-reviewing); --run-status-bg: var(--status-reviewing-bg); }
+.work-run-status.status-reviewing { --run-status-color: var(--status-unverified); --run-status-bg: var(--status-unverified-bg); }
+.work-run-status.status-ready,.work-run-status.status-completed,.work-run-status.status-verified,.work-run-status.status-success,.work-run-status.status-no-changes,.work-run-status.status-succeeded,.work-run-status.status-authorized,.work-run-status.status-applied { --run-status-color: var(--status-working); --run-status-bg: var(--status-working-bg); }
+.work-run-status.status-completed_unverified,.work-run-status.status-unverified { --run-status-color: var(--status-unverified); --run-status-bg: var(--status-unverified-bg); }
+.work-run-status.status-failed_verification,.work-run-status.status-failed,.work-run-status.status-refused { --run-status-color: var(--status-error); --run-status-bg: var(--status-error-bg); }
+.work-run-status.status-failed_budget { --run-status-color: var(--status-budget); --run-status-bg: var(--status-budget-bg); }
+.work-run-status.status-paused,.work-run-status.status-cancelled { --run-status-color: var(--status-exited); --run-status-bg: var(--status-neutral-bg); }
 .run-header-actions { flex: none; display: flex; align-items: center; gap: 10px; }
 .sidebar-create-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 12px 12px; }
 .sidebar-create-actions > button { min-width: 0; margin: 0; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
@@ -111,7 +117,6 @@
 .run-publication-note { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; }
 .run-publication .button { margin-top: 4px; }
 .run-publication a { color: var(--status-working); }
-.work-run-status.status-succeeded,.work-run-status.status-authorized { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
 /* A finished Run whose result never reached the Repository checkout. Styled as
    waiting, not error, and lifted out of the result grid: nothing failed, the
    commit is intact on its own branch, and an operator has to clear the way. */
@@ -119,8 +124,3 @@
 .run-delivery-blocked strong { display: block; color: var(--status-waiting); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
 .run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .run-delivery-blocked code { padding: 2px 5px; border-radius: 4px; background: var(--surface-code); font: 11px var(--font-mono); }
-.work-run-status.status-applied { border-color: var(--status-working); color: var(--status-working); background: var(--status-working-bg); }
-.work-run-status.status-blocked { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }
-
-.work-run-status.status-executing { border-color: var(--status-starting); color: var(--status-starting); background: var(--status-starting-bg); }
-.work-run-status.status-ambiguous { border-color: var(--status-waiting); color: var(--status-waiting); background: var(--status-waiting-bg); }

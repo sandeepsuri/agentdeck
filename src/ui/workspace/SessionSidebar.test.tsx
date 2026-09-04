@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { Session } from '../../types.js';
-import type { WorkRun } from '../../work-engine/types.js';
+import type { RunStatus, WorkRun } from '../../work-engine/types.js';
 import { SessionSidebar } from './SessionSidebar.js';
 
 const session: Session = {
@@ -56,6 +56,7 @@ describe('SessionSidebar', () => {
 
     expect(html).toContain('Runs');
     expect(html).toContain('Implement durable managed work');
+    expect(html).toContain('title="Implement durable managed work"');
     expect(html).toContain('RUN');
     expect(html).toContain('Queued');
     expect(html).toContain('Managed');
@@ -100,5 +101,25 @@ describe('SessionSidebar', () => {
     }));
 
     expect(html).toContain('Delete run');
+  });
+
+  it.each<RunStatus>([
+    'queued', 'preparing', 'running', 'waiting_approval', 'waiting_input', 'waiting_dependency',
+    'verifying', 'reviewing', 'completed', 'completed_unverified', 'failed_verification',
+    'failed_budget', 'failed', 'pause_requested', 'paused', 'cancelled',
+  ])('keeps the %s status available to the shared Runs color treatment', (status) => {
+    const html = renderToStaticMarkup(createElement(SessionSidebar, {
+      discoveryStatus: null,
+      onLaunch: () => undefined,
+      onRefreshDiscovery: () => undefined,
+      onSelect: () => undefined,
+      onSelectRun: () => undefined,
+      repos: [],
+      runs: [{ ...run, status }],
+      selectedId: null,
+      sessions: [],
+    }));
+
+    expect(html).toContain(`work-run-status status-${status}`);
   });
 });

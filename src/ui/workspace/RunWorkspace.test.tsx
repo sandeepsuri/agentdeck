@@ -38,6 +38,7 @@ describe('RunWorkspace', () => {
       'Run run-durable-123', 'Queued', 'Implement durable runs', 'Restart keeps identity',
       'example', 'refs/heads/main', 'codex → claude', 'npm test', 'Local commit',
     ]) expect(html).toContain(expected);
+    expect(html).toContain('title="Implement durable runs"');
   });
 
   it('shows the Repository, resolved base commit, worktree, and preparation state once prepared', () => {
