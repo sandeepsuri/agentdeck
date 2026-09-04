@@ -190,10 +190,19 @@ export function attachWs(
   });
 
   // Local sockets see the global list; remote sockets see managed sessions only.
+  //
+  // Ticket 15: a collaborator device is excluded from both session broadcasts
+  // below, the same boundary 'attach' already draws for it (see
+  // isCollaboratorSocket's comment above and the 'attach' case). Without this
+  // it received a live 'session_update' for every managed Session on the
+  // machine -- publicSession only strips launchSpec, so cwd, worktreePath,
+  // repoId, and title crossed out for Repositories that device was never
+  // granted, while app.ts refuses it GET /api/sessions outright. The two
+  // boundaries have to agree, and REST's is the correct one.
   manager.on('session_update', (session) => {
     if (session.origin === 'managed') managedSessionIds.add(session.id);
     for (const ws of wss.clients) {
-      if (isLocalSocket(ws) || session.origin === 'managed') {
+      if (isLocalSocket(ws) || (session.origin === 'managed' && !isCollaboratorSocket(ws))) {
         send(ws, { t: 'session_update', session: publicSession(session) });
       }
     }
@@ -207,7 +216,7 @@ export function attachWs(
     }
     const wasManaged = managedSessionIds.delete(sessionId);
     for (const ws of wss.clients) {
-      if (isLocalSocket(ws) || wasManaged) send(ws, { t: 'session_removed', sessionId });
+      if (isLocalSocket(ws) || (wasManaged && !isCollaboratorSocket(ws))) send(ws, { t: 'session_removed', sessionId });
     }
     broadcastCompanionSnapshot();
   });

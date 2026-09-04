@@ -150,10 +150,44 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
     const run = created.json();
 
     const listed = await app.inject({ method: 'GET', url: '/api/runs' });
-    expect(listed.json()).toEqual([run]);
+    expect((listed.json() as { id: string }[]).map((item) => item.id)).toEqual([run.id]);
 
     const fetched = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
     expect(fetched.statusCode).toBe(200);
+  });
+
+  // The projection itself is unit-tested in collaborator-run-view.test.ts.
+  // These two only pin down that this route applies it, and applies it on
+  // exactly the same condition it filters on -- so a caller can never end up
+  // filtered but not narrowed, or narrowed but not filtered.
+  it('narrows every listed Run to the collaborator projection whenever grants resolved', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs' });
+    const [item] = listed.json() as { repository: { id: string; name: string }; spec?: unknown }[];
+    // This fixture's Repository id happens to BE its path, so "no path
+    // crosses out" is asserted in collaborator-run-view.test.ts, where id
+    // and path differ. Here the point is only that the projection replaced
+    // the raw WorkRun: no spec, no envelope, no verificationPolicy.
+    expect(item!.repository).toEqual({ id: repoPath, name: 'example' });
+    expect(item!.spec).toBeUndefined();
+  });
+
+  it('narrows a Run read by id to the collaborator detail projection, and leaves it raw when no grants resolved', async () => {
+    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    const run = (await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) })).json();
+
+    const scoped = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+    const detail = scoped.json() as { narrative?: unknown; envelope?: unknown; verificationPolicy?: unknown };
+    expect(detail.narrative).toBeDefined();
+    expect(detail.envelope).toBeUndefined();
+    expect(detail.verificationPolicy).toBeUndefined();
+
+    const { app: adminApp, repoPath: adminRepo } = makeApp(undefined, { resolveGrantedRepositoryIds: () => undefined });
+    const adminRun = (await adminApp.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(adminRepo) })).json();
+    const raw = (await adminApp.inject({ method: 'GET', url: `/api/runs/${adminRun.id}` })).json() as { spec: { repository: { path: string } } };
+    expect(raw.spec.repository.path).toBe(adminRepo);
   });
 
   it('404s a granted-elsewhere Run read by id -- never leaking that it exists', async () => {

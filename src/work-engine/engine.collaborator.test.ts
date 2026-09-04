@@ -128,6 +128,39 @@ describe('DurableWorkEngine.submit with a collaborator RunActor (ticket 12 AC1/A
     store.close();
   });
 
+  it('resolves the Repository from the store by id, so a collaborator who was never told its path can still submit', async () => {
+    const { store, repository, engine } = setUp();
+    // What the collaborator workspace actually sends: GET /api/repos no
+    // longer hands a collaborator device `path` at all (server/routes.ts's
+    // scopeRepos), so the form has only an id and a name to offer.
+    const spec: WorkSpec = {
+      ...collaboratorRequestedSpec(repository, approvedProfile.id),
+      repository: { id: repository.id, name: '', path: '' },
+    };
+
+    const run = await engine.submit(spec, collaboratorActor(repository));
+
+    expect(run.spec.repository).toEqual(repository);
+    store.close();
+  });
+
+  it('still refuses a Repository id that names nothing in the store, however well-formed the rest of the spec is', async () => {
+    const { store, repository, engine } = setUp();
+    const actor: RunActor = {
+      principal: { id: 'collab-1', displayName: 'Alice' },
+      device: { id: 'device-1', label: "Alice's phone" },
+      grants: { repositoryIds: ['no-such-repo'], profileIds: [approvedProfile.id] },
+    };
+    const spec: WorkSpec = {
+      ...collaboratorRequestedSpec(repository, approvedProfile.id),
+      repository: { id: 'no-such-repo', name: 'invented', path: '/tmp/invented' },
+    };
+
+    await expect(engine.submit(spec, actor)).rejects.toThrow('repository is not known to AgentDeck');
+    expect(engine.list()).toEqual([]);
+    store.close();
+  });
+
   it('refuses an ungranted Repository with a PolicyDeniedError and creates no Run at all', async () => {
     const { store, repository, engine } = setUp();
     const actor: RunActor = { principal: { id: 'collab-1', displayName: 'Alice' }, grants: { repositoryIds: [], profileIds: [approvedProfile.id] } };

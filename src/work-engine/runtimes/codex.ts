@@ -132,7 +132,7 @@ function isJsonRpcMessage(value: unknown): value is JsonRpcMessage {
 // The identifying detail of a ThreadItem, by the field each type actually
 // carries (see the item paths in test-fixtures/codex-protocol-snapshot.json).
 // This is the raw fact for the durable log — turning it into something a
-// person can read is the UI's job (ui/workspace/attemptActivity.ts), so the
+// person can read is attempt-narrative.ts's job, so the
 // wording can improve later without rewriting history.
 function itemSummary(item: Record<string, unknown>): string | undefined {
   if (typeof item.command === 'string') return item.command;

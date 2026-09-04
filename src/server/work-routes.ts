@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { deriveRunAttentionItems } from '../attention.js';
+import { collaboratorRunDetail, collaboratorRunSummary } from './collaborator-run-view.js';
 import {
   InvalidRunStateError, InvalidWorkSpecError, PolicyDeniedError, RunAttentionNotPendingError, RunNotFoundError,
   RunPreparationError, UnsupportedRuntimeError,
@@ -43,13 +44,31 @@ function handlePolicyDenied(error: unknown, reply: FastifyReply): boolean {
 
 /** Local admin REST adapter; all behavior remains owned by WorkEngine. */
 export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine, deps: WorkRoutesDeps = {}): void {
-  const scopeRuns = (request: FastifyRequest) => {
+  /**
+   * Resolves, exactly once per request, both halves of "what may this
+   * caller read": whether grants apply at all, and the Runs left after
+   * filtering. `granted` being defined (even as an empty array) is what
+   * marks a named collaborator device -- local and legacy-shared-token
+   * connections get `undefined` and, below, the unchanged full WorkRun.
+   * Returning both together is deliberate: the filter and the projection
+   * must key off the same value, or a caller could be filtered but not
+   * narrowed, or narrowed but not filtered.
+   */
+  const resolveScope = (request: FastifyRequest) => {
     const granted = deps.resolveGrantedRepositoryIds?.(request);
     const runs = workEngine.list();
-    return granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs;
+    return { granted, runs: granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs };
   };
+  const scopeRuns = (request: FastifyRequest) => resolveScope(request).runs;
 
-  app.get('/api/runs', async (request) => scopeRuns(request));
+  // A collaborator device gets collaborator-run-view.ts's projection rather
+  // than the raw WorkRun -- see that module's header for what it drops and
+  // why. The admin and legacy-shared-token paths are byte-identical to
+  // before, because `granted` is undefined for them.
+  app.get('/api/runs', async (request) => {
+    const { granted, runs } = resolveScope(request);
+    return granted ? runs.map(collaboratorRunSummary) : runs;
+  });
 
   // Ticket 07: the one minimal, remote-safe read a mobile client needs to
   // act on a pending Run attention request — never the Repository path,
@@ -76,7 +95,10 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     // leaks even the fact that it exists.
     const granted = deps.resolveGrantedRepositoryIds?.(request);
     if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
-    return run;
+    // The Run conversation a collaborator's workspace reads. Narrated, not
+    // the raw event log -- a tool-activity summary is the literal command a
+    // runtime ran (collaborator-run-view.ts).
+    return granted ? collaboratorRunDetail(run) : run;
   });
 
   // Ticket 12 AC5: how the admin actually observes who did what to a

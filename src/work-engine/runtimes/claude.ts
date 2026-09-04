@@ -134,7 +134,7 @@ function isStreamMessage(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** The identifying detail of a tool_use block's input, by the field the tool actually carries it under. Raw fact for the durable log — wording is attemptActivity.ts's job. */
+/** The identifying detail of a tool_use block's input, by the field the tool actually carries it under. Raw fact for the durable log — wording is attempt-narrative.ts's job. */
 function toolSummary(input: unknown): string | undefined {
   if (typeof input !== 'object' || input === null) return undefined;
   const record = input as Record<string, unknown>;

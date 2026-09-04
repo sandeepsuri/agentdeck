@@ -220,6 +220,12 @@ describe('named collaborator device credentials (ticket 11)', () => {
     });
     expect(asCollaborator.statusCode).toBe(200);
     expect((asCollaborator.json() as { id: string }[]).map((r) => r.id)).toEqual(['repo-1']);
+    // Filtered AND narrowed: a Repository's absolute path is the operator's
+    // machine layout, not something a grant covers. This is only safe
+    // because DurableWorkEngine.submit() resolves a collaborator's
+    // Repository from the store by id rather than from the submitted spec.
+    expect(asCollaborator.json()).toEqual([{ id: 'repo-1', name: 'granted' }]);
+    expect(asCollaborator.body).not.toContain('/tmp/repo-1');
 
     // The legacy shared token is a different bearer value entirely, but
     // even the admin's own remote device (were it using the shared token)
@@ -239,6 +245,8 @@ describe('named collaborator device credentials (ticket 11)', () => {
     ['POST', '/api/sessions/some-id/send'],
     ['GET', '/api/runs/some-id/activity'],
     ['POST', '/api/runs/some-id/publish'],
+    ['DELETE', '/api/runs/some-id'],
+    ['GET', '/api/repos/verification-policy'],
   ])(
     'a collaborator device stays refused %s %s — session terminals, the admin-only activity audit trail, and publication are never in scope, only grant-checked Run/Repository/Profile routes (ticket 12 AC1/AC5, ticket 13 AC2)',
     async (method, url) => {
@@ -246,7 +254,7 @@ describe('named collaborator device credentials (ticket 11)', () => {
       const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
       const { token } = collaborators.exchangeInvitation(code, 'phone');
       const response = await app.inject({
-        method: method as 'GET' | 'POST', url,
+        method: method as 'GET' | 'POST' | 'DELETE', url,
         headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
         payload: method === 'GET' ? undefined : '{}',
       });

@@ -360,9 +360,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // Repositories the admin granted it (trust.device.grantedRepositoryIds) —
   // local and legacy-shared-token remote connections are unrestricted,
   // exactly as before this ticket.
+  //
+  // A granted Repository is also narrowed, not merely filtered: `path` is an
+  // absolute location on the operator's machine, and `worktrees`/`dirtyFiles`
+  // describe work that has nothing to do with any Run. A Repository is a
+  // collaborator's primary navigation object now, so its payload is on the
+  // critical path rather than incidental to a one-off form. Dropping `path`
+  // is only safe because DurableWorkEngine.submit() resolves a
+  // grant-carrying actor's Repository from the store by id rather than
+  // trusting the submitted spec — see the comment there.
   const scopeRepos = (repos: Awaited<ReturnType<typeof scanRepos>>, req: FastifyRequest) => {
     const grantedRepositoryIds = requestTrust(req).device?.grantedRepositoryIds;
-    return grantedRepositoryIds ? repos.filter((repo) => grantedRepositoryIds.includes(repo.id)) : repos;
+    if (!grantedRepositoryIds) return repos;
+    return repos
+      .filter((repo) => grantedRepositoryIds.includes(repo.id))
+      .map((repo) => ({ id: repo.id, name: repo.name, ...(repo.currentBranch ? { currentBranch: repo.currentBranch } : {}) }));
   };
   app.get('/api/repos', async (req) => {
     if (!ctx.store) return [];

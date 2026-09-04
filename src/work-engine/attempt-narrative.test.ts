@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { AttemptEvent } from '../../work-engine/types.js';
+import type { AttemptEvent } from './types.js';
 import {
   describeActivity, describeCommand, describeOutcome, summarizeAttempt,
-} from './attemptActivity.js';
+} from './attempt-narrative.js';
 
 // Verbatim from the Run that prompted this work — a repo-summary Attempt whose
 // feed was twenty rows of these, each shown twice, with no answer anywhere.
