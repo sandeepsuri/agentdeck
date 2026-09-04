@@ -16,6 +16,24 @@ const READINESS_LABELS: Record<RuntimeReadinessStatus, string> = {
   unavailable: 'Unavailable',
 };
 
+/**
+ * Ticket 14 AC6: a runtime whose installation cannot satisfy the managed
+ * capability envelope may not be picked for a managed Run at all — the same
+ * rule buildRunEnvelope() enforces (work-engine/envelope.ts), applied here
+ * so an operator is told why up front instead of watching the Run be
+ * refused after it is submitted. Absent readiness evidence never blocks a
+ * choice: not knowing yet is not the same as knowing it is unsupported.
+ * This reads only the shared readiness report, so it stays one rule for
+ * every runtime rather than a per-provider branch (AC8).
+ */
+export function runtimeSelectableForManagedRun(
+  readiness: RuntimeReadinessReport | null,
+  runtime: AgentType,
+): boolean {
+  const entry = readiness?.runtimes.find((item) => item.runtime === runtime);
+  return entry === undefined || entry.status === 'managed';
+}
+
 type RunFetcher = (path: string, init: RequestInit) => Promise<Response>;
 
 export async function submitWorkRun(spec: WorkSpec, fetcher: RunFetcher = apiFetch): Promise<WorkRun> {
@@ -73,7 +91,14 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
     let disposed = false;
     apiFetch('/api/runtime-readiness')
       .then((response) => response.ok ? response.json() as Promise<RuntimeReadinessReport> : null)
-      .then((body) => { if (!disposed && body) setRuntimeReadiness(body); })
+      .then((body) => {
+        if (disposed || !body) return;
+        setRuntimeReadiness(body);
+        // AC6: a runtime the evidence now says cannot run managed work is
+        // dropped from the preference rather than left selected and refused
+        // later — including the default 'codex' this form starts with.
+        setRuntimePreference((current) => current.filter((runtime) => runtimeSelectableForManagedRun(body, runtime)));
+      })
       .catch(() => undefined);
     return () => { disposed = true; };
   }, []);
@@ -103,6 +128,7 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
   }, [repositoryId]);
 
   const toggleRuntime = (runtime: AgentType) => {
+    if (!runtimeSelectableForManagedRun(runtimeReadiness, runtime)) return;
     setRuntimePreference((current) => current.includes(runtime)
       ? current.filter((item) => item !== runtime)
       : [...current, runtime]);
@@ -162,11 +188,15 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
           </div>
           <fieldset><legend>Runtime preference</legend><div className="run-choice-row">{(['codex', 'claude'] as const).map((runtime) => {
             const readiness = runtimeReadiness?.runtimes.find((item) => item.runtime === runtime);
+            const selectable = runtimeSelectableForManagedRun(runtimeReadiness, runtime);
             return (
               <label key={runtime}>
-                <input checked={runtimePreference.includes(runtime)} onChange={() => toggleRuntime(runtime)} type="checkbox" />
+                <input checked={runtimePreference.includes(runtime)} disabled={!selectable} onChange={() => toggleRuntime(runtime)} type="checkbox" />
                 {runtime === 'codex' ? 'Codex' : 'Claude'}
                 {readiness && <small className={`run-runtime-readiness status-${readiness.status}`}> {READINESS_LABELS[readiness.status]}</small>}
+                {/* AC6: the precise reason, not just the status — an operator
+                    seeing a runtime they cannot pick is owed what is missing. */}
+                {readiness && !selectable && <small className="run-runtime-reason">{readiness.reason}</small>}
               </label>
             );
           })}</div></fieldset>

@@ -16,19 +16,34 @@
 // picking up the operator's own hooks, custom commands, or MCP servers —
 // none of which AgentDeck's capability envelope grants or can bound — while
 // still leaving CLAUDE.md project context and every built-in tool available.
-// `--permission-mode bypassPermissions --permission-prompts none` means the
-// CLI never blocks on an interactive approval it has nobody to ask (this
-// adapter does not yet relay attention requests the way runtimes/codex.ts
-// does for Codex — see the module-level TODO below): the envelope's own
-// worktree containment and environment allowlist are the actual boundary,
-// exactly the stance codex.ts already takes ("AgentDeck's own capability
-// envelope is what already bounds what an approved command could do
-// regardless of this policy").
+//
+// Ticket 07/14 AC2: `--permission-mode acceptEdits` plus
+// `--permission-prompts host --permission-prompt-tool stdio` is the Claude
+// equivalent of the stance codex.ts already takes (sandbox
+// 'workspace-write' with approvalPolicy 'on-request'): edits inside the
+// prepared worktree proceed without asking, and everything the CLI would
+// otherwise prompt a human about becomes a durable Run attention resolved
+// through the engine's one policy path. Two facts about that channel were
+// captured from a real installed Claude Code (2.1.260), not guessed:
+//   - it only asks when `--permission-prompt-tool stdio` is passed. Without
+//     it the CLI auto-denies and emits a 'system'/'permission_denied'
+//     notice instead of ever consulting the host. That flag is not listed
+//     in `--help`, so ticket 01's readiness probe cannot look for it
+//     directly; the 'approvals' capability it does gate on (Claude Code
+//     >= 2.1.208 with `--permission-mode` and stream-json input) is the
+//     stand-in. An installation old enough to reject the flag exits
+//     immediately, which this adapter already reports as a precise Attempt
+//     failure rather than a hang or a silent bypass.
+//   - stdin must stay open for the whole turn. The control channel is
+//     bidirectional over the same pipe that carried the objective; closing
+//     it after writing the objective fails every pending request with
+//     "Tool permission request failed: AbortError: Stream closed".
 //
 // Provider conversation identity (the Claude session_id) lives only in this
 // module's closures — it is never put on an AttemptEvent, never reaches
 // WorkRun/Store (ticket 05 AC3/AC4, extended to Claude by ticket 14).
 import { spawn as nodeSpawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { resolveAgentExecutable } from '../../sessions/executable.js';
 import { filterEnvironment } from '../envelope.js';
@@ -54,6 +69,8 @@ export interface CreateClaudeAttemptAdapterOptions {
   resolveExecutable?: () => string | undefined;
   spawn?: ClaudeProcessSpawner;
   now?: () => Date;
+  /** The provider conversation id a Run's first round opens under — injectable so tests can assert continuation deterministically. */
+  newSessionId?: () => string;
 }
 
 const defaultSpawn: ClaudeProcessSpawner = (executable, args, options) => {
@@ -151,9 +168,31 @@ function usageAmount(value: unknown): number | 'unknown' {
   return typeof value === 'number' ? value : 'unknown';
 }
 
-function buildPrompt(context: AttemptLaunchContext): string {
+/**
+ * A resumed round is talking to a conversation that already holds the
+ * Attempt's acceptance criteria, so it carries only its own new instruction
+ * (ticket 08's repair objective) — restating the frozen criteria every
+ * round is exactly the objective replay ticket 14 AC4 rules out.
+ */
+function buildPrompt(context: AttemptLaunchContext, resumed: boolean): string {
+  if (resumed) return context.objective;
   const criteria = context.acceptanceCriteria.map((criterion) => `- ${criterion}`).join('\n');
   return `${context.objective}\n\nAcceptance criteria:\n${criteria}`;
+}
+
+// Ticket 07 AC1: the reason describes what is actually being asked, never
+// the wire protocol that carried it — a `can_use_tool` control request's
+// own id and subtype are implementation detail an operator deciding on it
+// has no reason to see.
+function describePermissionRequest(request: Record<string, unknown>): string {
+  const tool = typeof request.tool_name === 'string' ? request.tool_name : 'a tool';
+  const summary = toolSummary(request.input)
+    ?? (typeof request.description === 'string' && request.description.trim().length > 0
+      ? request.description.trim()
+      : undefined);
+  return summary
+    ? `Claude is requesting approval to use ${tool}: ${summary}`
+    : `Claude is requesting approval to use ${tool} before it can continue.`;
 }
 
 export function createClaudeAttemptAdapter(
@@ -162,6 +201,15 @@ export function createClaudeAttemptAdapter(
   const resolveExecutable = options.resolveExecutable ?? (() => resolveAgentExecutable('claude'));
   const spawnProcess = options.spawn ?? defaultSpawn;
   const nowFn = options.now ?? (() => new Date());
+  const newSessionId = options.newSessionId ?? (() => randomUUID());
+  // Ticket 14 AC2/AC3: the provider conversation each Run is talking to,
+  // held only here — in this adapter instance's own closure, never
+  // persisted, never on an AttemptEvent, never any part of AgentDeck's Run
+  // identity. Keyed by Run because a Run has exactly one Attempt (start()
+  // refuses a second), so this is per-Attempt in practice; it is what lets
+  // ticket 08's repair rounds continue the conversation that already did
+  // the work instead of re-deriving it from scratch.
+  const providerSessions = new Map<string, string>();
 
   async function* run(context: AttemptLaunchContext): AsyncIterable<AttemptEvent> {
     const now = () => nowFn().toISOString();
@@ -175,15 +223,24 @@ export function createClaudeAttemptAdapter(
     }
 
     const env = filterEnvironment(context.profile, process.env);
+    const priorSession = providerSessions.get(context.runId);
+    const sessionId = priorSession ?? newSessionId();
+    providerSessions.set(context.runId, sessionId);
     const proc = spawnProcess(executable, [
       '-p',
       '--output-format', 'stream-json',
       '--input-format', 'stream-json',
       '--verbose',
-      '--permission-mode', 'bypassPermissions',
-      '--permission-prompts', 'none',
+      '--permission-mode', 'acceptEdits',
+      '--permission-prompts', 'host',
+      '--permission-prompt-tool', 'stdio',
       '--setting-sources', '',
       '--strict-mcp-config',
+      // A later round of the same Run continues the conversation it already
+      // opened rather than opening a second one; `--resume` keeps the same
+      // session id (verified against a real CLI) so this stays one provider
+      // conversation for the whole Attempt.
+      ...(priorSession ? ['--resume', sessionId] : ['--session-id', sessionId]),
     ], { cwd: context.worktreePath, env });
     // Ticket 09 AC5/AC1: kills the real process the instant the engine asks
     // to stop, independent of wherever this generator happens to be
@@ -288,6 +345,79 @@ export function createClaudeAttemptAdapter(
       emitCompletion(summary);
     }
 
+    // Never writes to a stdin the round has already closed: a control
+    // request can still be sitting in the pump's buffer when the terminal
+    // event ends the round and the generator's `finally` ends stdin, and
+    // an ERR_STREAM_WRITE_AFTER_END on a stream nothing is listening to
+    // would take the process down rather than fail this one reply.
+    const writeControlResponse = (requestId: string, envelope: Record<string, unknown>): void => {
+      if (proc.stdin.writableEnded || proc.stdin.destroyed) return;
+      proc.stdin.write(`${JSON.stringify({ type: 'control_response', response: { ...envelope, request_id: requestId } })}\n`);
+    };
+
+    /**
+     * Ticket 07/14 AC2: a `can_use_tool` control request becomes a durable,
+     * human-readable attention-requested event and awaits the engine's one
+     * policy path (context.awaitAttentionDecision) for a decision, then
+     * relays exactly that decision back to Claude — never anything more
+     * (ticket 07 AC5: nothing here can touch the frozen Repository,
+     * revision, Profile, runtime, budget, workspace, policy, or secret
+     * grants, since none of those are reachable from this function at all).
+     *
+     * `can_use_tool` is the only request subtype this managed invocation can
+     * receive: hook callbacks and SDK-MCP messages are the other two the
+     * protocol defines, and neither is reachable without registering hooks
+     * or an SDK MCP server, which `--setting-sources ''` and
+     * `--strict-mcp-config` already rule out. Every request Claude makes is
+     * therefore an approval; AgentDeck does not fabricate an 'input' kind
+     * for a channel that has no way to ask for one. Anything unrecognized
+     * is still answered — an unanswered control request stalls the CLI's
+     * turn indefinitely — with the error envelope the protocol's own
+     * success envelope implies, rather than a decision nobody made.
+     */
+    async function handleControlRequest(message: Record<string, unknown>): Promise<void> {
+      const requestId = message.request_id;
+      const request = message.request;
+      if (typeof requestId !== 'string' || terminal) return;
+      if (!isStreamMessage(request) || request.subtype !== 'can_use_tool') {
+        writeControlResponse(requestId, { subtype: 'error', error: 'AgentDeck only answers can_use_tool requests.' });
+        return;
+      }
+      // No callback means no engine is wired to a policy path for this Run
+      // (e.g. a bare adapter-contract test) — decline safely rather than
+      // hang the turn forever waiting on nothing, exactly as codex.ts does.
+      if (!context.awaitAttentionDecision) {
+        writeControlResponse(requestId, {
+          subtype: 'error', error: 'Managed Attempts have no operator wired to answer this request.',
+        });
+        return;
+      }
+      // Ticket 07 AC1's "stable correlation": deterministic from
+      // (context.runId, Claude's own control request id), which is unique
+      // among this process's outstanding requests — so a genuinely
+      // redelivered identical request reproduces the exact same attentionId
+      // and durable event, deduplicated by dedupeKey (durable-events.ts)
+      // the same way every other AttemptEvent already is. Hashing also
+      // keeps the provider's id off the event (AC3).
+      const attentionId = createHash('sha256').update(`${context.runId}:${requestId}`).digest('hex');
+      pushEvent({
+        kind: 'attention-requested', sequence: sequence++, at: now(), attentionId, attentionKind: 'approval',
+        reason: describePermissionRequest(request),
+      });
+      const decision = await context.awaitAttentionDecision(attentionId);
+      if (terminal) return;
+      writeControlResponse(requestId, {
+        subtype: 'success',
+        response: decision.kind === 'approve'
+          // `updatedInput` is how the protocol carries the input the tool
+          // should actually run with: relaying Claude's own input back
+          // unchanged approves exactly what the operator was shown, and
+          // nothing else.
+          ? { behavior: 'allow', updatedInput: request.input ?? {} }
+          : { behavior: 'deny', message: 'The AgentDeck operator denied this action.' },
+      });
+    }
+
     function handleLine(line: string): void {
       let message: unknown;
       try {
@@ -297,6 +427,9 @@ export function createClaudeAttemptAdapter(
       }
       if (!isStreamMessage(message)) return;
       switch (message.type) {
+        case 'control_request':
+          void handleControlRequest(message);
+          return;
         case 'system':
           // 'init' is the one 'system' subtype that marks the runtime has
           // actually started working on the objective — every other
@@ -342,14 +475,14 @@ export function createClaudeAttemptAdapter(
       }
     })().finally(() => queue.close());
 
-    // One user message, then stdin closes: this adapter runs one turn per
-    // Attempt (mirroring Codex's single turn/start), never a multi-turn
-    // conversation kept open over stdin.
+    // One user message per round (mirroring Codex's single turn/start),
+    // never a multi-turn conversation driven from stdin. stdin itself stays
+    // open until the round is over, though: it is also the return half of
+    // the permission control channel (see this module's header comment).
     proc.stdin.write(`${JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text: buildPrompt(context) }] },
+      message: { role: 'user', content: [{ type: 'text', text: buildPrompt(context, priorSession !== undefined) }] },
     })}\n`);
-    proc.stdin.end();
 
     try {
       for await (const event of queue) {
@@ -357,6 +490,7 @@ export function createClaudeAttemptAdapter(
         if (event.kind === 'completion' || event.kind === 'failure') break;
       }
     } finally {
+      proc.stdin.end();
       proc.kill();
       await pumpDone.catch(() => undefined);
     }

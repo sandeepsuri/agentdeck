@@ -90,11 +90,15 @@
 .run-submission-modal fieldset { display: grid; gap: 10px; margin: 0; padding: 13px; border: 1px solid var(--border-muted); }
 .run-submission-modal legend { padding: 0 6px; color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; }
 .run-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.run-choice-row { display: flex; gap: 16px; }
+.run-choice-row { display: flex; flex-wrap: wrap; gap: 16px; }
 .run-runtime-readiness { font-size: 9px; }
 .run-runtime-readiness.status-managed { color: var(--status-working); }
 .run-runtime-readiness.status-compatibility-only { color: var(--status-waiting); }
 .run-runtime-readiness.status-unavailable { color: var(--status-error); }
+/* A runtime that cannot run managed work explains itself on its own line,
+   rather than squeezing the reason in beside the other runtimes' names. */
+.run-choice-row label:has(.run-runtime-reason) { flex-basis: 100%; flex-wrap: wrap; opacity: 0.7; }
+.run-runtime-reason { flex-basis: 100%; margin-top: 2px; color: var(--text-muted); font-size: 9px; font-weight: 400; line-height: 1.45; }
 .run-choice-row label,.run-check { display: flex; grid-template-columns: auto 1fr; align-items: center; }
 .run-choice-row input,.run-check input { width: auto; }
 .run-submission-modal form > footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }

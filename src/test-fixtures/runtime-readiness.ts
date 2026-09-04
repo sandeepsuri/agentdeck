@@ -39,6 +39,24 @@ export const runtimeReadinessReportFixture: RuntimeReadinessReport = {
   ],
 };
 
+/**
+ * Ticket 14: the same report with a Claude installation that does satisfy
+ * every managed-run capability — what an up-to-date CLI reports, and the
+ * only shape under which a Run may select Claude for managed work.
+ */
+export const managedClaudeRuntimeReadinessReport: RuntimeReadinessReport = {
+  checkedAt: runtimeReadinessReportFixture.checkedAt,
+  runtimes: runtimeReadinessReportFixture.runtimes.map((runtime) => (runtime.runtime === 'claude'
+    ? {
+      ...runtime,
+      status: 'managed',
+      version: '2.1.260',
+      reason: 'All managed-run capabilities are available.',
+      capabilities: runtime.capabilities.map((capability) => ({ capability: capability.capability, supported: true })),
+    }
+    : runtime)),
+};
+
 /** A RuntimeReadinessSource that resolves to the fixture above (or an override), for tests that need one without spawning real CLI processes. */
 export function stubRuntimeReadinessSource(
   report: RuntimeReadinessReport = runtimeReadinessReportFixture,
