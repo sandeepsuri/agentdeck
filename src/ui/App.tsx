@@ -28,7 +28,7 @@ import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
-import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
+import { adminSessions, repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
@@ -160,7 +160,8 @@ export function App() {
   }), []);
 
   const refreshSessions = useCallback(() => apiFetch('/api/sessions')
-    .then((response) => responseJsonArray<Session>(response)).then((body) => {
+    .then((response) => responseJsonArray<Session>(response)).then((all) => {
+      const body = adminSessions(all);
       setSessions(body);
       setError(null);
       const requested = requestedSessionIdRef.current;
