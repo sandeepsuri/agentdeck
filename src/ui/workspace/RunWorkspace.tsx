@@ -384,7 +384,7 @@ export function RunWorkspace({
           </div>
           {envelope.state === 'refused' && <div><dt>Refusal reason</dt><dd>{envelope.reason}</dd></div>}
           {envelope.state === 'ready' && (() => {
-            const { runtime, profile, secretGrants } = envelope.capabilityEnvelope;
+            const { runtime, profile } = envelope.capabilityEnvelope;
             return (
               <>
                 <div><dt>Runtime</dt><dd>{formatRunLabel(runtime)}</dd></div>
@@ -395,6 +395,16 @@ export function RunWorkspace({
                     <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
                   </dd>
                 </div>
+              </>
+            );
+          })()}
+        </dl>
+        {envelope.state === 'ready' && (() => {
+          const { profile, secretGrants } = envelope.capabilityEnvelope;
+          return (
+            <details className="run-technical-detail">
+              <summary>Permissions &amp; limits</summary>
+              <dl className="run-intent-grid">
                 <div><dt>Readable roots</dt><dd>{profile.readableRoots.map((root) => <code key={root}>{root}</code>)}</dd></div>
                 <div>
                   <dt>Allowed network domains</dt>
@@ -414,10 +424,10 @@ export function RunWorkspace({
                     ? secretGrants.map((grant) => <span key={grant.name}>{grant.name}: <code>{grant.reference}</code></span>)
                     : 'None'}</dd>
                 </div>
-              </>
-            );
-          })()}
-        </dl>
+              </dl>
+            </details>
+          );
+        })()}
       </section>
       {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
         <section className="run-attempt">

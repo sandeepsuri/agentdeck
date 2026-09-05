@@ -71,28 +71,30 @@ function ExpandedOperation({ session, events, onOpenTerminal }: {
       <header className="operation-card-header">
         <StatusLamp pulse={session.status === 'waiting_input' || session.status === 'working'} status={session.status} />
         <strong>{sessionLabel(session)}</strong>
-        {session.status === 'waiting_input' && <span className="input-required-tag">Input required</span>}
         <span className="operation-meta">{session.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} · PID {session.pid ?? '—'} · {session.tty ?? 'PTY'}</span>
         <StatusBadge status={session.status} />
       </header>
-      <div className="operation-card-grid">
-        <Trace events={events} session={session} />
-        <div className="operation-tree">
-          <div className="micro-heading">Working tree · {changes.length} files</div>
-          {changes.length === 0 && <div className="trace-empty">Working tree clean</div>}
-          {changes.slice(0, 4).map((file) => (
-            <div className="tree-file" key={file.path}>
-              <span title={file.path}>{file.path}</span>
-              <small><em>+{file.additions}</em> <i>−{file.deletions}</i></small>
-            </div>
-          ))}
+      <details className="operation-card-detail">
+        <summary>Show technical detail</summary>
+        <div className="operation-card-grid">
+          <Trace events={events} session={session} />
+          <div className="operation-tree">
+            <div className="micro-heading">Working tree · {changes.length} files</div>
+            {changes.length === 0 && <div className="trace-empty">Working tree clean</div>}
+            {changes.slice(0, 4).map((file) => (
+              <div className="tree-file" key={file.path}>
+                <span title={file.path}>{file.path}</span>
+                <small><em>+{file.additions}</em> <i>−{file.deletions}</i></small>
+              </div>
+            ))}
+          </div>
+          <div className="operation-gauges">
+            <Metric label="Activity" value={relativeTime(session.lastActivityAt)} seed={4} />
+            <Metric label="Elapsed" value={<ElapsedTime startedAt={session.startedAt} />} seed={6} />
+            <Metric label="Files" value={`+${additions} −${deletions}`} seed={8} />
+          </div>
         </div>
-        <div className="operation-gauges">
-          <Metric label="Activity" value={relativeTime(session.lastActivityAt)} seed={4} />
-          <Metric label="Elapsed" value={<ElapsedTime startedAt={session.startedAt} />} seed={6} />
-          <Metric label="Files" value={`+${additions} −${deletions}`} seed={8} />
-        </div>
-      </div>
+      </details>
       {session.status === 'waiting_input' && (
         <div className="attention-banner">
           <span className="attention-icon">△</span>
