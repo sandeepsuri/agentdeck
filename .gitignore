@@ -20,3 +20,4 @@ docs/tickets/
 .scratch/
 docs/evolution-roadmap.md
 .codex-*.html
+/docs
