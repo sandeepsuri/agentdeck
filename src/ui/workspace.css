@@ -355,7 +355,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-shell { width: 100%; height: 100dvh; min-height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-terminal); color: var(--text-primary); font-size: 13px; }
 .mobile-workspace { position: relative; width: 100%; min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-terminal); color: var(--text-primary); }
 
-.mobile-topbar { position: relative; z-index: 4; min-height: 64px; flex: none; display: grid; grid-template-columns: 44px minmax(0,1fr) 44px; align-items: center; padding: max(8px,env(safe-area-inset-top)) 8px 8px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
+.mobile-topbar { position: relative; z-index: 4; min-height: 64px; flex: none; display: grid; grid-template-columns: 44px minmax(0,1fr) auto; align-items: center; padding: max(8px,env(safe-area-inset-top)) 8px 8px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
 .mobile-icon-button { width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-secondary); font-size: 22px; line-height: 1; cursor: pointer; }
 .mobile-icon-button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .mobile-menu-icon { width: 18px; display: grid; gap: 3px; }
@@ -524,6 +524,25 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-run-gates li.is-passed > span { color: var(--status-working); }
 .mobile-run-gates li.is-failed > span { color: var(--status-error); }
 .mobile-run-approvals li { color: var(--text-secondary); }
+
+/* Agents in a Repository (CollaboratorWorkspace). Deliberately built on
+   .mobile-run-tile rather than beside it: the Agents and Runs feeds are one
+   list of "what is happening here", so they must not drift apart visually. */
+.mobile-run-list-heading { margin: 6px 2px 0; color: var(--text-muted); font: 9.5px var(--font-mono); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.mobile-run-list-heading:first-child { margin-top: 0; }
+.mobile-agent-messages { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.mobile-agent-message { padding: 11px 13px; border: 1px solid var(--border-muted); border-radius: 14px; background: var(--surface-panel); }
+.mobile-agent-message.is-human { border-color: var(--action-primary); background: var(--surface-elevated); }
+.mobile-agent-message.is-done { border-color: var(--status-completed); }
+.mobile-agent-message small { display: block; margin-bottom: 6px; color: var(--text-muted); font: 9px var(--font-mono); }
+.mobile-agent-message p { margin: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mobile-agent-composer form,.mobile-agent-composer { display: grid; gap: 8px; }
+.mobile-agent-composer button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: 12px; background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
+.mobile-agent-composer button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
+.mobile-agent-hint { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.mobile-agent-closed { width: min(100%,760px); flex: none; align-self: center; margin: 0; padding: 13px 14px max(13px,env(safe-area-inset-bottom)); border-top: 1px solid var(--border-muted); background: var(--surface-panel); color: var(--text-muted); font-size: 12px; line-height: 1.5; text-align: center; }
+.mobile-signout { justify-self: end; min-height: 44px; padding: 7px 11px; border: 1px solid var(--border-muted); border-radius: 10px; background: transparent; color: var(--text-secondary); font: 10px var(--font-mono); cursor: pointer; }
+.mobile-signout:hover { background: var(--surface-hover); color: var(--text-primary); }
 
 .mobile-request-composer { width: min(100%,760px); flex: none; align-self: center; padding: 10px 14px max(12px,env(safe-area-inset-bottom)); border-top: 1px solid var(--border-muted); background: var(--surface-panel); }
 .mobile-request-composer form { display: grid; gap: 8px; }

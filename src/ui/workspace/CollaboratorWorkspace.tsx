@@ -8,24 +8,36 @@
 // there. Three disconnected things, none of which worked end to end.
 //
 // So this is deliberately NOT a session view with Runs bolted on. It is one
-// navigation stack — Repository, then its Runs, then one Run's conversation —
-// with a single composer at the bottom whose meaning follows the level you are
-// at: "request work in this Repository", or "answer this Run". The Repository
-// is the top of the stack because the Repository is exactly what a grant is
-// about; there is no level above it a Collaborator could navigate to.
+// navigation stack — Repository, then the work in it, then one piece of that
+// work's conversation — with a single composer at the bottom whose meaning
+// follows the level you are at: "request work in this Repository", "answer
+// this Run", or "message this agent". The Repository is the top of the stack
+// because the Repository is exactly what a grant is about; there is no level
+// above it a Collaborator could navigate to.
 //
-// "Chat" here is the Run's own conversation — attempt-narrative.ts's derived
-// labels over the durable Attempt event log — not a terminal. That boundary is
-// the same one every other layer holds: no Session, no PTY, no raw command.
+// A granted Repository has two kinds of work happening in it, and both hang
+// off that one level: the Runs requested against it, and the agents already
+// running in it. They are listed as one feed rather than two tabs, because
+// "what is happening in this Repository" is a single question.
+//
+// "Chat" here is never a terminal. A Run's conversation is
+// attempt-narrative.ts's derived labels over the durable Attempt event log; a
+// Session's is the same message list the admin's own chat view reads, polled
+// over grant-scoped REST. A collaborator socket is still refused 'attach' and
+// both session broadcasts (ws.ts), so no PTY bytes and no machine-wide view
+// of Sessions ever reach here.
 import { useEffect, useRef, useState } from 'react';
-import type { AgentType, Repo } from '../../types.js';
+import type {
+  AgentType, CollaboratorSession, CollaboratorSessionCapabilities, CollaboratorSessionMessage, Repo,
+} from '../../types.js';
 import type {
   AttentionDecisionInput, CollaboratorRunDetail, CollaboratorRunSummary, Profile, WorkSpec,
 } from '../../work-engine/types.js';
 import { describeOutcome, formatTokenCount } from '../../work-engine/attempt-narrative.js';
 import { getCollaboratorRun, requestWork } from '../collaboratorRuns.js';
+import { getSessionCapabilities, listSessionMessages, sendSessionMessage } from '../collaboratorSessions.js';
 import { lines } from '../components/RunSubmissionModal.js';
-import { relativeTime } from './model.js';
+import { STATUS_LABELS, relativeTime } from './model.js';
 import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
 export interface Props {
@@ -35,13 +47,20 @@ export interface Props {
   profiles: Profile[];
   /** Already grant-filtered and narrowed by the server (GET /api/runs). */
   runs: CollaboratorRunSummary[];
+  /** Already grant-filtered and narrowed by the server (GET /api/sessions) — agents running in a granted Repository, never a Session this device could attach to. */
+  sessions: CollaboratorSession[];
   onError: (message: string) => void;
   /** Pulls the Run list forward immediately after a request, rather than waiting for the next poll. */
   onRunsStale: () => void;
   onResolveRunAttention: (runId: string, attentionId: string, decision: AttentionDecisionInput) => void;
+  /** Drops this device's credential and returns to the gate. Optional so existing callers/tests need no change. */
+  onSignOut?: () => void;
 }
 
-type View = { kind: 'repository'; repositoryId: string } | { kind: 'run'; runId: string };
+type View =
+  | { kind: 'repository'; repositoryId: string }
+  | { kind: 'run'; runId: string }
+  | { kind: 'session'; sessionId: string };
 
 const STATUS_MARK: Record<'started' | 'completed' | 'failed', string> = {
   started: '…', completed: '✓', failed: '✕',
@@ -57,14 +76,30 @@ function orderRuns(runs: readonly CollaboratorRunSummary[]): CollaboratorRunSumm
   });
 }
 
+/** A Session's name if it has one — never sessionLabel(), which derives its fallback from `cwd`, a field this projection deliberately does not carry. */
+function agentLabel(session: CollaboratorSession): string {
+  return session.name ?? (session.agent === 'claude' ? 'Claude Code' : 'Codex');
+}
+
+/** Same rule as orderRuns: what is still running comes first, then the rest by most recent activity. */
+function orderSessions(sessions: readonly CollaboratorSession[]): CollaboratorSession[] {
+  return [...sessions].sort((a, b) => {
+    const endedA = a.status === 'exited' ? 1 : 0;
+    const endedB = b.status === 'exited' ? 1 : 0;
+    if (endedA !== endedB) return endedA - endedB;
+    return b.lastActivityAt.localeCompare(a.lastActivityAt);
+  });
+}
+
 function MenuIcon() {
   return <span aria-hidden="true" className="mobile-menu-icon"><i /><i /><i /></span>;
 }
 
-function RepositoryDrawer({ open, repos, runs, selectedId, onClose, onSelect }: {
+function RepositoryDrawer({ open, repos, runs, sessions, selectedId, onClose, onSelect }: {
   open: boolean;
   repos: Repo[];
   runs: readonly CollaboratorRunSummary[];
+  sessions: readonly CollaboratorSession[];
   selectedId: string | null;
   onClose: () => void;
   onSelect: (repositoryId: string) => void;
@@ -88,7 +123,9 @@ function RepositoryDrawer({ open, repos, runs, selectedId, onClose, onSelect }: 
         <div className="mobile-drawer-label">Your repositories</div>
         <nav aria-label="Your repositories" className="mobile-session-list">
           {repos.map((repo) => {
-            const active = runs.filter((run) => run.repository.id === repo.id && !isTerminalRunStatus(run.status)).length;
+            const activeRuns = runs.filter((run) => run.repository.id === repo.id && !isTerminalRunStatus(run.status)).length;
+            const activeAgents = sessions.filter((item) => item.repoId === repo.id && item.status !== 'exited').length;
+            const active = activeRuns + activeAgents;
             return (
               <button
                 className={`mobile-repo-row${repo.id === selectedId ? ' is-selected' : ''}`}
@@ -100,7 +137,7 @@ function RepositoryDrawer({ open, repos, runs, selectedId, onClose, onSelect }: 
               >
                 <span className="mobile-session-copy">
                   <strong>{repo.name}</strong>
-                  <small>{active > 0 ? `${active} active` : 'No Runs in progress'}</small>
+                  <small>{active > 0 ? `${active} active` : 'Nothing in progress'}</small>
                 </span>
                 {active > 0 && <span aria-hidden="true" className="mobile-repo-count">{active}</span>}
               </button>
@@ -142,6 +179,128 @@ function RunTile({ run, onSelect }: { run: CollaboratorRunSummary; onSelect: () 
       )}
       {run.preparation.note && <span className="mobile-run-blocked">{run.preparation.note}</span>}
     </button>
+  );
+}
+
+/** An agent running in this Repository. Deliberately the same tile shape as RunTile so the two read as one feed rather than two lists that happen to sit together. */
+function AgentTile({ session, onSelect }: { session: CollaboratorSession; onSelect: () => void }) {
+  const ended = session.status === 'exited';
+  return (
+    <button
+      className={`mobile-run-tile mobile-agent-tile${ended ? ' is-terminal' : ' is-active'}`}
+      data-session-id={session.id}
+      onClick={onSelect}
+      type="button"
+    >
+      <span className="mobile-run-tile-head">
+        <span aria-hidden="true" className={`mobile-status-dot status-${session.status}`} />
+        <strong>{agentLabel(session)}</strong>
+      </span>
+      <span className="mobile-run-tile-meta">
+        <span className={`mobile-run-status status-${session.status}`}>{STATUS_LABELS[session.status]}</span>
+        <small>{session.agent === 'claude' ? 'Claude Code' : 'Codex'} · {relativeTime(session.lastActivityAt)}</small>
+      </span>
+      {session.status === 'waiting_input' && <span className="mobile-run-badge">Waiting for a reply</span>}
+    </button>
+  );
+}
+
+/**
+ * The composer at the Session level: message a running agent.
+ *
+ * `capabilities` comes from the server's own pure check, the same one its send
+ * route applies, so this is never offered for a Session that would then refuse
+ * the message — and when it cannot be offered the reader is told why rather
+ * than left with a dead input.
+ */
+function AgentComposer({ sessionId, capabilities, onError, onSent }: {
+  sessionId: string;
+  capabilities: CollaboratorSessionCapabilities | null;
+  onError: (message: string) => void;
+  onSent: () => void;
+}) {
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+
+  if (capabilities && capabilities.send === 'unavailable') {
+    return <p className="mobile-agent-closed" role="status">{capabilities.reason}</p>;
+  }
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const value = text.trim();
+    if (!value || sending) return;
+    setSending(true);
+    try {
+      await sendSessionMessage(sessionId, value);
+      setText('');
+      onSent();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form className="mobile-request-composer mobile-agent-composer" onSubmit={(event) => { void submit(event); }}>
+      <textarea
+        aria-label="Message this agent"
+        onChange={(event) => setText(event.target.value)}
+        placeholder="Message this agent…"
+        rows={2}
+        value={text}
+      />
+      <button className="is-primary" disabled={!text.trim() || sending} type="submit">
+        {sending ? 'Sending…' : 'Send'}
+      </button>
+      {capabilities?.send === 'queued' && (
+        <small className="mobile-agent-hint">
+          This agent is running in someone else&rsquo;s terminal, so your message is delivered on its next turn.
+        </small>
+      )}
+    </form>
+  );
+}
+
+/** A Session's conversation: the message list, styled as the Run conversation is, never a terminal. */
+function AgentConversation({ session, messages, loading }: {
+  session: CollaboratorSession;
+  messages: readonly CollaboratorSessionMessage[];
+  loading: boolean;
+}) {
+  return (
+    <main className="mobile-conversation">
+      <section className="mobile-run-intent">
+        <h2>{agentLabel(session)}</h2>
+        <small>
+          {session.agent === 'claude' ? 'Claude Code' : 'Codex'} · started {relativeTime(session.startedAt)}
+          {session.branch ? ` · ${session.branch}` : ''}
+        </small>
+      </section>
+
+      {messages.length > 0 && (
+        <ol aria-label="Conversation" className="mobile-agent-messages">
+          {messages.map((message, index) => (
+            <li
+              className={`mobile-agent-message is-${message.author}${message.event === 'done' ? ' is-done' : ''}`}
+              key={`${message.ts}-${index}`}
+            >
+              <small>{message.author === 'human' ? 'You' : agentLabel(session)} · {relativeTime(message.ts)}</small>
+              <p>{message.text}</p>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {messages.length === 0 && (
+        <p className="mobile-run-waiting">
+          {loading
+            ? 'Loading this conversation…'
+            : 'Nothing has been said in this conversation yet. Send the first message below.'}
+        </p>
+      )}
+    </main>
   );
 }
 
@@ -398,12 +557,15 @@ function RunConversation({ detail, onResolveRunAttention }: {
 }
 
 export function CollaboratorWorkspace({
-  principal, repos, profiles, runs, onError, onRunsStale, onResolveRunAttention,
+  principal, repos, profiles, runs, sessions, onError, onRunsStale, onResolveRunAttention, onSignOut,
 }: Props) {
   const [view, setView] = useState<View | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detail, setDetail] = useState<CollaboratorRunDetail | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [messages, setMessages] = useState<CollaboratorSessionMessage[]>([]);
+  const [capabilities, setCapabilities] = useState<CollaboratorSessionCapabilities | null>(null);
+  const [messagesLoaded, setMessagesLoaded] = useState(false);
 
   // Land on the first granted Repository rather than an empty screen — with
   // one Repository granted (the common case) there is nothing to choose.
@@ -436,16 +598,68 @@ export function CollaboratorWorkspace({
     return () => { disposed = true; clearTimeout(timer); };
   }, [runId]);
 
-  const repository = repos.find((repo) => repo.id === (view?.kind === 'repository' ? view.repositoryId : detail?.repository.id));
+  const sessionId = view?.kind === 'session' ? view.sessionId : null;
+  const openSession = sessions.find((item) => item.id === sessionId) ?? null;
+
+  // Whether this Session can still be messaged is a property of the Session,
+  // not of the conversation, so it is fetched once per Session rather than on
+  // every tick of the poll below.
+  useEffect(() => {
+    if (!sessionId) { setCapabilities(null); return; }
+    let disposed = false;
+    getSessionCapabilities(sessionId)
+      .then((next) => { if (!disposed) setCapabilities(next); })
+      .catch(() => undefined); // a composer that stays hidden is the safe failure
+    return () => { disposed = true; };
+  }, [sessionId]);
+
+  // The open Session's own poll — the same shape as the open Run's below:
+  // one conversation is ever open, it is the expensive read, and it stops
+  // once the Session can no longer say anything new. A collaborator socket
+  // receives no session frames at all (ws.ts), so this poll is the only
+  // thing keeping the conversation current.
+  const messagesRef = useRef<string | null>(null);
+  useEffect(() => { messagesRef.current = sessionId; if (!sessionId) { setMessages([]); setMessagesLoaded(false); } }, [sessionId]);
+  const sessionEnded = openSession?.status === 'exited';
+  useEffect(() => {
+    if (!sessionId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      try {
+        const next = await listSessionMessages(sessionId);
+        if (disposed || messagesRef.current !== sessionId) return;
+        setMessages(next);
+        setMessagesLoaded(true);
+        if (!sessionEnded) timer = setTimeout(() => { void tick(); }, 2000);
+      } catch {
+        if (!disposed) timer = setTimeout(() => { void tick(); }, 5000);
+      }
+    };
+    void tick();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [sessionEnded, sessionId]);
+
+  const repository = repos.find((repo) => repo.id === (
+    view?.kind === 'repository' ? view.repositoryId
+      : view?.kind === 'session' ? openSession?.repoId
+        : detail?.repository.id
+  ));
   const repositoryRuns = repository ? orderRuns(runs.filter((run) => run.repository.id === repository.id)) : [];
+  const repositorySessions = repository ? orderSessions(sessions.filter((item) => item.repoId === repository.id)) : [];
 
   const openRun = (id: string, carriedNotice: string | null = null) => {
     setNotice(carriedNotice);
     setDetail(null);
     setView({ kind: 'run', runId: id });
   };
+  const openAgent = (id: string) => {
+    setNotice(null);
+    setDetail(null);
+    setView({ kind: 'session', sessionId: id });
+  };
   const backToRepository = () => {
-    const id = detail?.repository.id ?? repos[0]?.id;
+    const id = repository?.id ?? detail?.repository.id ?? repos[0]?.id;
     setDetail(null);
     setView(id ? { kind: 'repository', repositoryId: id } : null);
   };
@@ -453,18 +667,26 @@ export function CollaboratorWorkspace({
   return (
     <section className="mobile-workspace">
       <header className="mobile-topbar">
-        {view?.kind === 'run'
+        {view?.kind === 'run' || view?.kind === 'session'
           ? <button aria-label="Back to repository" className="mobile-icon-button" onClick={backToRepository} type="button">‹</button>
           : <button aria-label="Open repositories" className="mobile-icon-button" onClick={() => setDrawerOpen(true)} type="button"><MenuIcon /></button>}
         <span className="mobile-topbar-copy">
-          <strong>{view?.kind === 'run' ? (detail?.objective ?? 'Run') : (repository?.name ?? 'AgentDeck')}</strong>
+          <strong>
+            {view?.kind === 'run' ? (detail?.objective ?? 'Run')
+              : view?.kind === 'session' ? (openSession ? agentLabel(openSession) : 'Agent')
+                : (repository?.name ?? 'AgentDeck')}
+          </strong>
           <small>
             {view?.kind === 'run' && detail
               ? <><span className={`mobile-run-dot status-${detail.status}`} />{formatRunLabel(detail.status)}</>
-              : `Signed in as ${principal.displayName}`}
+              : view?.kind === 'session' && openSession
+                ? <><span className={`mobile-status-dot status-${openSession.status}`} />{STATUS_LABELS[openSession.status]}</>
+                : `Signed in as ${principal.displayName}`}
           </small>
         </span>
-        <span aria-hidden="true" className="mobile-topbar-spacer" />
+        {onSignOut && view?.kind !== 'run' && view?.kind !== 'session'
+          ? <button className="mobile-signout" onClick={onSignOut} type="button">Sign out</button>
+          : <span aria-hidden="true" className="mobile-topbar-spacer" />}
       </header>
 
       {notice && <p className="mobile-run-blocked-banner" role="status">{notice}</p>}
@@ -474,9 +696,36 @@ export function CollaboratorWorkspace({
       )}
       {view?.kind === 'run' && !detail && <main className="mobile-workspace-empty"><span>Loading this Run…</span></main>}
 
+      {view?.kind === 'session' && openSession && (
+        <>
+          <AgentConversation loading={!messagesLoaded} messages={messages} session={openSession} />
+          <AgentComposer
+            capabilities={capabilities}
+            onError={onError}
+            onSent={() => { setMessagesLoaded(false); }}
+            sessionId={openSession.id}
+          />
+        </>
+      )}
+      {view?.kind === 'session' && !openSession && (
+        <main className="mobile-workspace-empty">
+          <strong>This agent is no longer listed</strong>
+          <span>It may have finished, or your access to its Repository may have changed.</span>
+        </main>
+      )}
+
       {view?.kind === 'repository' && repository && (
         <>
-          <main aria-label="Runs" className="mobile-run-list">
+          <main aria-label="Work in this repository" className="mobile-run-list">
+            {repositorySessions.length > 0 && (
+              <>
+                <h2 className="mobile-run-list-heading">Agents</h2>
+                {repositorySessions.map((item) => (
+                  <AgentTile key={item.id} onSelect={() => openAgent(item.id)} session={item} />
+                ))}
+              </>
+            )}
+            <h2 className="mobile-run-list-heading">Runs</h2>
             {repositoryRuns.map((run) => <RunTile key={run.id} onSelect={() => openRun(run.id)} run={run} />)}
             {repositoryRuns.length === 0 && (
               <p className="mobile-run-list-empty">No work has been requested in {repository.name} yet. Ask for some below.</p>
@@ -491,7 +740,7 @@ export function CollaboratorWorkspace({
         </>
       )}
 
-      {!repository && view?.kind !== 'run' && (
+      {!repository && view?.kind !== 'run' && view?.kind !== 'session' && (
         <main className="mobile-workspace-empty">
           <strong>Nothing granted yet</strong>
           <span>No Repositories have been granted to you. Ask the admin for access.</span>
@@ -505,6 +754,7 @@ export function CollaboratorWorkspace({
         repos={repos}
         runs={runs}
         selectedId={repository?.id ?? null}
+        sessions={sessions}
       />
     </section>
   );

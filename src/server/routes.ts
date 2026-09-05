@@ -1,5 +1,5 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
@@ -21,7 +21,7 @@ import {
 } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
-import type { AgentType, LaunchSpec } from '../types.js';
+import type { AgentType, LaunchSpec, Session } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
@@ -34,6 +34,9 @@ import { deriveConflicts } from '../conflicts/derive.js';
 import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordination/bus.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
+import {
+  collaboratorSendCapability, collaboratorSession, collaboratorSessionMessages,
+} from './collaborator-session-view.js';
 import { publicSession } from './security.js';
 import { classify, TOKEN_HEADER } from './connection-trust.js';
 import { containsDisallowedControlBytes } from './remote-input.js';
@@ -230,6 +233,42 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     },
   );
 
+  /**
+   * The Session half of "strictly repo-scoped". A collaborator device's
+   * Repository grant is the only thing that authorizes reading or messaging
+   * a Session, and a Session is scopable only through `repoId` -- one with
+   * none (a bare `agentdeck` shell started outside any Repository) can never
+   * be reached by a collaborator, which is why the type guard narrows
+   * `repoId` to a string rather than defaulting it.
+   *
+   * Returns undefined for local and legacy shared-token remote connections,
+   * meaning "unscoped, behave exactly as before this existed" -- the same
+   * shape scopeRepos and work-routes.ts's resolveScope already use, so all
+   * three read the same way.
+   */
+  const sessionGrant = (req: FastifyRequest) => requestTrust(req).device?.grantedRepositoryIds;
+  const isGrantedSession = (
+    session: Session,
+    granted: readonly string[],
+  ): session is Session & { repoId: string } => session.repoId !== undefined && granted.includes(session.repoId);
+
+  /**
+   * A Session outside the grant answers 404, never 403 -- the same choice
+   * work-routes.ts:96 makes for an ungranted Run, so a collaborator cannot
+   * use the difference between "forbidden" and "absent" to probe for
+   * Repositories they were never granted.
+   */
+  const requireGrantedSession = (req: FastifyRequest, reply: FastifyReply, id: string) => {
+    const session = manager.getSession(id);
+    if (!session) { reply.code(404).send({ error: 'no such session' }); return undefined; }
+    const granted = sessionGrant(req);
+    if (granted && !isGrantedSession(session, granted)) {
+      reply.code(404).send({ error: 'no such session' });
+      return undefined;
+    }
+    return session;
+  };
+
   // Ticket 05: how the client discovers "you're remote, please enter a
   // token" in the first place. Deliberately exempt from the token gate in
   // app.ts's onRequest hook (see the comment there) — it never returns
@@ -253,6 +292,19 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.get('/api/sessions', async (req) => {
     const sessions = manager.listSessions();
+    // A collaborator device is scoped by grant rather than by origin. The
+    // origin filter below exists because the legacy shared-token remote path
+    // can neither attach to nor safely message an external session; a
+    // collaborator reaches a Session only through the message-list routes,
+    // which work for an external hook-backed session exactly as they do for
+    // a managed one -- so restricting them to 'managed' would hide the very
+    // agents an assigned Repository is most likely to have running.
+    const granted = sessionGrant(req);
+    if (granted) {
+      return sessions
+        .filter((session): session is Session & { repoId: string } => isGrantedSession(session, granted))
+        .map(collaboratorSession);
+    }
     return (requestTrust(req).kind === 'remote'
       ? sessions.filter((session) => session.origin === 'managed')
       : sessions).map(publicSession);
@@ -840,11 +892,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.get('/api/sessions/:id/messages', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const granted = sessionGrant(req);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const messages = await readBusTail(repoPath);
-    return messages.filter((message) => {
+    const selected = messages.filter((message) => {
       if (message.agent.startsWith('dashboard:')) {
         return message.agent === `dashboard:${session.id}` && message.event === 'message';
       }
@@ -853,12 +906,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return belongsToSession && (message.event === 'done' || message.event === 'message')
         && typeof message.message === 'string' && message.message.trim().length > 0;
     }).slice(-100);
+    // A bus row's `repo` is an absolute path and its `agent` embeds the agent
+    // CLI's own session id, so a collaborator device gets the narrowed
+    // conversation rather than the rows themselves.
+    return granted ? collaboratorSessionMessages(session, selected) : selected;
   });
 
   app.get('/api/sessions/:id/capabilities', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    // A collaborator device never reaches the terminal-automation path (see
+    // POST /send below), so reporting 'terminal'/'vscode' here would promise
+    // a composer that the send route then refuses. It is told what it can
+    // actually use, and why not when the answer is nothing.
+    if (sessionGrant(req)) return collaboratorSendCapability(session);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const replyCapture = session.agent === 'claude'
       ? repoHasClaudeHooks(repoPath)
@@ -877,8 +939,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.post('/api/sessions/:id/send', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
     const body = req.body as { text?: unknown } | null;
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
@@ -892,8 +954,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // Local connections are unaffected; a valid remote token authenticates
     // the connection, it doesn't grant it raw-write.
     const trust = requestTrust(req);
-    if (trust.kind === 'remote' && session.origin !== 'managed') {
+    // A collaborator device is scoped by grant, not by origin, and reaches
+    // this route through exactly two paths -- the managed PTY write below
+    // (still control-byte-filtered, since a collaborator holds no
+    // 'raw-write' capability) and the hook inbox queue for an external
+    // Claude session. What it must never reach is the terminal-automation
+    // branch further down, which scripts the operator's own foreground
+    // terminal app; falling past it to the queued path is both safer and,
+    // for a hook-backed session, functionally the same delivery.
+    const collaborator = trust.device !== undefined;
+    if (!collaborator && trust.kind === 'remote' && session.origin !== 'managed') {
       return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
+    if (collaborator) {
+      const capability = collaboratorSendCapability(session);
+      if (capability.send === 'unavailable') return reply.code(400).send({ error: capability.reason });
     }
     if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
       return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
@@ -914,7 +989,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return { delivered: 'typed' };
     }
 
-    if (session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
+    if (!collaborator && session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
       try {
         await ctx.terminals.sendText(session, text);
         await recordSend();

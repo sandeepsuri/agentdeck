@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session } from '../types.js';
+import type {
+  AgentMessage, CollaboratorSession, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session,
+} from '../types.js';
 import type {
   AttentionDecisionInput, CollaboratorRunSummary, Profile, PublicationTarget, WorkRun,
 } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
-import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { adminRepos, adminRuns, adminSessions } from './adminProjection.js';
 import { listCollaboratorRuns } from './collaboratorRuns.js';
+import { listCollaboratorSessions } from './collaboratorSessions.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
@@ -27,7 +31,7 @@ import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
-import { finalizeRemoteAuthentication } from './remote-auth.js';
+import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
 // Owns its own 1 Hz interval so the footer clock ticks without re-rendering
 // the rest of the app (see docs/specs: "Stop the global setNow re-render").
@@ -119,6 +123,8 @@ export function App() {
   const [collaboratorProfiles, setCollaboratorProfiles] = useState<Profile[]>([]);
   /** Kept apart from `runs` above: a collaborator device receives the narrowed projection (server/collaborator-run-view.ts), not a WorkRun, and the desktop's deep-link/selection logic reads `runs` expecting the full shape. */
   const [collaboratorRuns, setCollaboratorRuns] = useState<CollaboratorRunSummary[]>([]);
+  /** Kept apart from `sessions` above for the same reason: GET /api/sessions answers a collaborator device with CollaboratorSession (server/collaborator-session-view.ts), which has no cwd, worktreePath, pid or launchSpec — the desktop tree reads `sessions` expecting all of them. */
+  const [collaboratorSessions, setCollaboratorSessions] = useState<CollaboratorSession[]>([]);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
@@ -155,7 +161,8 @@ export function App() {
   }), []);
 
   const refreshSessions = useCallback(() => apiFetch('/api/sessions')
-    .then((response) => responseJsonArray<Session>(response)).then((body) => {
+    .then((response) => responseJsonArray<Session>(response)).then((all) => {
+      const body = adminSessions(all);
       setSessions(body);
       setError(null);
       const requested = requestedSessionIdRef.current;
@@ -174,8 +181,9 @@ export function App() {
         return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
       });
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
-  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((body) => {
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => setRepos(adminRepos(all))).catch(() => undefined), []);
+  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((all) => {
+    const body = adminRuns(all);
     setRuns(body);
     // Ticket 07: the native companion's openRun deep-link (?run=<id>) — same
     // one-shot "consume once loaded, then clear the URL" shape as the
@@ -191,6 +199,7 @@ export function App() {
   }).catch(() => undefined), []);
   const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
   const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then(setCollaboratorRuns).catch(() => undefined), []);
+  const refreshCollaboratorSessions = useCallback(() => listCollaboratorSessions().then(setCollaboratorSessions).catch(() => undefined), []);
   // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
   // Repositories and Profiles — GET /api/repos and GET /api/profiles are
   // already grant-filtered (and, for Repositories, narrowed) server-side, so
@@ -235,6 +244,12 @@ export function App() {
         if (!collaboratorPrincipal) return;
         refreshCollaboratorRuns();
         refreshCollaboratorGrants();
+        // The admin's own phone keeps its session list current from WS
+        // 'session_update' frames, but ws.ts excludes a collaborator socket
+        // from both session broadcasts (and 'attach'), so this list is only
+        // ever as fresh as the last poll. GET /api/sessions is grant-scoped
+        // and narrowed for a collaborator device (collaborator-session-view.ts).
+        refreshCollaboratorSessions();
       };
       refreshCollaborator();
       const background = setInterval(refreshCollaborator, collaboratorPrincipal ? 3000 : 5000);
@@ -243,7 +258,7 @@ export function App() {
     refreshRepos(); refreshRuns(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
     const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [collaboratorPrincipal, connectionKind, refreshClaims, refreshCollaboratorGrants, refreshCollaboratorRuns, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
+  }, [collaboratorPrincipal, connectionKind, refreshClaims, refreshCollaboratorGrants, refreshCollaboratorRuns, refreshCollaboratorSessions, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
 
   useEffect(() => {
     if (connectionKind === 'remote') return;
@@ -336,6 +351,47 @@ export function App() {
     persistInspectorCollapsed(inspectorPreferenceStorage(), inspectorCollapsed);
   }, [inspectorCollapsed]);
 
+  // Three places learn this connection's identity — the probe below and
+  // both gate submissions — and every one of them has to apply it the same
+  // way. They used to diverge: submitToken/submitInvitation set the gate
+  // but dropped `principal`, so a collaborator who had just redeemed an
+  // invitation code stayed on the admin's session view until a full reload
+  // (MobileWorkspace forks on collaboratorPrincipal). One helper, three
+  // callers, so they cannot drift again.
+  const applyConnection = useCallback((body: ConnectionInfo) => {
+    const { kind, gate, principal } = resolveConnectionState(body);
+    if (kind === 'remote') setConnectionKind('remote');
+    setConnectionGate(gate);
+    // Ticket 12 AC6: present only for a resolved collaborator device —
+    // drives whether MobileWorkspace renders the collaborator workspace at
+    // all, and which Repositories/Profiles it offers work in.
+    setCollaboratorPrincipal(principal);
+  }, []);
+
+  // A device can hold exactly one credential, and the gate is only
+  // reachable while GET /api/connection reports zero capabilities — so a
+  // phone handed the shared tailnet token first could never reach the
+  // invitation-code form again without clearing localStorage by hand.
+  // Dropping the stored credential and re-gating is the only way to change
+  // identity on a device; the server-side classification is unchanged.
+  const signOut = useCallback(() => {
+    setStoredToken(tokenStorage(), '');
+    setCollaboratorPrincipal(null);
+    setCollaboratorRepos([]);
+    setCollaboratorProfiles([]);
+    setCollaboratorRuns([]);
+    setCollaboratorSessions([]);
+    setSessions([]);
+    setRunAttention([]);
+    setError(null);
+    setTokenInput('');
+    setTokenError(null);
+    setInviteCode('');
+    setInviteError(null);
+    setAuthMode('token');
+    setConnectionGate('needs-token');
+  }, []);
+
   // Ticket 05: how the client discovers "you're remote, please enter a
   // token". The endpoint is reachable without a token, but this request
   // still carries a stored token so a returning phone can validate it and
@@ -344,19 +400,10 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     fetchConnection()
-      .then((body) => {
-        if (cancelled) return;
-        if (body.kind === 'remote') setConnectionKind('remote');
-        if (body.kind === 'denied') setConnectionGate('denied');
-        else if (body.kind === 'remote' && body.capabilities.length === 0) setConnectionGate('needs-token');
-        else setConnectionGate('ready');
-        // Ticket 12 AC6: present only for a resolved collaborator device —
-        // drives whether MobileWorkspace offers launching/guiding Runs.
-        setCollaboratorPrincipal(body.principal ?? null);
-      })
+      .then((body) => { if (!cancelled) applyConnection(body); })
       .catch(() => undefined); // can't reach the API at all — leave the normal error/reconnect paths to surface that
     return () => { cancelled = true; };
-  }, []);
+  }, [applyConnection]);
 
 
   const submitToken = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -365,9 +412,8 @@ export function App() {
     try {
       const body = await fetchConnection();
       if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
-        setConnectionKind('remote');
+        applyConnection(body);
         setTokenError(null);
-        setConnectionGate('ready');
       } else {
         setTokenError('That token was not accepted. Check it and try again.');
       }
@@ -387,9 +433,8 @@ export function App() {
     try {
       const body = await fetchConnection();
       if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
-        setConnectionKind('remote');
+        applyConnection(body);
         setInviteError(null);
-        setConnectionGate('ready');
       } else {
         setInviteError('The device credential was not accepted.');
       }
@@ -575,10 +620,12 @@ export function App() {
           collaboratorProfiles={collaboratorProfiles}
           collaboratorRepos={collaboratorRepos}
           collaboratorRuns={collaboratorRuns}
+          collaboratorSessions={collaboratorSessions}
           onError={setError}
           onResolveRunAttention={resolveRunAttention}
           onRunsStale={refreshCollaboratorRuns}
           onSelect={selectSession}
+          onSignOut={signOut}
           runAttention={runAttention}
           session={selected}
           sessions={sessions}

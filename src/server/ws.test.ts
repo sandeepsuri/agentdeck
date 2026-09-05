@@ -1236,7 +1236,13 @@ describe('collaborator device WebSocket access (ticket 11)', () => {
     ws.close();
   });
 
-  it('a collaborator device receives no session_update or session_removed frame for a managed session (the same boundary attach draws, and the one app.ts draws by refusing it GET /api/sessions)', async () => {
+  // This stays true now that a collaborator device CAN read Sessions over
+  // REST: GET /api/sessions is grant-scoped and narrowed
+  // (collaborator-session-view.ts), whereas these frames carry a full
+  // publicSession for every managed Session on the machine, granted or not.
+  // The WebSocket has no per-Repository scoping of its own, so it remains the
+  // boundary 'attach' already drew rather than being widened to match REST.
+  it('a collaborator device receives no session_update or session_removed frame for a managed session (the same boundary attach draws — unlike grant-scoped REST, a broadcast carries every Session on the machine)', async () => {
     const token = issueDeviceToken();
     const collabWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
     const localWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws`, { headers: { host: `127.0.0.1:${collabPort}` } });
