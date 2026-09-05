@@ -69,6 +69,48 @@ export interface Session {
   agentSessionId?: string;
 }
 
+/**
+ * The Collaborator-safe projection of a Session, produced by
+ * server/collaborator-session-view.ts. Declared here, beside Session, so the
+ * mobile client can import the shape it actually receives rather than the
+ * admin-shaped Session it does not.
+ *
+ * Everything that describes the operator's machine rather than the work is
+ * absent by construction: cwd, worktreePath, pid, tty, terminalApp,
+ * tmuxTarget, backend, launchSpec, and the agent's own CLI session id.
+ */
+export interface CollaboratorSession {
+  id: string;
+  origin: SessionOrigin;
+  agent: AgentType;
+  name?: string;
+  /** The granted Repository this Session belongs to — the field every grant check is made against. */
+  repoId: string;
+  branch?: string;
+  status: SessionStatus;
+  statusSource: StatusSource;
+  startedAt: string;
+  lastActivityAt: string;
+  endedAt?: string;
+}
+
+/** One turn of a Session's conversation as a Collaborator sees it — never the raw bus row. */
+export interface CollaboratorSessionMessage {
+  ts: string;
+  /** Who said it: 'human' for anything sent through AgentDeck's composer, 'agent' for the session's own output. */
+  author: 'human' | 'agent';
+  /** 'done' marks a completion summary, 'message' ordinary conversation. */
+  event: 'message' | 'done';
+  text: string;
+}
+
+/** Whether a Collaborator's composer can reach this Session, and why not when it cannot. */
+export interface CollaboratorSessionCapabilities {
+  send: 'managed' | 'queued' | 'unavailable';
+  /** Present only when `send` is 'unavailable' — reader-facing, never an admin instruction. */
+  reason?: string;
+}
+
 export interface LaunchSpec {
   agent: AgentType;
   cwd: string;

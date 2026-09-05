@@ -6,7 +6,7 @@
 // the same shape (see docs/specs/session-persistence-and-remote-access.md,
 // Stage 4 step 3, and src/sessions/live-reflow.ts for the server side).
 import { useEffect, useState } from 'react';
-import type { Repo, RunAttentionItem, Session } from '../../types.js';
+import type { CollaboratorSession, Repo, RunAttentionItem, Session } from '../../types.js';
 import type { AttentionDecisionInput, CollaboratorRunSummary, Profile } from '../../work-engine/types.js';
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
 import { apiFetch } from '../apiFetch.js';
@@ -31,8 +31,20 @@ interface Props {
   collaboratorProfiles?: Profile[];
   /** This Principal's granted Runs, already filtered and narrowed by the server (GET /api/runs). Only ever populated alongside collaboratorPrincipal. */
   collaboratorRuns?: CollaboratorRunSummary[];
+  /** This Principal's granted agent Sessions, already filtered and narrowed by the server (GET /api/sessions). Only ever populated alongside collaboratorPrincipal — the admin path below reads `sessions` instead, which carries the full Session shape it needs. */
+  collaboratorSessions?: CollaboratorSession[];
   /** Asks App to refresh the Run list now rather than at the next poll — used the moment a request creates one. */
   onRunsStale?: () => void;
+  /**
+   * Drops this device's stored credential and returns to the gate. A device
+   * holds exactly one credential and the gate is only reachable while the
+   * connection reports no capabilities, so without this a phone that was
+   * handed the shared tailnet token first can never reach the
+   * invitation-code form — and a collaborator on it is stuck in the session
+   * view below, which is what "the collaborator workspace never appeared"
+   * actually was.
+   */
+  onSignOut?: () => void;
 }
 
 /**
@@ -165,9 +177,11 @@ function SessionDrawer({ open, sessions, selectedId, onClose, onSelect }: {
  *
  * With no `collaboratorPrincipal` this is the admin's own phone on the legacy
  * shared tailnet token: a session view, unchanged in every respect. With one,
- * it is a named Collaborator, who cannot reach a Session at all (app.ts
- * refuses them GET /api/sessions; ws.ts refuses them 'attach') and gets
- * CollaboratorWorkspace's repo-scoped Run workspace instead.
+ * it is a named Collaborator, who gets CollaboratorWorkspace's repo-scoped
+ * workspace instead: the Runs requested in a granted Repository and the
+ * agents running in it, both reached through grant-filtered REST. A
+ * collaborator still never reaches a Session's terminal — ws.ts refuses them
+ * 'attach' and both session broadcasts — only its conversation.
  *
  * Dispatching here, before any session state exists, is what keeps the admin
  * path provably untouched — the two trees share no hooks, so neither can
@@ -181,10 +195,12 @@ export function MobileWorkspace(props: Props) {
         onError={props.onError}
         onResolveRunAttention={(runId, attentionId, decision) => props.onResolveRunAttention?.(runId, attentionId, decision)}
         onRunsStale={props.onRunsStale ?? (() => undefined)}
+        onSignOut={props.onSignOut}
         principal={collaboratorPrincipal}
         profiles={props.collaboratorProfiles ?? []}
         repos={props.collaboratorRepos ?? []}
         runs={props.collaboratorRuns ?? []}
+        sessions={props.collaboratorSessions ?? []}
       />
     );
   }
@@ -192,7 +208,7 @@ export function MobileWorkspace(props: Props) {
 }
 
 function SessionWorkspace({
-  session, sessions, ws, wsReady, onSelect, onError, runAttention = [], onResolveRunAttention,
+  session, sessions, ws, wsReady, onSelect, onError, onSignOut, runAttention = [], onResolveRunAttention,
 }: Props) {
   // Remote access deliberately covers managed PTYs only. The server filters
   // the list and update stream, while this last-mile filter prevents a stale
@@ -260,10 +276,12 @@ function SessionWorkspace({
           <small>
             {managedSession
               ? <><span className={`mobile-status-dot status-${managedSession.status}`} />{managedSession.agent === 'claude' ? 'Claude Code' : 'Codex'} · {STATUS_LABELS[managedSession.status].toLowerCase()}</>
-              : 'Remote sessions'}
+              : 'Signed in with the shared access token'}
           </small>
         </span>
-        <span aria-hidden="true" className="mobile-topbar-spacer" />
+        {onSignOut
+          ? <button className="mobile-signout" onClick={onSignOut} type="button">Sign out</button>
+          : <span aria-hidden="true" className="mobile-topbar-spacer" />}
       </header>
 
       {runAttention.length > 0 && (() => {

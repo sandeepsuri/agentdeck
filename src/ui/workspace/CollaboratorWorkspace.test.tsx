@@ -13,7 +13,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { Repo } from '../../types.js';
+import type { CollaboratorSession, Repo } from '../../types.js';
 import type { CollaboratorRunDetail, CollaboratorRunSummary, Profile } from '../../work-engine/types.js';
 import { CollaboratorWorkspace, type Props } from './CollaboratorWorkspace.js';
 
@@ -39,6 +39,14 @@ const profile: Profile = {
   budget: { maxWallClockMs: 900_000 }, verificationIntent: { required: false, commands: [] },
   requestedDeliveryResult: 'local-commit', createdAt: '2026-01-01T00:00:00.000Z',
 };
+
+function agent(overrides: Partial<CollaboratorSession> = {}): CollaboratorSession {
+  return {
+    id: 'session-1', origin: 'external', agent: 'claude', name: 'Claude on auth',
+    repoId: 'repo-1', status: 'working', statusSource: 'hook',
+    startedAt: '2026-09-01T00:00:00.000Z', lastActivityAt: '2026-09-01T00:05:00.000Z', ...overrides,
+  };
+}
 
 function summary(overrides: Partial<CollaboratorRunSummary> = {}): CollaboratorRunSummary {
   return {
@@ -73,6 +81,7 @@ async function mount(props: Partial<Props> = {}) {
         profiles={[profile]}
         repos={[granted]}
         runs={[]}
+        sessions={[]}
         {...props}
       />,
     );
@@ -104,15 +113,18 @@ describe('CollaboratorWorkspace navigation', () => {
     expect(host.textContent).not.toContain('Bump the web deps');
   });
 
-  it('lists every granted Repository in the drawer with its count of Runs in progress', async () => {
+  it('lists every granted Repository in the drawer with its count of work in progress — Runs and agents alike, matching the feed the row opens', async () => {
     const host = await mount({
       repos: [granted, other],
       runs: [summary(), summary({ id: 'run-2', status: 'completed' })],
+      sessions: [agent(), agent({ id: 'session-2', status: 'exited' })],
     });
     const rows = [...host.querySelectorAll('[data-repo-id]')].map((row) => row.textContent);
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toContain('1 active');
-    expect(rows[1]).toContain('No Runs in progress');
+    // One Run still running plus one live agent; the completed Run and the
+    // exited agent are both finished work and count for neither.
+    expect(rows[0]).toContain('2 active');
+    expect(rows[1]).toContain('Nothing in progress');
   });
 
   it('orders Runs in progress ahead of finished ones', async () => {
@@ -296,5 +308,121 @@ describe('CollaboratorWorkspace requesting work', () => {
     const host = await mount({ profiles: [] });
     expect(host.textContent).toContain('No Profiles have been granted to you yet');
     expect(host.querySelector('textarea[aria-label="Objective"]')).toBeNull();
+  });
+});
+
+// The agent half of the Repository feed. A Collaborator reaches an agent's
+// conversation over grant-scoped REST only -- there is no WebSocket here, and
+// no terminal -- so these mount against stubbed /messages and /capabilities
+// responses exactly as the Run conversation above mounts against /api/runs/:id.
+describe('CollaboratorWorkspace agent conversation', () => {
+  /** Routes the two GETs the Session level makes; anything else fails loudly rather than silently answering []. */
+  function stubAgentFetch(messages: unknown[], capabilities: unknown = { send: 'queued' }) {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/messages')) return jsonResponse(messages);
+      if (url.includes('/capabilities')) return jsonResponse(capabilities);
+      throw new Error(`unexpected request: ${url}`);
+    });
+  }
+
+  it('lists the agents running in a Repository alongside its Runs, as one feed', async () => {
+    const host = await mount({ runs: [summary()], sessions: [agent()] });
+    expect(host.textContent).toContain('Agents');
+    expect(host.textContent).toContain('Claude on auth');
+    expect(host.textContent).toContain('Runs');
+    expect(host.textContent).toContain('Fix the flaky auth test');
+  });
+
+  it('shows only the agents running in the Repository being viewed', async () => {
+    const host = await mount({
+      repos: [granted, other],
+      sessions: [agent(), agent({ id: 'session-2', name: 'Codex elsewhere', repoId: 'repo-2' })],
+    });
+    expect(host.textContent).toContain('Claude on auth');
+    expect(host.textContent).not.toContain('Codex elsewhere');
+  });
+
+  it('orders live agents ahead of finished ones, newest activity first', async () => {
+    const host = await mount({
+      sessions: [
+        agent({ id: 'ended', status: 'exited', lastActivityAt: '2026-09-01T09:00:00.000Z' }),
+        agent({ id: 'live', status: 'working', lastActivityAt: '2026-09-01T01:00:00.000Z' }),
+      ],
+    });
+    const ids = [...host.querySelectorAll('[data-session-id]')].map((tile) => tile.getAttribute('data-session-id'));
+    expect(ids).toEqual(['live', 'ended']);
+  });
+
+  it('opens an agent and renders its conversation, attributing each turn', async () => {
+    vi.stubGlobal('fetch', stubAgentFetch([
+      { ts: '2026-09-01T00:01:00.000Z', author: 'human', event: 'message', text: 'Please look at the auth test.' },
+      { ts: '2026-09-01T00:02:00.000Z', author: 'agent', event: 'message', text: 'It races on a shared clock.' },
+    ]));
+
+    const host = await mount({ sessions: [agent()] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.textContent).toContain('Please look at the auth test.');
+    expect(host.textContent).toContain('It races on a shared clock.');
+    expect(host.textContent).toContain('You');
+  });
+
+  it('sends a message to an agent and clears the composer', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/messages')) return jsonResponse([]);
+      if (url.includes('/capabilities')) return jsonResponse({ send: 'queued' });
+      if (url.includes('/send') && init?.method === 'POST') return jsonResponse({ delivered: 'queued' });
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount({ sessions: [agent()] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const composer = host.querySelector('textarea[aria-label="Message this agent"]') as HTMLTextAreaElement;
+    await act(async () => { setInputValue(composer, 'Any progress?'); });
+    await act(async () => {
+      composer.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+
+    const sent = fetchMock.mock.calls.find(([url]) => String(url).includes('/send'));
+    expect(sent).toBeDefined();
+    expect(JSON.parse(String(sent![1]!.body))).toEqual({ text: 'Any progress?' });
+    expect(composer.value).toBe('');
+  });
+
+  // A composer offered for a Session the server would then refuse is worse
+  // than no composer: the reader is told why instead.
+  it('replaces the composer with the server’s reason when an agent cannot be messaged', async () => {
+    vi.stubGlobal('fetch', stubAgentFetch([], {
+      send: 'unavailable',
+      reason: 'This agent has finished. Its conversation is read-only.',
+    }));
+
+    const host = await mount({ sessions: [agent({ status: 'exited' })] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.textContent).toContain('This agent has finished. Its conversation is read-only.');
+    expect(host.querySelector('textarea[aria-label="Message this agent"]')).toBeNull();
+  });
+
+  it('goes back from an agent to the Repository it belongs to', async () => {
+    vi.stubGlobal('fetch', stubAgentFetch([]));
+
+    const host = await mount({ runs: [summary()], sessions: [agent()] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(host.querySelector('[data-run-id="run-1"]')).toBeNull();
+
+    const back = host.querySelector('[aria-label="Back to repository"]') as HTMLButtonElement;
+    await act(async () => { back.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.querySelector('[data-run-id="run-1"]')).not.toBeNull();
+    expect(host.querySelector('[data-session-id="session-1"]')).not.toBeNull();
   });
 });

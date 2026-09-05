@@ -241,8 +241,6 @@ describe('named collaborator device credentials (ticket 11)', () => {
   });
 
   it.each([
-    ['GET', '/api/sessions'],
-    ['POST', '/api/sessions/some-id/send'],
     ['GET', '/api/runs/some-id/activity'],
     ['POST', '/api/runs/some-id/publish'],
     ['DELETE', '/api/runs/some-id'],
@@ -257,6 +255,52 @@ describe('named collaborator device credentials (ticket 11)', () => {
         method: method as 'GET' | 'POST' | 'DELETE', url,
         headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
         payload: method === 'GET' ? undefined : '{}',
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
+    },
+  );
+
+  // The Session routes a Repository grant now covers. They are proved
+  // differently from the Run routes below because routes.ts registers them on
+  // this bare app: reaching the handler is the point, so a stub manager
+  // answers an empty machine and a granted collaborator gets an empty list
+  // rather than the gate's 403. What stays refused is above.
+  it.each([
+    ['GET', '/api/sessions', 200],
+    ['GET', '/api/sessions/some-id/messages', 404],
+    ['GET', '/api/sessions/some-id/capabilities', 404],
+    ['POST', '/api/sessions/some-id/send', 404],
+  ])(
+    'a collaborator device reaches %s %s — a Repository grant covers the agents running in it, not only its Runs (each handler grant-checks session.repoId itself, which is why an unknown Session answers 404 and never 403)',
+    async (method, url, expected) => {
+      build({
+        manager: { listSessions: () => [], getSession: () => undefined } as unknown as RouteContext['manager'],
+      });
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['/repos/example'] });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+      const response = await app.inject({
+        method: method as 'GET' | 'POST', url,
+        headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' },
+        payload: method === 'GET' ? undefined : JSON.stringify({ text: 'hello' }),
+      });
+      expect(response.statusCode).toBe(expected);
+      expect(response.json()).not.toEqual({ error: 'this endpoint is not available on a remote connection' });
+    },
+  );
+
+  // The legacy shared tailnet token is not a grant, so it keeps exactly the
+  // reach it had: the session list it always received, and nothing further.
+  it.each([
+    ['GET', '/api/sessions/some-id/messages'],
+    ['GET', '/api/sessions/some-id/capabilities'],
+  ])(
+    'the legacy shared token stays refused %s %s — those opened for a grant-carrying device only',
+    async (method, url) => {
+      build({ config: { ...defaultConfig(), tailscaleToken: 'the-shared-token' } });
+      const response = await app.inject({
+        method: method as 'GET', url,
+        headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: 'the-shared-token' },
       });
       expect(response.statusCode).toBe(403);
       expect(response.json()).toEqual({ error: 'this endpoint is not available on a remote connection' });
