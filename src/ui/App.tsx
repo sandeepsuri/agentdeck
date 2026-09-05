@@ -7,6 +7,7 @@ import type {
 } from '../work-engine/types.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { adminRepos, adminRuns, adminSessions } from './adminProjection.js';
 import { listCollaboratorRuns } from './collaboratorRuns.js';
 import { listCollaboratorSessions } from './collaboratorSessions.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
@@ -28,7 +29,7 @@ import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
-import { adminSessions, repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
+import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
@@ -180,8 +181,9 @@ export function App() {
         return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
       });
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
-  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((body) => {
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => setRepos(adminRepos(all))).catch(() => undefined), []);
+  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((all) => {
+    const body = adminRuns(all);
     setRuns(body);
     // Ticket 07: the native companion's openRun deep-link (?run=<id>) — same
     // one-shot "consume once loaded, then clear the URL" shape as the

@@ -33,23 +33,6 @@ export function isEndedSession(session: Session): boolean {
   return session.origin === 'managed' && session.status === 'exited';
 }
 
-/**
- * Keeps a list to the admin-shaped Session the three functions below require:
- * sessionLabel, repoPathOf and repoDisplayName all dereference `cwd`, and a
- * Session that reaches the client without one throws on the next render.
- *
- * That is reachable, not theoretical. GET /api/sessions answers a collaborator
- * device with the narrowed CollaboratorSession
- * (server/collaborator-session-view.ts), and App fetches it before
- * GET /api/connection has said which kind of device this is — the desktop tree
- * renders while that probe is still in flight, by design. A collaborator's
- * agents reach the UI through their own state, never this list, so filtering
- * leaves them with an empty one rather than a broken one.
- */
-export function adminSessions(sessions: readonly Session[]): Session[] {
-  return sessions.filter((session) => typeof session.cwd === 'string');
-}
-
 export function sessionLabel(session: Session): string {
   return session.name ?? `${session.agent === 'claude' ? 'Claude' : 'Codex'} · ${session.cwd.split('/').pop() ?? session.cwd}`;
 }
