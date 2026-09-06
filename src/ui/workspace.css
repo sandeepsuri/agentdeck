@@ -626,3 +626,12 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
   .mobile-run-list { padding-inline: 12px; }
   .mobile-request-composer { padding-inline: 12px; }
 }
+
+/* Shared conversation is the default Session surface for every participant. */
+.session-workspace { flex-direction: column; gap: 10px; }
+.session-view-tabs { display: flex; gap: 6px; }
+.session-view-tabs [aria-pressed="true"] { color: var(--text-primary); border-color: var(--text-muted); }
+.session-chat { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.session-chat .mobile-request-composer { width: min(100%, 760px); box-sizing: border-box; align-self: center; }
+.session-terminal-panel { display: flex; flex: 1; min-height: 0; }
+.session-terminal-panel[hidden] { display: none; }

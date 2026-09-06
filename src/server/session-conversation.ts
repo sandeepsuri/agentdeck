@@ -4,10 +4,8 @@
 // /api/sessions/:id/chat (routes.ts) both go through this rather than
 // duplicating either decision.
 //
-// Scope: this backs the collaborator chat surface only (CollaboratorWorkspace
-// / mobile). The admin's own TerminalWorkspace stays exactly what it always
-// was -- a terminal, not a chat composer -- and POST /api/sessions/:id/send
-// is untouched for that and every other existing caller.
+// Shared by the admin Dashboard and collaborator Session chat. Raw terminal
+// access remains a separate operator surface.
 import { resolveLocalPrincipal } from '../work-engine/principal.js';
 import type { StoredSessionChatMessage } from '../store/index.js';
 import type { AgentMessage, Session, SessionChatMessage } from '../types.js';

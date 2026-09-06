@@ -31,15 +31,14 @@ export function listSessionMessages(
 }
 
 /**
- * Whether this Session's composer can be offered at all. The server answers
- * from the same pure function its send route checks, so the composer is never
- * shown for a Session that would then refuse the message.
+ * Whether an @agent message can reach this Session. Uses the same capability
+ * check for admins and collaborators; ordinary chat remains available.
  */
 export function getSessionCapabilities(
   sessionId: string,
   fetcher: SessionFetcher = apiFetch,
 ): Promise<CollaboratorSessionCapabilities> {
-  return fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/capabilities`)
+  return fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/capabilities?mode=chat`)
     .then((response) => responseJson<CollaboratorSessionCapabilities>(response));
 }
 

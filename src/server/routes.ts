@@ -1027,7 +1027,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // POST /send below), so reporting 'terminal'/'vscode' here would promise
     // a composer that the send route then refuses. It is told what it can
     // actually use, and why not when the answer is nothing.
-    if (sessionGrant(req)) return collaboratorSendCapability(session);
+    if (sessionGrant(req) || (req.query as { mode?: string }).mode === 'chat') return collaboratorSendCapability(session);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const replyCapture = session.agent === 'claude'
       ? repoHasClaudeHooks(repoPath)

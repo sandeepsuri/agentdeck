@@ -22,6 +22,12 @@ _All screenshot data is fictional._
 - Coordinate parallel work through file claims, progress events, blockers, task dependencies, and conflict warnings.
 - Keep active agents and attention prompts visible through the native MacBook notch or menu-bar companion.
 
+## Shared session chat
+
+Sessions open to a shared conversation for admins, collaborators, and the active agent. Every message shows its sender. Ordinary messages stay in chat; include `@agent` to send a request to Codex or Claude, for example `@agent investigate the API issue`. Agent-directed posts show whether delivery succeeded, was queued, or could not be sent. Human chat remains available after the agent exits.
+
+Admins can switch to the **Terminal** tab for direct terminal access.
+
 ## Getting Started
 
 ### Prerequisites

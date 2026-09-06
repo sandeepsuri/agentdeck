@@ -56,7 +56,7 @@ describe('getSessionCapabilities', () => {
   it('reads whether this Session can be messaged at all', async () => {
     const { calls, fetcher } = recorder(() => json(200, { send: 'queued' }));
     await expect(getSessionCapabilities('ext-1', fetcher)).resolves.toEqual({ send: 'queued' });
-    expect(calls[0]!.path).toBe('/api/sessions/ext-1/capabilities');
+    expect(calls[0]!.path).toBe('/api/sessions/ext-1/capabilities?mode=chat');
   });
 });
 
