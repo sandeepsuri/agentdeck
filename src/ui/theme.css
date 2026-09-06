@@ -451,6 +451,41 @@
   --scrollbar-hover: rgba(197,185,213,.3);
 }
 
+/* Ticket 38: shared cosmetic-pass tokens, layered on the semantic tokens
+   above so later cosmetic slices (Terminal, Changes, modals, etc.) reuse
+   them instead of re-deriving a palette. --accent is a chrome accent for
+   branding/primary actions only — never a status color, so it never
+   substitutes for the --status-* semantics used by badges/lamps/attention
+   above. Only light/dark carry AgentDeck's own restrained green identity;
+   every named theme skin (midnight/slate/nord/solar/forest/signature) keeps
+   its own accent character by reusing its existing --action-primary. */
+:root {
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+}
+:root,
+:root[data-theme="light"] {
+  --accent: #3d6b53;
+  --accent-bg: #e6efe9;
+  --accent-contrast: #f6f3ea;
+}
+:root[data-theme="dark"] {
+  --accent: #8fcaa4;
+  --accent-bg: rgba(143, 202, 164, 0.14);
+  --accent-contrast: #0e1b14;
+}
+:root[data-theme="midnight"],
+:root[data-theme="slate"],
+:root[data-theme="nord"],
+:root[data-theme="solar"],
+:root[data-theme="forest"],
+:root[data-theme="signature"] {
+  --accent: var(--action-primary);
+  --accent-bg: var(--surface-selected);
+  --accent-contrast: var(--text-on-action);
+}
+
 * { box-sizing: border-box; }
 
 html,

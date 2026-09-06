@@ -1,19 +1,19 @@
 .modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--overlay); }
 .sidebar-runs-label { color: var(--status-waiting); }
-.work-run-row { width: 100%; min-height: 68px; display: flex; align-items: center; gap: 2px; padding: 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-primary); }
+.work-run-row { width: 100%; min-height: 70px; display: flex; align-items: center; gap: 2px; padding: 10px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--text-primary); }
 .work-run-row:hover { background: var(--surface-hover); }
 .work-run-row.is-selected { border-color: var(--status-waiting); background: var(--status-waiting-bg); }
-.work-run-select { flex: 1; min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr); grid-template-areas: "glyph content" "glyph status"; align-items: center; column-gap: 9px; row-gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
-.row-delete-button { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; }
+.work-run-select { flex: 1; min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr); grid-template-areas: "glyph content" "glyph status"; align-items: center; column-gap: 10px; row-gap: 7px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.row-delete-button { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; }
 .work-run-row:hover .row-delete-button, .history-row:hover .row-delete-button { opacity: 1; }
 .row-delete-button:hover { background: var(--status-error-bg); color: var(--status-error); }
-.work-run-glyph { grid-area: glyph; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--status-waiting); border-radius: 8px; color: var(--status-waiting); font: 700 8px var(--font-mono); letter-spacing: .08em; }
+.work-run-glyph { grid-area: glyph; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--status-waiting); border-radius: var(--radius-sm); color: var(--status-waiting); font: 700 8px var(--font-mono); letter-spacing: .08em; }
 .work-run-content { grid-area: content; min-width: 0; }
 .work-run-content strong,.work-run-content small { display: block; overflow: hidden; text-overflow: ellipsis; }
-.work-run-content strong { display: -webkit-box; font-size: 11px; line-height: 1.35; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.work-run-content small { margin-top: 5px; color: var(--text-muted); font: 8.5px var(--font-mono); white-space: nowrap; }
+.work-run-content strong { display: -webkit-box; font-size: 12px; font-weight: 500; line-height: 1.4; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.work-run-content small { margin-top: 5px; color: var(--text-muted); font-size: 10.5px; white-space: nowrap; }
 .work-run-select > .work-run-status { grid-area: status; justify-self: start; }
-.work-run-status { --run-status-color: var(--text-secondary); --run-status-bg: var(--status-neutral-bg); display: inline-flex; width: fit-content; align-items: center; padding: 4px 7px; border: 1px solid color-mix(in srgb, var(--run-status-color) 62%, transparent); border-radius: 999px; background: var(--run-status-bg); color: var(--run-status-color); font: 8px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.work-run-status { --run-status-color: var(--text-secondary); --run-status-bg: var(--status-neutral-bg); display: inline-flex; width: fit-content; align-items: center; padding: 4px 9px; border: 1px solid color-mix(in srgb, var(--run-status-color) 55%, transparent); border-radius: 999px; background: var(--run-status-bg); color: var(--run-status-color); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
 .work-run-status.status-queued,.work-run-status.status-pending,.work-run-status.status-idle { --run-status-color: var(--status-idle); --run-status-bg: var(--status-neutral-bg); }
 .work-run-status.status-preparing,.work-run-status.status-in_progress { --run-status-color: var(--status-starting); --run-status-bg: var(--status-starting-bg); }
 .work-run-status.status-starting,.work-run-status.status-running,.work-run-status.status-working,.work-run-status.status-executing { --run-status-color: var(--status-running); --run-status-bg: var(--status-running-bg); }
@@ -30,23 +30,28 @@
 .sidebar-create-actions > button { min-width: 0; margin: 0; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
 .new-run-button { border: 1px solid var(--status-waiting); background: var(--status-waiting-bg); color: var(--status-waiting); }
 
-.run-workspace { width: min(920px,calc(100% - 48px)); margin: 24px auto; padding: 28px; border: 1px solid var(--border-muted); border-radius: 12px; background: var(--surface-panel); color: var(--text-primary); overflow: auto; }
+.run-workspace { width: min(920px,calc(100% - 48px)); margin: 26px auto; padding: 30px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); overflow: auto; }
 .run-workspace > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--border-muted); }
-.run-workspace h1 { margin: 5px 0 0; font-size: 24px; line-height: 1.25; }
-.run-workspace h2 { margin: 22px 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-.run-workspace small,.run-workspace dt,.run-workspace > footer { color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
-.run-workspace ol { display: grid; gap: 7px; padding-left: 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
-.run-intent-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1px; margin: 22px 0; background: var(--border-muted); border: 1px solid var(--border-muted); }
-.run-intent-grid > div { min-width: 0; padding: 14px; background: var(--surface-panel); }
-.run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font: 11px/1.45 var(--font-mono); }
-.run-intent-grid code { padding: 5px 7px; border-radius: 5px; background: var(--surface-code); }
+.run-workspace h1 { margin: 6px 0 0; font-size: 25px; line-height: 1.3; font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.run-workspace h2 { margin: 24px 0 11px; font-size: 13px; font-weight: 600; }
+.run-workspace small,.run-workspace dt,.run-workspace > footer { color: var(--text-muted); font-size: 10.5px; }
+.run-workspace ol { display: grid; gap: 7px; padding-left: 22px; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
+.run-intent-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1px; margin: 22px 0; background: var(--border-muted); border: 1px solid var(--border-muted); border-radius: var(--radius-md); overflow: hidden; }
+.run-intent-grid > div { min-width: 0; padding: 14px 15px; background: var(--surface-panel); }
+.run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font: 11.5px/1.5 var(--font-mono); }
+.run-intent-grid code { padding: 5px 7px; border-radius: var(--radius-sm); background: var(--surface-code); }
 .run-workspace > footer { padding-top: 18px; border-top: 1px solid var(--border-muted); }
 .run-preparation .button { margin-top: 4px; }
 .run-attempt .button { margin-top: 4px; }
-.run-attempt-activity { display: grid; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
-.run-attempt-event { padding: 9px 12px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-panel); }
-.run-attempt-event strong { font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--text-secondary); }
-.run-attempt-event p { margin: 5px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.run-technical-detail { margin-top: 4px; }
+.run-technical-detail summary { padding: 8px 2px; color: var(--text-muted); font-size: 11.5px; cursor: pointer; list-style: none; }
+.run-technical-detail summary::-webkit-details-marker { display: none; }
+.run-technical-detail summary:hover { color: var(--text-primary); }
+.run-technical-detail .run-intent-grid { margin-top: 8px; }
+.run-attempt-activity { display: grid; gap: 7px; margin: 14px 0 0; padding: 0; list-style: none; }
+.run-attempt-event { padding: 10px 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-panel); }
+.run-attempt-event strong { font-size: 10.5px; font-weight: 600; color: var(--text-secondary); }
+.run-attempt-event p { margin: 5px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
 .run-attempt-event.kind-failure { border-color: var(--status-error); }
 .run-attempt-event.kind-completion { border-color: var(--status-working); }
 
@@ -54,21 +59,21 @@
    sentences. The raw command stays available under "Show technical detail" —
    the durable log keeps it, so a reader who wants the exact shell is one
    click away, and everyone else is not reading /bin/zsh -lc by default. */
-.run-attempt-answer { margin: 16px 0 0; padding: 14px 16px; border: 1px solid var(--border-muted); border-left: 2px solid var(--status-working); border-radius: 6px; background: var(--surface-panel); }
-.run-attempt-answer h3,.run-attempt-steps h3 { margin: 0; color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.run-attempt-answer { margin: 16px 0 0; padding: 15px 17px; border: 1px solid var(--border-muted); border-left: 2px solid var(--status-working); border-radius: var(--radius-md); background: var(--surface-panel); }
+.run-attempt-answer h3,.run-attempt-steps h3 { margin: 0; color: var(--text-muted); font-size: 11px; font-weight: 600; }
 .run-attempt-answer p { margin: 9px 0 0; color: var(--text-primary); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .run-attempt-answer p.is-empty { color: var(--text-muted); font-style: italic; }
 .run-attempt-steps { margin: 18px 0 0; }
 .run-attempt-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .run-attempt-steps .run-attempt-activity { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
-.run-detail-toggle { padding: 5px 9px; border: 1px solid var(--border-muted); border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 10px; cursor: pointer; }
+.run-detail-toggle { padding: 6px 10px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font-size: 11px; cursor: pointer; }
 .run-detail-toggle:hover { background: var(--surface-hover); }
 .run-attempt-step { display: grid; grid-template-columns: 16px minmax(0,1fr); align-items: baseline; gap: 8px; padding: 6px 0; border: 0; background: none; }
 .run-step-mark { color: var(--status-working); font: 11px var(--font-mono); }
 .run-attempt-step.status-failed .run-step-mark { color: var(--status-error); }
 .run-attempt-step.status-started .run-step-mark { color: var(--text-muted); }
 .run-step-label { color: var(--text-primary); font-size: 13px; line-height: 1.5; }
-.run-attempt-step code { grid-column: 2; margin-top: 5px; padding: 6px 8px; border-radius: 5px; background: var(--surface-code); color: var(--text-secondary); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.run-attempt-step code { grid-column: 2; margin-top: 5px; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-code); color: var(--text-secondary); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
 .run-attempt-verdict { margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; }
 .run-attempt-verdict.is-success { color: var(--status-working); }
 .run-attempt-verdict.is-failure { color: var(--status-error); }
@@ -77,12 +82,13 @@
 /* Ticket 07: a pending Run attention request — approve/deny or provide
    clarifying input, matching the .run-attempt-event kind-* accent pattern
    above (border color keyed to what the request means). */
-.run-attention-request { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--status-waiting); border-radius: 6px; background: var(--status-waiting-bg); }
-.run-attention-request strong { display: block; font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--status-waiting); }
-.run-attention-request p { margin: 6px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.run-attention-actions { display: flex; gap: 8px; margin-top: 10px; }
-.run-attention-input-form { display: flex; gap: 8px; margin-top: 10px; }
-.run-attention-input-form input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-muted); border-radius: 6px; background: var(--surface-input); color: var(--text-primary); font: 12px var(--font-sans); }
+.run-attention-request { position: relative; margin: 16px 0 0; padding: 14px 16px 14px 55px; border: 1px solid color-mix(in srgb, var(--status-waiting) 45%, transparent); border-radius: var(--radius-md); background: var(--status-waiting-bg); }
+.run-attention-request::before { content: ''; position: absolute; left: 16px; top: 14px; width: 28px; height: 28px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--status-waiting) 18%, transparent); }
+.run-attention-request strong { display: block; font-size: 13px; font-weight: 600; color: var(--status-waiting); }
+.run-attention-request p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-attention-actions { display: flex; gap: 8px; margin-top: 11px; }
+.run-attention-input-form { display: flex; gap: 8px; margin-top: 11px; }
+.run-attention-input-form input { flex: 1; min-width: 0; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-primary); font: 12.5px var(--font-sans); }
 
 .run-submission-modal { width: min(760px,calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-panel); color: var(--text-primary); box-shadow: 0 24px 80px rgba(0,0,0,.38); }
 .run-submission-modal > header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
@@ -117,14 +123,14 @@
    'succeeded' shares the success look; 'ambiguous' is deliberately the
    waiting color, not error — the admin has to look, not retry blindly. */
 .run-publication { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--border-muted); }
-.run-publication h3 { margin: 14px 0 0; color: var(--text-muted); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.run-publication h3 { margin: 14px 0 0; color: var(--text-muted); font-size: 11px; font-weight: 600; }
 .run-publication-note { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; }
 .run-publication .button { margin-top: 4px; }
 .run-publication a { color: var(--status-working); }
 /* A finished Run whose result never reached the Repository checkout. Styled as
    waiting, not error, and lifted out of the result grid: nothing failed, the
    commit is intact on its own branch, and an operator has to clear the way. */
-.run-delivery-blocked { margin: 18px 0 0; padding: 12px 14px; border: 1px solid var(--status-waiting); border-radius: 6px; background: var(--status-waiting-bg); }
-.run-delivery-blocked strong { display: block; color: var(--status-waiting); font: 9px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; }
-.run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.run-delivery-blocked code { padding: 2px 5px; border-radius: 4px; background: var(--surface-code); font: 11px var(--font-mono); }
+.run-delivery-blocked { margin: 18px 0 0; padding: 13px 15px; border: 1px solid color-mix(in srgb, var(--status-waiting) 45%, transparent); border-radius: var(--radius-md); background: var(--status-waiting-bg); }
+.run-delivery-blocked strong { display: block; color: var(--status-waiting); font-size: 11.5px; font-weight: 600; }
+.run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-delivery-blocked code { padding: 2px 5px; border-radius: var(--radius-sm); background: var(--surface-code); font: 11px var(--font-mono); }

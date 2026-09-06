@@ -182,13 +182,16 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
           <>
             <Meta label="Agent" value={selected.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} />
             <div className="inspector-meta"><span>State</span><StatusBadge status={selected.status} /></div>
-            <Meta label="PID" value={String(selected.pid ?? '—')} />
-            <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
             <Meta label="Directory" value={selected.cwd} />
             <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
             {isEndedSession(selected) && selected.endedAt && (
               <Meta label="Ended" value={new Date(selected.endedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} />
             )}
+            <details className="rail-technical-detail">
+              <summary>Technical detail</summary>
+              <Meta label="PID" value={String(selected.pid ?? '—')} />
+              <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
+            </details>
             <div className="inspector-section-label inner">Runtime</div>
             <div className="runtime-rail-metric"><span>Activity · <ElapsedTime startedAt={selected.startedAt} /></span><SparkBars count={24} seed={7} /></div>
             <div className="runtime-rail-metric"><span>Session events · {events.filter((event) => event.sessionId === selected.id || event.repo === repoPathOf(selected)).length}</span><SparkBars count={24} seed={9} /></div>
@@ -234,10 +237,13 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
         <>
           <Meta label="Agent" value={selected.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} />
           <Meta label="Origin" value={selected.origin} />
-          <Meta label="PID" value={String(selected.pid ?? '—')} />
-          <Meta label="TTY" value={selected.tty ?? '—'} />
           <Meta label="Worktree" value={selected.cwd.split('/').pop() ?? selected.cwd} />
           <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
+          <details className="rail-technical-detail">
+            <summary>Technical detail</summary>
+            <Meta label="PID" value={String(selected.pid ?? '—')} />
+            <Meta label="TTY" value={selected.tty ?? '—'} />
+          </details>
           <button className="button open-terminal-button" onClick={() => onView('terminal')} type="button"><span>&gt;_</span> Open in terminal</button>
         </>
       ) : <div className="rail-empty">Select a session to inspect it.</div>}
