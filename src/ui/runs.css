@@ -38,8 +38,20 @@
 .run-workspace ol { display: grid; gap: 7px; padding-left: 22px; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
 .run-intent-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1px; margin: 22px 0; background: var(--border-muted); border: 1px solid var(--border-muted); border-radius: var(--radius-md); overflow: hidden; }
 .run-intent-grid > div { min-width: 0; padding: 14px 15px; background: var(--surface-panel); }
-.run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font: 11.5px/1.5 var(--font-mono); }
-.run-intent-grid code { padding: 5px 7px; border-radius: var(--radius-sm); background: var(--surface-code); }
+.run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
+.run-intent-grid code { padding: 5px 7px; border-radius: var(--radius-sm); background: var(--surface-code); font: 11.5px/1.5 var(--font-mono); }
+
+/* A section whose facts stay reachable once settled, but no longer need to
+   hold the page open: expanded while there is something to decide or fix
+   (open reflects live state, not a stored preference), a quiet one-line
+   summary — heading plus its status pill — once ready. Distinct from
+   .run-technical-detail (used for a nested, always-secondary disclosure like
+   Permissions & limits) so this one can carry a heading-sized summary. */
+.run-section-detail { margin-top: 4px; }
+.run-section-detail > summary { display: flex; align-items: center; gap: 10px; padding: 2px 2px 12px; cursor: pointer; list-style: none; }
+.run-section-detail > summary::-webkit-details-marker { display: none; }
+.run-section-detail > summary h2 { flex: 1; margin: 0; }
+.run-section-detail[open] > summary { padding-bottom: 12px; }
 .run-workspace > footer { padding-top: 18px; border-top: 1px solid var(--border-muted); }
 .run-preparation .button { margin-top: 4px; }
 .run-attempt .button { margin-top: 4px; }
@@ -134,3 +146,18 @@
 .run-delivery-blocked strong { display: block; color: var(--status-waiting); font-size: 11.5px; font-weight: 600; }
 .run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
 .run-delivery-blocked code { padding: 2px 5px; border-radius: var(--radius-sm); background: var(--surface-code); font: 11px var(--font-mono); }
+
+/* Verification evidence: a sentence-readable checklist rather than a wall of
+   commands — each gate's pass/fail reads first, its command follows as a
+   secondary, muted detail. */
+.run-result-verification { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; }
+.run-result-verification li { color: var(--text-primary); line-height: 1.5; }
+.run-result-verification li.is-success { color: var(--status-working); }
+.run-result-verification li.is-failure { color: var(--status-error); }
+.run-result-verification code { display: block; margin: 4px 0 0 21px; padding: 4px 7px; border-radius: var(--radius-sm); background: var(--surface-code); color: var(--text-secondary); font: 11px var(--font-mono); }
+
+/* A11y note: the glyph is decorative (the card's heading text already says
+   "Approval requested" vs. "Input requested"), so it is CSS content keyed off
+   the data attribute RunWorkspace already sets, not an element of its own. */
+.run-attention-request::before { content: '?'; display: flex; align-items: center; justify-content: center; color: var(--status-waiting); font-size: 15px; font-weight: 700; }
+.run-attention-request[data-attention-kind="approval"]::before { content: '\2713'; }
