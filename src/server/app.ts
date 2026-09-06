@@ -102,7 +102,7 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
     // broadcasts stay refused for a collaborator socket (ws.ts), because
     // those carry raw PTY bytes and an unscoped machine-wide view.
     if (pathname === '/api/sessions') return true;
-    if (/^\/api\/sessions\/[^/]+\/(messages|capabilities)$/.test(pathname)) return true;
+    if (/^\/api\/sessions\/[^/]+\/(messages|capabilities|chat)$/.test(pathname)) return true;
     // Ticket 12 AC3: GET /api/runs/attention is included here — unlike the
     // legacy shared-token/local path (isRemoteAllowedRoute), which gets
     // work-routes.ts's unfiltered, system-wide queue, a collaborator
@@ -117,7 +117,7 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
     // The write half of the same chat: grant-checked against session.repoId,
     // and routed only through the two paths that never drive the operator's
     // own terminal — see the collaborator branch in routes.ts's handler.
-    if (/^\/api\/sessions\/[^/]+\/send$/.test(pathname)) return true;
+    if (/^\/api\/sessions\/[^/]+\/(send|chat)$/.test(pathname)) return true;
     if (pathname === '/api/runs') return true; // submit — policy-checked inside DurableWorkEngine.submit()
     if (/^\/api\/runs\/[^/]+\/(prepare|start|cancel)$/.test(pathname)) return true;
     if (/^\/api\/runs\/[^/]+\/attention\/[^/]+\/(approve|deny|input)$/.test(pathname)) return true;

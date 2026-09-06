@@ -104,6 +104,38 @@ export interface CollaboratorSessionMessage {
   text: string;
 }
 
+export type ChatAuthorKind = 'human' | 'agent';
+/** Where a posted message goes: 'chat' means every participant sees it and the agent never does; 'agent' means it was (or will be) delivered to the runtime too. */
+export type ChatAudience = 'chat' | 'agent';
+/** The outcome of attempting to deliver an audience:'agent' message — see docs/specs/shared-session-chat.md's "Delivery and simultaneous use". */
+export type ChatDeliveryState = 'sent' | 'queued' | 'not_sent';
+
+/**
+ * One entry in a Session's shared chat feed (server/session-conversation.ts),
+ * attributed to a real sender rather than collapsed into "human" — the
+ * redesign this type exists for: a Session shared by several collaborators
+ * previously reduced every human message to "You" (CollaboratorSessionMessage
+ * above), regardless of who actually sent it.
+ */
+export interface SessionChatMessage {
+  id: string;
+  ts: string;
+  authorKind: ChatAuthorKind;
+  /** A named collaborator's or the local admin's Principal id — absent for the legacy shared-token path and for the agent's own turns, never guessed. */
+  principalId?: string;
+  displayName: string;
+  /** The message exactly as its author wrote it — an @agent mention is never stripped from what other participants see, only from the delivery payload. */
+  text: string;
+  /** Present on human rows only. */
+  audience?: ChatAudience;
+  /** Present on agent rows only — 'done' marks a completion summary, 'message' ordinary conversation. */
+  event?: 'message' | 'done';
+  /** Present only on a human row addressed to the agent (audience: 'agent'). */
+  delivery?: ChatDeliveryState;
+  /** Present only when delivery is 'not_sent' — reader-facing, never an admin instruction. */
+  deliveryReason?: string;
+}
+
 /** Whether a Collaborator's composer can reach this Session, and why not when it cannot. */
 export interface CollaboratorSessionCapabilities {
   send: 'managed' | 'queued' | 'unavailable';

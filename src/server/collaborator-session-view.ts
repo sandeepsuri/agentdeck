@@ -41,7 +41,7 @@ const MAX_MESSAGES = 100;
  * collaborator already holds it, because GET /api/repos returns it as
  * `repo.id` and every grant is stored against it.
  */
-function sessionRoots(session: Session): readonly string[] {
+export function sessionRoots(session: Session): readonly string[] {
   return [session.worktreePath, session.repoId, session.cwd].filter((value): value is string => Boolean(value));
 }
 

@@ -4,7 +4,9 @@
 import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentMessage, AgentType, Repo, Session, Task } from '../types.js';
+import type {
+  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, Session, Task,
+} from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
@@ -232,6 +234,44 @@ function rowToRunPublication(r: RunPublicationTableRow): RunPublication {
     ...(result !== undefined ? { result } : {}),
     ...(r.reason !== null ? { reason: r.reason } : {}),
   };
+}
+
+interface SessionChatMessageRow {
+  id: string; session_id: string; sequence: number; ts: string; author_kind: string;
+  principal_id: string | null; display_name: string; text: string; audience: string;
+  delivery: string | null; delivery_reason: string | null;
+}
+
+/** A durably stored human chat post (docs/specs/shared-session-chat.md) — the agent's own turns are never stored here, see server/session-conversation.ts. */
+export interface StoredSessionChatMessage {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  ts: string;
+  authorKind: 'human';
+  principalId?: string;
+  displayName: string;
+  text: string;
+  audience: ChatAudience;
+  delivery?: ChatDeliveryState;
+  deliveryReason?: string;
+}
+
+function rowToSessionChatMessage(r: SessionChatMessageRow): StoredSessionChatMessage {
+  const message: StoredSessionChatMessage = {
+    id: r.id,
+    sessionId: r.session_id,
+    sequence: r.sequence,
+    ts: r.ts,
+    authorKind: 'human',
+    displayName: r.display_name,
+    text: r.text,
+    audience: r.audience as ChatAudience,
+  };
+  if (r.principal_id !== null) message.principalId = r.principal_id;
+  if (r.delivery !== null) message.delivery = r.delivery as ChatDeliveryState;
+  if (r.delivery_reason !== null) message.deliveryReason = r.delivery_reason;
+  return message;
 }
 
 // --- store -------------------------------------------------------------------
@@ -632,6 +672,55 @@ export class Store implements CollaboratorStore {
     return rows
       .map((r) => ({ ...(JSON.parse(r.payload) as AgentMessage), eventId: r.id }))
       .reverse(); // chronological
+  }
+
+  // -- session chat (docs/specs/shared-session-chat.md) --
+  //
+  // One row per HUMAN post to a Session's shared conversation, attributed to
+  // a real Principal instead of collapsed into a `dashboard:<sessionId>` bus
+  // row. `sequence` is assigned here, not by the caller, so a monotonic
+  // per-session order survives concurrent posters without them coordinating.
+
+  /** `input.sequence` is never accepted from the caller — assigned as this session's next value so two posters can never collide or reorder each other. */
+  appendSessionChatMessage(input: {
+    id: string; sessionId: string; ts: string; principalId?: string; displayName: string;
+    text: string; audience: ChatAudience; delivery?: ChatDeliveryState; deliveryReason?: string;
+  }): StoredSessionChatMessage {
+    const { sequence } = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM session_chat_messages WHERE session_id = ?')
+      .get(input.sessionId) as { sequence: number };
+    this.db.prepare(
+      `INSERT INTO session_chat_messages
+         (id, session_id, sequence, ts, author_kind, principal_id, display_name, text, audience, delivery, delivery_reason)
+       VALUES (@id, @sessionId, @sequence, @ts, 'human', @principalId, @displayName, @text, @audience, @delivery, @deliveryReason)`,
+    ).run({
+      id: input.id,
+      sessionId: input.sessionId,
+      sequence,
+      ts: input.ts,
+      principalId: input.principalId ?? null,
+      displayName: input.displayName,
+      text: input.text,
+      audience: input.audience,
+      delivery: input.delivery ?? null,
+      deliveryReason: input.deliveryReason ?? null,
+    });
+    const message: StoredSessionChatMessage = {
+      id: input.id, sessionId: input.sessionId, sequence, ts: input.ts, authorKind: 'human',
+      displayName: input.displayName, text: input.text, audience: input.audience,
+    };
+    if (input.principalId !== undefined) message.principalId = input.principalId;
+    if (input.delivery !== undefined) message.delivery = input.delivery;
+    if (input.deliveryReason !== undefined) message.deliveryReason = input.deliveryReason;
+    return message;
+  }
+
+  /** Most recent `limit` posts for one Session, oldest first — the same tail shape GET /api/sessions/:id/messages already returns. */
+  listSessionChatMessages(sessionId: string, limit = 100): StoredSessionChatMessage[] {
+    const rows = this.db
+      .prepare('SELECT * FROM session_chat_messages WHERE session_id = ? ORDER BY sequence DESC LIMIT ?')
+      .all(sessionId, limit) as SessionChatMessageRow[];
+    return rows.reverse().map(rowToSessionChatMessage);
   }
 
   // -- settings --

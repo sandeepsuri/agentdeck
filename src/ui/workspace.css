@@ -588,11 +588,17 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-agent-message { padding: 11px 13px; border: 1px solid var(--border-muted); border-radius: 14px; background: var(--surface-panel); }
 .mobile-agent-message.is-human { border-color: var(--action-primary); background: var(--surface-elevated); }
 .mobile-agent-message.is-done { border-color: var(--status-completed); }
+.mobile-agent-message.is-addressed { border-style: dashed; }
 .mobile-agent-message small { display: block; margin-bottom: 6px; color: var(--text-muted); font: 9px var(--font-mono); }
 .mobile-agent-message p { margin: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mobile-message-delivery { display: block; margin-top: 6px; color: var(--text-muted); font: 9px var(--font-mono); }
 .mobile-agent-composer form,.mobile-agent-composer { display: grid; gap: 8px; }
 .mobile-agent-composer button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: 12px; background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
 .mobile-agent-composer button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
+.mobile-agent-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mobile-agent-composer-actions .is-primary { flex: none; }
+.mobile-agent-composer button.mobile-mention-button { flex: none; min-height: 36px; padding: 6px 12px; border-color: var(--border-muted); background: transparent; color: var(--text-secondary); font-size: 11.5px; font-weight: 500; }
+.mobile-agent-composer button.mobile-mention-button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .mobile-agent-hint { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .mobile-agent-closed { width: min(100%,760px); flex: none; align-self: center; margin: 0; padding: 13px 14px max(13px,env(safe-area-inset-bottom)); border-top: 1px solid var(--border-muted); background: var(--surface-panel); color: var(--text-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 .mobile-signout { justify-self: end; min-height: 44px; padding: 7px 11px; border: 1px solid var(--border-muted); border-radius: 10px; background: transparent; color: var(--text-secondary); font: 10px var(--font-mono); cursor: pointer; }

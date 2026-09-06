@@ -4,7 +4,10 @@
 // file pins down that the right routes are called, that an id is escaped
 // before it reaches one, and that a refusal is surfaced rather than swallowed.
 import { describe, expect, it } from 'vitest';
-import { getSessionCapabilities, listCollaboratorSessions, listSessionMessages, sendSessionMessage } from './collaboratorSessions.js';
+import {
+  getSessionCapabilities, listChatMessages, listCollaboratorSessions, listSessionMessages, postChatMessage,
+  sendSessionMessage,
+} from './collaboratorSessions.js';
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -82,5 +85,46 @@ describe('sendSessionMessage', () => {
   it('still fails loudly when a refusal carries no readable body', async () => {
     const { fetcher } = recorder(new Response('', { status: 500 }));
     await expect(sendSessionMessage('ext-1', 'hi', fetcher)).rejects.toThrow('Unable to send to this agent.');
+  });
+});
+
+describe('listChatMessages', () => {
+  it('reads the shared, attributed conversation', async () => {
+    const { calls, fetcher } = recorder(() => json(200, [
+      { id: 'm-1', ts: 't', authorKind: 'human', displayName: 'Alice', text: 'hi', audience: 'chat' },
+    ]));
+    await expect(listChatMessages('ext-1', fetcher)).resolves.toHaveLength(1);
+    expect(calls[0]!.path).toBe('/api/sessions/ext-1/chat');
+  });
+
+  it('escapes a session id rather than building the path by concatenation', async () => {
+    const { calls, fetcher } = recorder(() => json(200, []));
+    await listChatMessages('ext/../secret', fetcher);
+    expect(calls[0]!.path).toBe('/api/sessions/ext%2F..%2Fsecret/chat');
+  });
+});
+
+describe('postChatMessage', () => {
+  it('posts the message and returns it as the server recorded it', async () => {
+    const stored = { id: 'm-1', ts: 't', authorKind: 'human', displayName: 'Alice', text: 'Any progress?', audience: 'chat' };
+    const { calls, fetcher } = recorder(() => json(201, stored));
+
+    await expect(postChatMessage('ext-1', 'Any progress?', fetcher)).resolves.toEqual(stored);
+
+    expect(calls[0]!.path).toBe('/api/sessions/ext-1/chat');
+    expect(calls[0]!.init?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual({ text: 'Any progress?' });
+  });
+
+  // The reader needs the server's own reason -- "Add a message for the
+  // agent.", "this agent has finished" -- not a generic failure.
+  it('surfaces the server’s reason for a refusal', async () => {
+    const { fetcher } = recorder(json(400, { error: 'Add a message for the agent.' }));
+    await expect(postChatMessage('ext-1', '@agent', fetcher)).rejects.toThrow('Add a message for the agent.');
+  });
+
+  it('still fails loudly when a refusal carries no readable body', async () => {
+    const { fetcher } = recorder(new Response('', { status: 500 }));
+    await expect(postChatMessage('ext-1', 'hi', fetcher)).rejects.toThrow('Unable to send this message.');
   });
 });

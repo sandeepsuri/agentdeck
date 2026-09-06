@@ -1,6 +1,7 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
@@ -21,7 +22,7 @@ import {
 } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
-import type { AgentType, LaunchSpec, Session } from '../types.js';
+import type { AgentType, ChatDeliveryState, LaunchSpec, Session } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
@@ -37,6 +38,8 @@ import type { DiscoveryPoller } from '../discovery/poller.js';
 import {
   collaboratorSendCapability, collaboratorSession, collaboratorSessionMessages,
 } from './collaborator-session-view.js';
+import { parseMention } from '../mentions.js';
+import { mergeConversation, resolveSenderIdentity } from './session-conversation.js';
 import { publicSession } from './security.js';
 import { classify, TOKEN_HEADER } from './connection-trust.js';
 import { containsDisallowedControlBytes } from './remote-input.js';
@@ -910,6 +913,110 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // CLI's own session id, so a collaborator device gets the narrowed
     // conversation rather than the rows themselves.
     return granted ? collaboratorSessionMessages(session, selected) : selected;
+  });
+
+  // The shared session chat (docs/specs/shared-session-chat.md): every human
+  // post this Session has durably recorded, attributed to who actually sent
+  // it, merged with the agent's own bus turns. Read-only counterpart to
+  // POST .../chat below; unlike /messages above it survives runtime exit and
+  // never collapses two different senders into "human".
+  app.get('/api/sessions/:id/chat', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const busMessages = await readBusTail(repoPath);
+    const humanMessages = ctx.store?.listSessionChatMessages(session.id) ?? [];
+    return mergeConversation(session, humanMessages, busMessages);
+  });
+
+  app.post('/api/sessions/:id/chat', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const body = req.body as { text?: unknown } | null;
+    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > MAX_MESSAGE_LENGTH) return reply.code(400).send({ error: 'text is too long' });
+
+    const trust = requestTrust(req);
+    const collaborator = trust.device !== undefined;
+    // Same protection as /send: the legacy shared tailnet token can neither
+    // attach to nor safely message an external session.
+    if (!collaborator && trust.kind === 'remote' && session.origin !== 'managed') {
+      return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
+    if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
+      return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
+    }
+
+    // Ordinary chat is stored and shown to every participant, never sent
+    // anywhere else -- see the mention parser's own module comment for why
+    // this decision is made once, the same way, for both the preview and
+    // enforcement. Only an explicit @agent mention crosses into `audience:
+    // 'agent'` below, and a mention with nothing left to ask is rejected
+    // outright rather than silently delivered as an empty prompt.
+    const mention = parseMention(text);
+    if (mention.mentioned && !mention.agentPayload) {
+      return reply.code(400).send({ error: 'Add a message for the agent.' });
+    }
+
+    const { principalId, displayName } = resolveSenderIdentity(trust);
+    const ts = new Date().toISOString();
+    const messageId = randomUUID();
+
+    if (!mention.mentioned) {
+      const stored = ctx.store?.appendSessionChatMessage({
+        id: messageId, sessionId: session.id, ts, principalId, displayName, text, audience: 'chat',
+      });
+      return reply.code(201).send(stored ?? {
+        id: messageId, ts, authorKind: 'human', principalId, displayName, text, audience: 'chat',
+      });
+    }
+
+    // audience: 'agent' -- only the two collaborator-safe delivery paths
+    // (never the terminal-automation branch /send offers the admin, which
+    // scripts the operator's own foreground terminal app) so this route
+    // behaves identically for a named collaborator and the local admin.
+    const capability = collaboratorSendCapability(session);
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const agentPayload = `${displayName}: ${mention.agentPayload}`;
+    let delivery: ChatDeliveryState;
+    let deliveryReason: string | undefined;
+
+    if (capability.send === 'managed') {
+      if (!manager.isLive(id)) {
+        delivery = 'not_sent';
+        deliveryReason = 'This agent is not running.';
+      } else {
+        manager.write(id, agentPayload);
+        // both agent TUIs debounce paste-then-submit
+        setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
+        delivery = 'sent';
+      }
+    } else if (capability.send === 'queued') {
+      await appendInboxMessage(repoPath, { ts, to: session.agentSessionId!, text: agentPayload });
+      delivery = 'queued';
+    } else {
+      delivery = 'not_sent';
+      deliveryReason = capability.reason;
+    }
+
+    // The bus row is what existing hook/scrollback tooling still reads --
+    // recorded only once delivery actually reached the runtime, exactly
+    // when /send would have recorded it, so nothing downstream regresses.
+    if (delivery === 'sent' || delivery === 'queued') {
+      await appendAgentMessage(repoPath, {
+        ts, agent: `dashboard:${session.id}`, repo: repoPath, event: 'message', message: text, sessionId: session.id,
+      });
+    }
+
+    const stored = ctx.store?.appendSessionChatMessage({
+      id: messageId, sessionId: session.id, ts, principalId, displayName, text, audience: 'agent', delivery, deliveryReason,
+    });
+    return reply.code(201).send(stored ?? {
+      id: messageId, ts, authorKind: 'human', principalId, displayName, text, audience: 'agent', delivery, deliveryReason,
+    });
   });
 
   app.get('/api/sessions/:id/capabilities', async (req, reply) => {

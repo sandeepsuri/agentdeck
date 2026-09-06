@@ -313,14 +313,14 @@ describe('CollaboratorWorkspace requesting work', () => {
 
 // The agent half of the Repository feed. A Collaborator reaches an agent's
 // conversation over grant-scoped REST only -- there is no WebSocket here, and
-// no terminal -- so these mount against stubbed /messages and /capabilities
+// no terminal -- so these mount against stubbed /chat and /capabilities
 // responses exactly as the Run conversation above mounts against /api/runs/:id.
 describe('CollaboratorWorkspace agent conversation', () => {
   /** Routes the two GETs the Session level makes; anything else fails loudly rather than silently answering []. */
   function stubAgentFetch(messages: unknown[], capabilities: unknown = { send: 'queued' }) {
     return vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/messages')) return jsonResponse(messages);
+      if (url.includes('/chat')) return jsonResponse(messages);
       if (url.includes('/capabilities')) return jsonResponse(capabilities);
       throw new Error(`unexpected request: ${url}`);
     });
@@ -354,27 +354,37 @@ describe('CollaboratorWorkspace agent conversation', () => {
     expect(ids).toEqual(['live', 'ended']);
   });
 
-  it('opens an agent and renders its conversation, attributing each turn', async () => {
+  it('attributes each collaborator’s message to them by name, never collapsing everyone into "human"', async () => {
     vi.stubGlobal('fetch', stubAgentFetch([
-      { ts: '2026-09-01T00:01:00.000Z', author: 'human', event: 'message', text: 'Please look at the auth test.' },
-      { ts: '2026-09-01T00:02:00.000Z', author: 'agent', event: 'message', text: 'It races on a shared clock.' },
+      { id: 'm-1', ts: '2026-09-01T00:01:00.000Z', authorKind: 'human', principalId: 'collab-2', displayName: 'Bob', text: 'Please look at the auth test.', audience: 'chat' },
+      { id: 'm-2', ts: '2026-09-01T00:02:00.000Z', authorKind: 'human', principalId: 'collab-1', displayName: 'Alice', text: '@agent any update?', audience: 'agent', delivery: 'queued' },
+      { id: 'm-3', ts: '2026-09-01T00:03:00.000Z', authorKind: 'agent', displayName: 'Claude Code', text: 'It races on a shared clock.', event: 'message' },
     ]));
 
     const host = await mount({ sessions: [agent()] });
     const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
+    expect(host.textContent).toContain('Bob');
     expect(host.textContent).toContain('Please look at the auth test.');
+    // Alice is `principal` here — her own message reads "(you)" rather than
+    // being indistinguishable from Bob's.
+    expect(host.textContent).toContain('Alice (you)');
     expect(host.textContent).toContain('It races on a shared clock.');
-    expect(host.textContent).toContain('You');
+    expect(host.textContent).toContain('Waiting for the agent’s next turn');
   });
 
-  it('sends a message to an agent and clears the composer', async () => {
+  it('sends ordinary chat without mentioning the agent, and clears the composer', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes('/messages')) return jsonResponse([]);
+      if (url.includes('/chat') && (!init || init.method === undefined || init.method === 'GET')) return jsonResponse([]);
       if (url.includes('/capabilities')) return jsonResponse({ send: 'queued' });
-      if (url.includes('/send') && init?.method === 'POST') return jsonResponse({ delivered: 'queued' });
+      if (url.includes('/chat') && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'm-1', ts: '2026-09-01T00:00:00.000Z', authorKind: 'human', principalId: 'collab-1',
+          displayName: 'Alice', text: 'Any progress?', audience: 'chat',
+        }, 201);
+      }
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -383,21 +393,71 @@ describe('CollaboratorWorkspace agent conversation', () => {
     const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    const composer = host.querySelector('textarea[aria-label="Message this agent"]') as HTMLTextAreaElement;
+    const composer = host.querySelector('textarea[aria-label="Message everyone"]') as HTMLTextAreaElement;
     await act(async () => { setInputValue(composer, 'Any progress?'); });
+    expect(host.textContent).toContain('Send to chat');
     await act(async () => {
       composer.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
 
-    const sent = fetchMock.mock.calls.find(([url]) => String(url).includes('/send'));
+    const sent = fetchMock.mock.calls.find(([url, init]) => String(url).includes('/chat') && (init as RequestInit | undefined)?.method === 'POST');
     expect(sent).toBeDefined();
     expect(JSON.parse(String(sent![1]!.body))).toEqual({ text: 'Any progress?' });
     expect(composer.value).toBe('');
+    // The reply is a real server-attributed message, shown immediately.
+    expect(host.textContent).toContain('Any progress?');
   });
 
-  // A composer offered for a Session the server would then refuse is worse
-  // than no composer: the reader is told why instead.
-  it('replaces the composer with the server’s reason when an agent cannot be messaged', async () => {
+  it('previews and sends an @agent-addressed message differently from plain chat', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/chat') && (!init || init.method === undefined || init.method === 'GET')) return jsonResponse([]);
+      if (url.includes('/capabilities')) return jsonResponse({ send: 'queued' });
+      if (url.includes('/chat') && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'm-1', ts: '2026-09-01T00:00:00.000Z', authorKind: 'human', principalId: 'collab-1',
+          displayName: 'Alice', text: '@agent can you review the code?', audience: 'agent', delivery: 'queued',
+        }, 201);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount({ sessions: [agent()] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const composer = host.querySelector('textarea[aria-label="Message everyone"]') as HTMLTextAreaElement;
+    await act(async () => { setInputValue(composer, '@agent can you review the code?'); });
+    expect(host.textContent).toContain('Send to agent');
+
+    await act(async () => {
+      composer.closest('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+
+    const sent = fetchMock.mock.calls.find(([url, init]) => String(url).includes('/chat') && (init as RequestInit | undefined)?.method === 'POST');
+    expect(JSON.parse(String(sent![1]!.body))).toEqual({ text: '@agent can you review the code?' });
+    expect(host.textContent).toContain('Waiting for the agent’s next turn');
+  });
+
+  it('a Mention @agent action inserts the mention without submitting', async () => {
+    vi.stubGlobal('fetch', stubAgentFetch([]));
+
+    const host = await mount({ sessions: [agent()] });
+    const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const mentionButton = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Mention @agent') as HTMLButtonElement;
+    await act(async () => { mentionButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const composer = host.querySelector('textarea[aria-label="Message everyone"]') as HTMLTextAreaElement;
+    expect(composer.value).toContain('@agent');
+    expect(host.textContent).toContain('Send to agent');
+  });
+
+  // Chat stays available even when the agent cannot be reached -- the
+  // composer is never replaced, only its @agent-addressed hint changes.
+  it('still offers the chat composer, with a hint, when an agent cannot be messaged', async () => {
     vi.stubGlobal('fetch', stubAgentFetch([], {
       send: 'unavailable',
       reason: 'This agent has finished. Its conversation is read-only.',
@@ -407,8 +467,10 @@ describe('CollaboratorWorkspace agent conversation', () => {
     const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
+    expect(host.querySelector('textarea[aria-label="Message everyone"]')).not.toBeNull();
+    const composer = host.querySelector('textarea[aria-label="Message everyone"]') as HTMLTextAreaElement;
+    await act(async () => { setInputValue(composer, '@agent are you still there?'); });
     expect(host.textContent).toContain('This agent has finished. Its conversation is read-only.');
-    expect(host.querySelector('textarea[aria-label="Message this agent"]')).toBeNull();
   });
 
   it('goes back from an agent to the Repository it belongs to', async () => {

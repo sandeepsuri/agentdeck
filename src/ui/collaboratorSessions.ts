@@ -13,7 +13,7 @@
 // exactly the way CollaboratorWorkspace already polls an open Run.
 import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
 import type {
-  CollaboratorSession, CollaboratorSessionCapabilities, CollaboratorSessionMessage,
+  CollaboratorSession, CollaboratorSessionCapabilities, CollaboratorSessionMessage, SessionChatMessage,
 } from '../types.js';
 
 type SessionFetcher = (path: string, init?: RequestInit) => Promise<Response>;
@@ -62,4 +62,41 @@ export async function sendSessionMessage(
   const body = await response.json().catch(() => ({})) as { delivered?: string; error?: string };
   if (!response.ok) throw new Error(body.error ?? 'Unable to send to this agent.');
   return { delivered: body.delivered === 'typed' ? 'typed' : 'queued' };
+}
+
+/**
+ * The shared session chat (docs/specs/shared-session-chat.md): every
+ * participant's posts, attributed to who actually sent them, merged with the
+ * agent's own turns. Supersedes listSessionMessages for the chat surface --
+ * that route still exists and still collapses every human into "human", but
+ * nothing here calls it any more.
+ */
+export function listChatMessages(
+  sessionId: string,
+  fetcher: SessionFetcher = apiFetch,
+): Promise<SessionChatMessage[]> {
+  return fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/chat`)
+    .then((response) => responseJsonArray<SessionChatMessage>(response));
+}
+
+/**
+ * Posts one message to a granted Session's shared chat. The server alone
+ * decides whether it was addressed to the agent (an explicit @agent mention)
+ * and, if so, whether delivery succeeded -- the returned message carries
+ * that outcome (`audience`/`delivery`/`deliveryReason`) exactly as recorded,
+ * so the caller never has to guess it from the request it sent.
+ */
+export async function postChatMessage(
+  sessionId: string,
+  text: string,
+  fetcher: SessionFetcher = apiFetch,
+): Promise<SessionChatMessage> {
+  const response = await fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  const body = await response.json().catch(() => ({})) as Partial<SessionChatMessage> & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? 'Unable to send this message.');
+  return body as SessionChatMessage;
 }
