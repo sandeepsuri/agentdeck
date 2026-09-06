@@ -200,15 +200,23 @@ export function RunSubmissionModal({ repos, onClose, onSubmitted, onError }: Pro
               </label>
             );
           })}</div></fieldset>
-          <fieldset><legend>Budget</legend><div className="run-form-grid"><label>Wall-clock minutes<input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} required type="number" value={wallClockMinutes} /></label><label>Model turns<input min="1" onChange={(event) => setModelTurns(event.target.value)} required type="number" value={modelTurns} /></label></div></fieldset>
-          <fieldset>
-            <legend>Repository verification policy</legend>
-            <label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Require these commands to pass before delivery</label>
-            <label>Commands<textarea disabled={!verificationRequired} onChange={(event) => setVerificationCommands(event.target.value)} value={verificationCommands} /></label>
-            <small>{verificationPolicyState === 'loading' ? 'Loading saved policy…' : verificationPolicyState === 'configured' ? 'Saved for this Repository. Submitting updates it.' : 'Not configured yet. Submitting will save this policy before the Run starts.'}</small>
-            {!verificationRequired && <small>This Run will be marked unverified, but its requested local result can still be delivered.</small>}
-          </fieldset>
-          <label>Requested delivery result<select onChange={(event) => setDelivery(event.target.value as RequestedDeliveryResult)} value={delivery}><option value="apply-to-repository">Apply to repository (recommended)</option><option value="local-commit">Create run branch and commit</option><option value="pull-request">Open draft pull request</option><option value="working-tree">Keep in AgentDeck for review</option></select></label>
+          <details className="run-section-detail" open={verificationPolicyState !== 'configured'}>
+            <summary>
+              <h2>Execution options</h2>
+              <span className={`work-run-status status-${verificationPolicyState === 'configured' ? 'ready' : verificationPolicyState === 'loading' ? 'idle' : 'waiting_input'}`}>
+                {verificationPolicyState === 'loading' ? 'Loading…' : verificationPolicyState === 'configured' ? 'Configured' : 'Needs setup'}
+              </span>
+            </summary>
+            <fieldset><legend>Budget</legend><div className="run-form-grid"><label>Wall-clock minutes<input min="1" onChange={(event) => setWallClockMinutes(event.target.value)} required type="number" value={wallClockMinutes} /></label><label>Model turns<input min="1" onChange={(event) => setModelTurns(event.target.value)} required type="number" value={modelTurns} /></label></div></fieldset>
+            <fieldset>
+              <legend>Repository verification policy</legend>
+              <label className="run-check"><input checked={verificationRequired} onChange={(event) => setVerificationRequired(event.target.checked)} type="checkbox" />Require these commands to pass before delivery</label>
+              <label>Commands<textarea disabled={!verificationRequired} onChange={(event) => setVerificationCommands(event.target.value)} value={verificationCommands} /></label>
+              <small>{verificationPolicyState === 'loading' ? 'Loading saved policy…' : verificationPolicyState === 'configured' ? 'Saved for this Repository. Submitting updates it.' : 'Not configured yet. Submitting will save this policy before the Run starts.'}</small>
+              {!verificationRequired && <small>This Run will be marked unverified, but its requested local result can still be delivered.</small>}
+            </fieldset>
+            <label>Requested delivery result<select onChange={(event) => setDelivery(event.target.value as RequestedDeliveryResult)} value={delivery}><option value="apply-to-repository">Apply to repository (recommended)</option><option value="local-commit">Create run branch and commit</option><option value="pull-request">Open draft pull request</option><option value="working-tree">Keep in AgentDeck for review</option></select></label>
+          </details>
           <footer><button className="button" onClick={onClose} type="button">Cancel</button><button className="button button-primary" disabled={submitting || runtimePreference.length === 0 || repos.length === 0} type="submit">{submitting ? 'Submitting…' : 'Queue run'}</button></footer>
         </form>
       </section>
