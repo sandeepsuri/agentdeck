@@ -28,15 +28,14 @@
 // of Sessions ever reach here.
 import { useEffect, useRef, useState } from 'react';
 import type {
-  AgentType, CollaboratorSession, CollaboratorSessionCapabilities, Repo, SessionChatMessage,
+  AgentType, CollaboratorSession, Repo,
 } from '../../types.js';
 import type {
   AttentionDecisionInput, CollaboratorRunDetail, CollaboratorRunSummary, Profile, WorkSpec,
 } from '../../work-engine/types.js';
-import { parseMention } from '../../mentions.js';
 import { describeOutcome, formatTokenCount } from '../../work-engine/attempt-narrative.js';
 import { getCollaboratorRun, requestWork } from '../collaboratorRuns.js';
-import { getSessionCapabilities, listChatMessages, postChatMessage } from '../collaboratorSessions.js';
+import { SessionChat } from './SessionChat.js';
 import { lines } from '../components/RunSubmissionModal.js';
 import { STATUS_LABELS, relativeTime } from './model.js';
 import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
@@ -212,145 +211,6 @@ function AgentTile({ session, onSelect }: { session: CollaboratorSession; onSele
 }
 
 /** Human-readable outcome of an @agent-addressed post, shown under that one message — never on a plain chat post, which has no delivery at all. */
-function deliveryLabel(message: SessionChatMessage): string | null {
-  if (message.audience !== 'agent') return null;
-  if (message.delivery === 'sent') return 'Sent to agent';
-  if (message.delivery === 'queued') return 'Waiting for the agent’s next turn';
-  if (message.delivery === 'not_sent') return `Not sent${message.deliveryReason ? ` — ${message.deliveryReason}` : ''}`;
-  return null;
-}
-
-/**
- * The composer at the Session level: a message goes to every participant.
- * It reaches the agent only when the author writes an explicit @agent
- * mention — the same parser (../../mentions.js) the server enforces, used
- * here only to preview the destination before submission, never to decide
- * it. `capabilities` still comes from the server's own pure check, but it no
- * longer gates the composer itself: chat stays available even when the
- * agent cannot be reached (docs/specs/shared-session-chat.md), so an
- * addressed message is still posted and shown "Not sent" with why.
- */
-function ChatComposer({ sessionId, runtimeLabel, capabilities, onError, onSent }: {
-  sessionId: string;
-  runtimeLabel: string;
-  capabilities: CollaboratorSessionCapabilities | null;
-  onError: (message: string) => void;
-  onSent: (message: SessionChatMessage) => void;
-}) {
-  const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
-  const mention = parseMention(text);
-  const agentUnavailable = capabilities?.send === 'unavailable';
-
-  const submit = async () => {
-    const value = text.trim();
-    if (!value || sending) return;
-    setSending(true);
-    try {
-      const message = await postChatMessage(sessionId, value);
-      setText('');
-      onSent(message);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <form
-      className="mobile-request-composer mobile-agent-composer"
-      onSubmit={(event) => { event.preventDefault(); void submit(); }}
-    >
-      <textarea
-        aria-label="Message everyone"
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          // IME composition (accents, CJK input) must not submit on Enter.
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-        placeholder="Message everyone · mention @agent to ask the agent…"
-        rows={2}
-        value={text}
-      />
-      <div className="mobile-agent-composer-actions">
-        <button
-          className="mobile-mention-button"
-          onClick={() => setText((current) => (current.trim().length > 0 ? `${current.trimEnd()} @agent ` : '@agent '))}
-          type="button"
-        >
-          Mention @agent
-        </button>
-        <button className="is-primary" disabled={!text.trim() || sending} type="submit">
-          {sending ? 'Sending…' : mention.mentioned ? 'Send to agent' : 'Send to chat'}
-        </button>
-      </div>
-      <small className="mobile-agent-hint">
-        {mention.mentioned
-          ? (agentUnavailable
-            ? (capabilities?.reason ?? 'This agent cannot receive messages right now.')
-            : `Visible to everyone here, and delivered to ${runtimeLabel}.`)
-          : 'Visible to everyone here. Mention @agent to ask the agent.'}
-      </small>
-    </form>
-  );
-}
-
-/** A Session's conversation: the shared, attributed message feed, styled as the Run conversation is, never a terminal. */
-function AgentConversation({ session, principal, messages, loading }: {
-  session: CollaboratorSession;
-  principal: { id: string; displayName: string };
-  messages: readonly SessionChatMessage[];
-  loading: boolean;
-}) {
-  return (
-    <main className="mobile-conversation">
-      <section className="mobile-run-intent">
-        <h2>{agentLabel(session)}</h2>
-        <small>
-          {runtimeLabel(session)} · started {relativeTime(session.startedAt)}
-          {session.branch ? ` · ${session.branch}` : ''}
-        </small>
-      </section>
-
-      {messages.length > 0 && (
-        <ol aria-label="Conversation" className="mobile-agent-messages">
-          {messages.map((message) => {
-            // The server names an agent turn's displayName the same way
-            // runtimeLabel() does (session-conversation.ts's
-            // agentDisplayName), so every row's own displayName is already
-            // the right thing to show — no author-kind branch needed here.
-            const isSelf = message.authorKind === 'human' && message.principalId !== undefined
-              && message.principalId === principal.id;
-            const delivery = deliveryLabel(message);
-            return (
-              <li
-                className={`mobile-agent-message is-${message.authorKind}${message.event === 'done' ? ' is-done' : ''}${message.audience === 'agent' ? ' is-addressed' : ''}`}
-                key={message.id}
-              >
-                <small>{message.displayName}{isSelf ? ' (you)' : ''} · {relativeTime(message.ts)}</small>
-                <p>{message.text}</p>
-                {delivery && <small className="mobile-message-delivery">{delivery}</small>}
-              </li>
-            );
-          })}
-        </ol>
-      )}
-
-      {messages.length === 0 && (
-        <p className="mobile-run-waiting">
-          {loading
-            ? 'Loading this conversation…'
-            : 'Nothing has been said in this conversation yet. Send the first message below.'}
-        </p>
-      )}
-    </main>
-  );
-}
-
 /** The composer at the Repository level: this is what "request a new task" is. */
 function RequestWorkComposer({ repository, profiles, onError, onRequested }: {
   repository: Repo;
@@ -610,9 +470,7 @@ export function CollaboratorWorkspace({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detail, setDetail] = useState<CollaboratorRunDetail | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [messages, setMessages] = useState<SessionChatMessage[]>([]);
-  const [capabilities, setCapabilities] = useState<CollaboratorSessionCapabilities | null>(null);
-  const [messagesLoaded, setMessagesLoaded] = useState(false);
+
 
   // Land on the first granted Repository rather than an empty screen — with
   // one Repository granted (the common case) there is nothing to choose.
@@ -647,45 +505,6 @@ export function CollaboratorWorkspace({
 
   const sessionId = view?.kind === 'session' ? view.sessionId : null;
   const openSession = sessions.find((item) => item.id === sessionId) ?? null;
-
-  // Whether this Session can still be messaged is a property of the Session,
-  // not of the conversation, so it is fetched once per Session rather than on
-  // every tick of the poll below.
-  useEffect(() => {
-    if (!sessionId) { setCapabilities(null); return; }
-    let disposed = false;
-    getSessionCapabilities(sessionId)
-      .then((next) => { if (!disposed) setCapabilities(next); })
-      .catch(() => undefined); // a composer that stays hidden is the safe failure
-    return () => { disposed = true; };
-  }, [sessionId]);
-
-  // The open Session's own poll — the same shape as the open Run's below:
-  // one conversation is ever open, it is the expensive read, and it stops
-  // once the Session can no longer say anything new. A collaborator socket
-  // receives no session frames at all (ws.ts), so this poll is the only
-  // thing keeping the conversation current.
-  const messagesRef = useRef<string | null>(null);
-  useEffect(() => { messagesRef.current = sessionId; if (!sessionId) { setMessages([]); setMessagesLoaded(false); } }, [sessionId]);
-  const sessionEnded = openSession?.status === 'exited';
-  useEffect(() => {
-    if (!sessionId) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const tick = async () => {
-      try {
-        const next = await listChatMessages(sessionId);
-        if (disposed || messagesRef.current !== sessionId) return;
-        setMessages(next);
-        setMessagesLoaded(true);
-        if (!sessionEnded) timer = setTimeout(() => { void tick(); }, 2000);
-      } catch {
-        if (!disposed) timer = setTimeout(() => { void tick(); }, 5000);
-      }
-    };
-    void tick();
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [sessionEnded, sessionId]);
 
   const repository = repos.find((repo) => repo.id === (
     view?.kind === 'repository' ? view.repositoryId
@@ -744,16 +563,7 @@ export function CollaboratorWorkspace({
       {view?.kind === 'run' && !detail && <main className="mobile-workspace-empty"><span>Loading this Run…</span></main>}
 
       {view?.kind === 'session' && openSession && (
-        <>
-          <AgentConversation loading={!messagesLoaded} messages={messages} principal={principal} session={openSession} />
-          <ChatComposer
-            capabilities={capabilities}
-            onError={onError}
-            onSent={(message) => { setMessages((current) => [...current, message]); }}
-            runtimeLabel={runtimeLabel(openSession)}
-            sessionId={openSession.id}
-          />
-        </>
+        <SessionChat key={openSession.id} session={openSession} principal={principal} onError={onError} />
       )}
       {view?.kind === 'session' && !openSession && (
         <main className="mobile-workspace-empty">

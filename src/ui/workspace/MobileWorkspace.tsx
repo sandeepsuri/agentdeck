@@ -9,7 +9,7 @@ import { useEffect, useState } from 'react';
 import type { CollaboratorSession, Repo, RunAttentionItem, Session } from '../../types.js';
 import type { AttentionDecisionInput, CollaboratorRunSummary, Profile } from '../../work-engine/types.js';
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
-import { apiFetch } from '../apiFetch.js';
+import { SessionChat } from './SessionChat.js';
 import { CollaboratorWorkspace } from './CollaboratorWorkspace.js';
 import { ControlKeys } from '../components/ControlKeys.js';
 import { STATUS_LABELS, isEndedSession, relativeTime, sessionLabel } from './model.js';
@@ -56,24 +56,6 @@ interface Props {
  */
 export function nextReflowText(current: string, frame: ServerFrame, sessionId: string): string {
   return frame.t === 'reflow_text' && frame.sessionId === sessionId ? frame.text : current;
-}
-
-/**
- * Same POST /api/sessions/:id/send composer pattern
- * TerminalWorkspace.tsx's sendToSession uses — routed through apiFetch
- * (not bare fetch) since a remote connection must carry the tailnet token
- * header. This is what ticket 14's "free-text messages continue to work
- * from a phone" acceptance line exercises.
- */
-export async function sendToMobileSession(session: Session, text: string): Promise<{ delivered?: string; error?: string }> {
-  const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text }),
-  });
-  const body = await response.json() as { delivered?: string; error?: string };
-  if (!response.ok) throw new Error(body.error ?? 'Unable to send to this session.');
-  return body;
 }
 
 /**
@@ -183,9 +165,8 @@ function SessionDrawer({ open, sessions, selectedId, onClose, onSelect }: {
  * collaborator still never reaches a Session's terminal — ws.ts refuses them
  * 'attach' and both session broadcasts — only its conversation.
  *
- * Dispatching here, before any session state exists, is what keeps the admin
- * path provably untouched — the two trees share no hooks, so neither can
- * regress the other.
+ * Admin and collaborator navigation differ, but both use SessionChat for
+ * the attributed conversation and @agent composer.
  */
 export function MobileWorkspace(props: Props) {
   const { collaboratorPrincipal } = props;
@@ -217,14 +198,13 @@ function SessionWorkspace({
   const managedSession = session?.origin === 'managed' ? session : null;
   const sessionId = managedSession?.id ?? null;
   const [reflowText, setReflowText] = useState('');
-  const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
+  const [view, setView] = useState<'chat' | 'terminal'>('chat');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [controlKeysOpen, setControlKeysOpen] = useState(false);
 
   useEffect(() => {
     setReflowText('');
-    setText('');
+    setView('chat');
     setControlKeysOpen(false);
   }, [sessionId]);
 
@@ -232,7 +212,7 @@ function SessionWorkspace({
   // Terminal.tsx: attach on mount/session-change, detach on unmount,
   // listen for frames scoped to this session id.
   useEffect(() => {
-    if (!ws || !sessionId) return;
+    if (!ws || !sessionId || view !== 'terminal') return;
     const send = (frame: ClientFrame) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
     };
@@ -250,22 +230,9 @@ function SessionWorkspace({
       ws.removeEventListener('open', attach);
       send({ t: 'detach', sessionId });
     };
-  }, [ws, sessionId]);
+  }, [ws, sessionId, view]);
 
-  const submit = async (value = text) => {
-    if (!managedSession || !value.trim() || sending) return;
-    setSending(true);
-    try {
-      await sendToMobileSession(managedSession, value.trim());
-      setText('');
-    } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const canMessage = Boolean(managedSession && !isEndedSession(managedSession) && wsReady);
+  const canMessage = Boolean(view === 'terminal' && managedSession && !isEndedSession(managedSession) && wsReady);
 
   return (
     <section className="mobile-workspace">
@@ -314,7 +281,12 @@ function SessionWorkspace({
         );
       })()}
 
-      {managedSession ? (
+      {managedSession && <div className="session-view-tabs" role="group" aria-label="Session view">
+        <button className="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')} type="button">Chat</button>
+        <button className="button" aria-pressed={view === 'terminal'} onClick={() => setView('terminal')} type="button">Terminal</button>
+      </div>}
+      {managedSession && view === 'chat' && <SessionChat key={managedSession.id} session={managedSession} onError={onError} />}
+      {managedSession ? (view === 'terminal' && (
         <main className="mobile-conversation">
           <div className="mobile-conversation-date">Live session</div>
           <section aria-label="Agent output" className="mobile-agent-response">
@@ -325,7 +297,7 @@ function SessionWorkspace({
             </div>
           </section>
         </main>
-      ) : (
+      )) : (
         <main className="mobile-workspace-empty">
           <AgentMark />
           <strong>Select a session</strong>
@@ -339,17 +311,6 @@ function SessionWorkspace({
           while the session is live and the socket is up; the server would
           silently drop it anyway (manager.isLive check in ws.ts), but
           there's no reason to show live buttons for a dead session. */}
-      {canMessage && managedSession?.status === 'waiting_input' && (
-        <section aria-labelledby="mobile-approval-title" className="mobile-approval-card">
-          <span aria-hidden="true" className="mobile-approval-icon">!</span>
-          <span className="mobile-approval-copy"><strong id="mobile-approval-title">Response needed</strong><small>The agent is waiting for your input.</small></span>
-          <div className="mobile-approval-actions" role="group" aria-label="Approval response">
-            <button onClick={() => void submit('2')} type="button">[2] No</button>
-            <button className="is-primary" onClick={() => void submit('1')} type="button">[1] Yes</button>
-          </div>
-        </section>
-      )}
-
       {canMessage && managedSession && (
         <div className={`mobile-control-keys${controlKeysOpen ? ' is-open' : ''}`}>
           <ControlKeys sessionId={managedSession.id} ws={ws} />
@@ -357,36 +318,8 @@ function SessionWorkspace({
       )}
 
       {canMessage && managedSession && (
-        <footer className="mobile-composer-wrap">
-          <div className="mobile-composer">
-            <textarea
-              aria-label="Message the agent"
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder="Message AgentDeck"
-              rows={1}
-              value={text}
-            />
-            <div className="mobile-composer-actions">
-              <button
-                aria-label="Toggle terminal control keys"
-                aria-pressed={controlKeysOpen}
-                className="mobile-keys-toggle"
-                onClick={() => setControlKeysOpen((current) => !current)}
-                type="button"
-              ><span aria-hidden="true">&gt;_</span> Keys</button>
-              <button aria-label="Send message" className="mobile-send-button" disabled={!text.trim() || sending} onClick={() => void submit()} type="button">
-                {sending ? <span aria-hidden="true">…</span> : <span aria-hidden="true">↑</span>}
-              </button>
-            </div>
-          </div>
-          <small className="mobile-connection-note">Connected privately via Tailscale</small>
-        </footer>
+        <button aria-label="Toggle terminal control keys" aria-pressed={controlKeysOpen}
+          className="mobile-keys-toggle" onClick={() => setControlKeysOpen((current) => !current)} type="button">Terminal keys</button>
       )}
 
       <SessionDrawer

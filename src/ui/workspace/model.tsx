@@ -5,7 +5,7 @@ export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'si
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'operations', label: 'Operations' },
-  { id: 'terminal', label: 'Terminal' },
+  { id: 'terminal', label: 'Session' },
   { id: 'changes', label: 'Changes' },
   { id: 'grid', label: 'Grid' },
   { id: 'history', label: 'History' },

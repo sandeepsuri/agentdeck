@@ -236,3 +236,39 @@ describe('GET /api/sessions/:id/chat', () => {
     await app.close();
   });
 });
+
+describe('admin and collaborator parity', () => {
+  it.each(['claude', 'codex'] as const)('shares ordinary posts and only delivers explicit mentions to managed %s', async (agent) => {
+    const { app, aliceToken, written, setSessions } = setUp();
+    setSessions([session({ origin: 'managed', agent })]);
+    const adminHeaders = { host: 'localhost:4040' };
+    const admin = await app.inject({ method: 'POST', url: '/api/sessions/ext-1/chat', headers: adminHeaders, payload: { text: 'Can someone check this issue?' } });
+    const collaborator = await app.inject({ method: 'POST', url: '/api/sessions/ext-1/chat', headers: asHeaders(aliceToken), payload: { text: 'I think the API is causing it.' } });
+    expect(admin.statusCode).toBe(201);
+    expect(collaborator.statusCode).toBe(201);
+    expect(admin.json().principalId).toBeTruthy();
+    expect(admin.json().displayName).not.toBe('Alice');
+    expect(written).toEqual([]);
+    for (const headers of [adminHeaders, asHeaders(aliceToken)]) {
+      const sent = await app.inject({ method: 'POST', url: '/api/sessions/ext-1/chat', headers, payload: { text: '@agent investigate the API issue' } });
+      expect(sent.json()).toMatchObject({ audience: 'agent', delivery: 'sent' });
+      expect(written.at(-1)).toBe(`${sent.json().displayName}: investigate the API issue`);
+    }
+    const adminFeed = await app.inject({ url: '/api/sessions/ext-1/chat', headers: adminHeaders });
+    const collaboratorFeed = await app.inject({ url: '/api/sessions/ext-1/chat', headers: asHeaders(aliceToken) });
+    expect(adminFeed.json()).toEqual(collaboratorFeed.json());
+    expect(adminFeed.json().filter((row: { authorKind: string }) => row.authorKind === 'human')).toHaveLength(4);
+    await app.close();
+  });
+
+  it('reports the same chat delivery capability to admin and collaborator for an external session', async () => {
+    const { app, aliceToken, setSessions } = setUp();
+    setSessions([session({ agent: 'codex', agentSessionId: undefined })]);
+    const admin = await app.inject({ url: '/api/sessions/ext-1/capabilities?mode=chat', headers: { host: 'localhost:4040' } });
+    const collaborator = await app.inject({ url: '/api/sessions/ext-1/capabilities?mode=chat', headers: asHeaders(aliceToken) });
+    expect(admin.statusCode).toBe(200);
+    expect(admin.json()).toEqual(collaborator.json());
+    expect(admin.json().send).toBe('unavailable');
+    await app.close();
+  });
+});

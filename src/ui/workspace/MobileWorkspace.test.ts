@@ -1,23 +1,8 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Session } from '../../types.js';
-import { TOKEN_HEADER } from '../../protocol.js';
-import { MobileWorkspace, ReflowPane, nextReflowText, sendToMobileSession } from './MobileWorkspace.js';
-
-type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
-
-function fakeLocalStorage(initial: Record<string, string> = {}): Storage {
-  const store = new Map(Object.entries(initial));
-  return {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => { store.set(key, value); },
-    removeItem: (key: string) => { store.delete(key); },
-    clear: () => store.clear(),
-    key: () => null,
-    get length() { return store.size; },
-  };
-}
+import { MobileWorkspace, ReflowPane, nextReflowText } from './MobileWorkspace.js';
 
 const session: Session = {
   id: 'sess-1',
@@ -85,34 +70,6 @@ describe('ReflowPane (renders reflowed text from a reflow_text frame)', () => {
   });
 });
 
-describe('sendToMobileSession (composer → POST /api/sessions/:id/send via apiFetch)', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('POSTs to /api/sessions/:id/send through apiFetch, carrying the tailnet token header', async () => {
-    vi.stubGlobal('localStorage', fakeLocalStorage({ 'agentdeck.connection.token': 'phone-token' }));
-    const fetchMock = vi.fn<(...args: FetchArgs) => Promise<Response>>(async () => new Response(JSON.stringify({ delivered: 'typed' })));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await sendToMobileSession(session, 'hello from the phone');
-
-    expect(result).toEqual({ delivered: 'typed' });
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe(`/api/sessions/${session.id}/send`);
-    expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual({ text: 'hello from the phone' });
-    expect(init?.headers).toMatchObject({ [TOKEN_HEADER]: 'phone-token' });
-  });
-
-  it('throws with the server-provided error when the send fails', async () => {
-    vi.stubGlobal('localStorage', fakeLocalStorage());
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'session has ended' }), { status: 409 })));
-
-    await expect(sendToMobileSession(session, 'hi')).rejects.toThrow('session has ended');
-  });
-});
-
 describe('MobileWorkspace (static render)', () => {
   it('shows the managed-session drawer and an empty state instead of the composer when no session is selected', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
@@ -130,7 +87,7 @@ describe('MobileWorkspace (static render)', () => {
     expect(html).not.toContain('Message the agent');
   });
 
-  it('renders the composer for a live session and hides it for an ended one', () => {
+  it('offers shared chat for both live and ended sessions', () => {
     const live = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -139,9 +96,9 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(live).toContain('Message the agent');
-    expect(live).toContain('Message AgentDeck');
-    expect(live).toContain('Toggle terminal control keys');
+    expect(live).toContain('Message everyone');
+    expect(live).toContain('Mention @agent');
+    expect(live).toContain('Session view');
 
     const ended = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
@@ -151,10 +108,10 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(ended).not.toContain('Message the agent');
+    expect(ended).toContain('Message everyone');
   });
 
-  it('renders ticket 14\'s control keys for a live session', () => {
+  it('keeps terminal controls out of shared chat', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -163,11 +120,11 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(html).toContain('mobile-control-keys');
-    expect(html).toContain('Ctrl-C');
+    expect(html).not.toContain('mobile-control-keys');
+    expect(html).toContain('>Terminal<');
   });
 
-  it('renders [1] Yes and [2] No actions while the agent is waiting for input', () => {
+  it('keeps agent input out of ordinary chat while waiting for input', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -176,8 +133,8 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(html).toContain('[1] Yes');
-    expect(html).toContain('[2] No');
+    expect(html).not.toContain('[1] Yes');
+    expect(html).toContain('Message everyone');
   });
 
   it('shows nothing Run-attention-related when the queue is empty (default prop)', () => {
