@@ -17,7 +17,7 @@
 import { useState } from 'react';
 import type { Repo, Session } from '../../types.js';
 import type { WorkRun } from '../../work-engine/types.js';
-import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
+import { formatRunLabel, isTerminalRunStatus, orderRuns } from './runModel.js';
 import { ElapsedTime, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
 export interface Props {
@@ -40,16 +40,6 @@ function runsForRepo(runs: readonly WorkRun[], repoId: string): WorkRun[] {
 
 function sessionsForRepo(sessions: readonly Session[], repo: Repo): Session[] {
   return sessions.filter((session) => repoPathOf(session) === repo.id || repoPathOf(session) === repo.path);
-}
-
-/** Runs needing a decision first, then the rest still in flight, then finished work — newest first within each band. */
-function orderRuns(runs: readonly WorkRun[]): WorkRun[] {
-  return [...runs].sort((a, b) => {
-    const bandOf = (run: WorkRun) => run.pendingAttention ? 0 : isTerminalRunStatus(run.status) ? 2 : 1;
-    const bandDiff = bandOf(a) - bandOf(b);
-    if (bandDiff !== 0) return bandDiff;
-    return b.submittedAt.localeCompare(a.submittedAt);
-  });
 }
 
 function orderSessions(sessions: readonly Session[]): Session[] {

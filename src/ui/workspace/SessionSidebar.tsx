@@ -18,7 +18,8 @@ interface Props {
   onRefreshDiscovery: () => void;
 }
 
-function RunRow({ run, selected, onSelect, onDelete }: {
+/** Exported for reuse by TasksView (ticket 48): the same row, delete confirmation, and terminal-status gating, so a Run reached by browsing Tasks deletes exactly the way one reached from this sidebar always has. */
+export function RunRow({ run, selected, onSelect, onDelete }: {
   run: WorkRun;
   selected: boolean;
   onSelect: () => void;

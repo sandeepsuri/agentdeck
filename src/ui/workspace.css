@@ -176,6 +176,14 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .overview-row-attention { color: var(--status-waiting); font-size: 11px; font-weight: 600; }
 .overview-empty-row { padding: 16px; color: var(--text-muted); font-size: 12px; }
 
+/* Ticket 48: explicit, flat cross-Repository Run browsing ("Tasks") — rows
+   reuse .work-run-row/.work-run-select from runs.css (the sidebar's own Run
+   row), so this list looks and deletes exactly like the one already there. */
+.tasks-view-heading { align-items: flex-start; justify-content: space-between; }
+.tasks-view-subtitle { display: block; margin-top: 2px; color: var(--text-muted); font-size: 12.5px; }
+.tasks-history-link { flex: none; }
+.tasks-view-list { display: flex; flex-direction: column; gap: 2px; }
+
 .operation-group { margin-bottom: 16px; overflow: hidden; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-panel); }
 .operation-group-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-muted); }
 .operation-group-header strong { font-size: 13px; font-weight: 600; }

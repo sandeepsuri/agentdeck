@@ -1,3 +1,5 @@
+import type { WorkRun } from '../../work-engine/types.js';
+
 export function formatRunLabel(value: string): string {
   const words = value.replaceAll('-', ' ').replaceAll('_', ' ');
   return words.charAt(0).toUpperCase() + words.slice(1);
@@ -10,4 +12,20 @@ const TERMINAL_RUN_STATUSES = new Set([
 
 export function isTerminalRunStatus(status: string): boolean {
   return TERMINAL_RUN_STATUSES.has(status);
+}
+
+/**
+ * Runs needing a decision first, then the rest still in flight, then
+ * finished work — newest first within each band. Shared by every view that
+ * browses Runs across Repositories (Overview's per-Repository page, ticket
+ * 47; the Tasks browsing list, ticket 48) so they band and order Runs the
+ * same way rather than drifting into two similar-but-different sorts.
+ */
+export function orderRuns(runs: readonly WorkRun[]): WorkRun[] {
+  return [...runs].sort((a, b) => {
+    const bandOf = (run: WorkRun) => run.pendingAttention ? 0 : isTerminalRunStatus(run.status) ? 2 : 1;
+    const bandDiff = bandOf(a) - bandOf(b);
+    if (bandDiff !== 0) return bandDiff;
+    return b.submittedAt.localeCompare(a.submittedAt);
+  });
 }

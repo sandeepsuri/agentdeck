@@ -29,6 +29,7 @@ import { OverviewView } from './workspace/OverviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
+import { TasksView } from './workspace/TasksView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { parseInitialNavigation } from './navigation.js';
@@ -666,6 +667,7 @@ export function App() {
         <SessionSidebar discoveryStatus={discoveryStatus} onDeleteRun={(run) => void deleteRun(run)} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
           <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
           <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
