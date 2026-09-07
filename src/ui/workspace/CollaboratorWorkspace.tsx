@@ -329,25 +329,21 @@ function RunAttentionReply({ onSubmit }: { onSubmit: (value: string) => void }) 
   );
 }
 
+/**
+ * Ticket 44 (A10): verification verdicts and authorized decisions are the
+ * outcome a Collaborator came here to read, so they stay directly visible.
+ * Commit identity and the changed-file list are secondary/technical — real
+ * detail, never hidden, but tucked behind a disclosure rather than
+ * competing with the verdict for attention (same run-technical-detail
+ * pattern the admin Run workspace already uses for its own secondary
+ * detail — runs.css).
+ */
 function RunResultPanel({ result }: { result: NonNullable<CollaboratorRunDetail['result']> }) {
+  const hasTechnicalDetail = Boolean(result.commit) || result.changedFiles.length > 0;
   return (
     <section aria-label="Run result" className="mobile-run-result">
       <h3>Result</h3>
       {result.recoveryNotes && <p className="mobile-run-result-note">{result.recoveryNotes}</p>}
-      {result.commit && (
-        <p className="mobile-run-result-commit">
-          Committed <code>{result.commit.sha.slice(0, 12)}</code> on {result.commit.branch}
-          {result.commit.signed ? ' · signed' : ''}
-        </p>
-      )}
-      {result.changedFiles.length > 0 && (
-        <>
-          <h4>Files changed</h4>
-          <ul className="mobile-run-files">
-            {result.changedFiles.map((file) => <li key={file}><code>{file}</code></li>)}
-          </ul>
-        </>
-      )}
       {result.verification.length > 0 && (
         <>
           <h4>Verification</h4>
@@ -370,6 +366,22 @@ function RunResultPanel({ result }: { result: NonNullable<CollaboratorRunDetail[
             ))}
           </ul>
         </>
+      )}
+      {hasTechnicalDetail && (
+        <details className="run-technical-detail">
+          <summary>Commit &amp; files</summary>
+          {result.commit && (
+            <p className="mobile-run-result-commit">
+              Committed <code>{result.commit.sha.slice(0, 12)}</code> on {result.commit.branch}
+              {result.commit.signed ? ' · signed' : ''}
+            </p>
+          )}
+          {result.changedFiles.length > 0 && (
+            <ul className="mobile-run-files">
+              {result.changedFiles.map((file) => <li key={file}><code>{file}</code></li>)}
+            </ul>
+          )}
+        </details>
       )}
     </section>
   );
@@ -419,7 +431,7 @@ function RunConversation({ detail, onResolveRunAttention }: {
         <p className={`mobile-run-verdict${narrative.outcome?.kind === 'failure' ? ' is-failure' : ' is-success'}`}>
           {verdict}
           {narrative.usage && (narrative.usage.inputTokens !== 'unknown' || narrative.usage.outputTokens !== 'unknown') && (
-            <span> · {formatTokenCount(narrative.usage.inputTokens)} in / {formatTokenCount(narrative.usage.outputTokens)} out</span>
+            <span className="mobile-run-verdict-meta"> · {formatTokenCount(narrative.usage.inputTokens)} in / {formatTokenCount(narrative.usage.outputTokens)} out</span>
           )}
         </p>
       )}
