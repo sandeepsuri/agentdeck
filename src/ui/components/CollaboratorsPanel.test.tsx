@@ -195,6 +195,147 @@ describe('CollaboratorsPanel', () => {
     expect(host.querySelectorAll('.collaborators-repo-grants input[type="checkbox"]')).toHaveLength(1);
   });
 
+  it('ticket 51: opens an edit-access editor seeded with the collaborator\'s current grants', async () => {
+    const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }, { id: 'repo-2', name: 'other', path: '/tmp/other' }];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [], devices: [] }]);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount(repos);
+    const editButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Edit access')!;
+    await act(async () => { editButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const checkboxes = host.querySelectorAll('.collaborators-edit-grants .collaborators-repo-grants input[type="checkbox"]') as NodeListOf<HTMLInputElement>;
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0]!.checked).toBe(true);
+    expect(checkboxes[1]!.checked).toBe(false);
+  });
+
+  it('ticket 51: cancel discards the draft without calling the API', async () => {
+    const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] }]);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount(repos);
+    const editButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Edit access')!;
+    await act(async () => { editButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const checkbox = host.querySelector('.collaborators-edit-grants .collaborators-repo-grants input[type="checkbox"]') as HTMLInputElement;
+    await act(async () => { checkbox.click(); });
+    expect(checkbox.checked).toBe(true);
+
+    const cancelButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Cancel')!;
+    await act(async () => { cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.querySelector('.collaborators-edit-grants')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/collaborators/c1', expect.objectContaining({ method: 'PATCH' }));
+  });
+
+  it('ticket 51: saves grants through PATCH, then reloads and displays exactly what the server returned', async () => {
+    const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }, { id: 'repo-2', name: 'other', path: '/tmp/other' }];
+    let patchBody: unknown = null;
+    let listCall = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        listCall += 1;
+        // The server is the source of truth for the resulting grants — the post-save reload reflects its own de-duped view, not the checked boxes.
+        const grantedRepositoryIds = listCall === 1 ? ['repo-1'] : ['repo-1', 'repo-2'];
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds, grantedProfileIds: ['profile-9'], devices: [] }]);
+      }
+      if (url === '/api/collaborators/c1' && init?.method === 'PATCH') {
+        patchBody = JSON.parse(init.body as string);
+        return jsonResponse({ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1', 'repo-2'], grantedProfileIds: ['profile-9'] });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount(repos);
+    const editButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Edit access')!;
+    await act(async () => { editButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const checkboxes = Array.from(host.querySelectorAll('.collaborators-edit-grants .collaborators-repo-grants input[type="checkbox"]')) as HTMLInputElement[];
+    await act(async () => { checkboxes[1]!.click(); }); // grant repo-2 in addition to repo-1
+
+    const saveButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Save access')!;
+    await act(async () => {
+      saveButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+
+    expect(patchBody).toEqual({ grantedRepositoryIds: ['repo-1', 'repo-2'], grantedProfileIds: ['profile-9'] });
+    // multiple-grant preservation: the untouched Profile grant survived the round trip
+    expect(host.textContent).toContain('2 repositories');
+    expect(host.textContent).toContain('1 profile');
+    expect(host.querySelector('.collaborators-edit-grants')).toBeNull();
+  });
+
+  it('ticket 51: a failed save keeps the editor open with an error and does not report false success', async () => {
+    const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        return jsonResponse([{ id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] }]);
+      }
+      if (url === '/api/collaborators/c1' && init?.method === 'PATCH') {
+        return jsonResponse({ error: 'boom' }, 500);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount(repos);
+    const editButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Edit access')!;
+    await act(async () => { editButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const saveButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Save access')!;
+    await act(async () => {
+      saveButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+
+    expect(host.querySelector('.collaborators-edit-grants')).not.toBeNull();
+    expect(host.textContent).toContain('Unable to update access. Nothing was changed.');
+    expect(host.textContent).toContain('0 repositories');
+  });
+
+  it('ticket 51: Repository access lists which collaborators are granted each repository, derived from the roster', async () => {
+    const repos: Repo[] = [{ id: 'repo-1', name: 'example', path: '/tmp/example' }, { id: 'repo-2', name: 'other', path: '/tmp/other' }];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') {
+        return jsonResponse([
+          { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [], devices: [] },
+          { id: 'c2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] },
+        ]);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount(repos);
+
+    const accessSection = host.querySelector('.collaborators-access-list')!;
+    expect(accessSection).not.toBeNull();
+    expect(accessSection.textContent).toContain('example');
+    expect(accessSection.textContent).toContain('Alice');
+    expect(accessSection.textContent).not.toContain('Bob');
+    expect(accessSection.textContent).toContain('other');
+    expect(accessSection.textContent).toContain('0 collaborators granted');
+  });
+
   it('ticket 12 AC1: creates a Profile and offers it as an invite-time grant checkbox', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
