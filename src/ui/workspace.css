@@ -470,7 +470,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-approval-copy strong { font-size: 13px; }
 .mobile-approval-copy small { color: var(--text-muted); font-size: 11px; }
 .mobile-approval-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1.35fr; gap: 8px; margin-top: 3px; }
-.mobile-approval-actions button { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-elevated); color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
+.mobile-approval-actions button { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; }
 .mobile-approval-actions button.is-primary { border-color: var(--action-primary); background: var(--action-primary); color: var(--text-on-action); }
 .mobile-approval-actions kbd { opacity: .72; }
 
@@ -483,8 +483,8 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 
 /* Ticket 07: the input-kind Run attention response — same grid rhythm as .mobile-approval-actions (Approve/Deny), a text field standing in for the two buttons. */
 .mobile-run-attention-input { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; margin-top: 3px; }
-.mobile-run-attention-input input { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 11px; background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
-.mobile-run-attention-input button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--action-primary); border-radius: 11px; background: var(--action-primary); color: var(--text-on-action); font-size: 12px; font-weight: 600; cursor: pointer; }
+.mobile-run-attention-input input { min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
+.mobile-run-attention-input button { min-height: 44px; padding: 9px 16px; border: 1px solid var(--action-primary); border-radius: var(--radius-md); background: var(--action-primary); color: var(--text-on-action); font-size: 12px; font-weight: 600; cursor: pointer; }
 .mobile-run-attention-input button:disabled { opacity: .5; cursor: default; }
 
 .mobile-control-keys { width: min(100%,760px); flex: none; align-self: center; display: none; padding: 0 12px 8px; }
@@ -626,7 +626,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-agent-message p { margin: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mobile-message-delivery { display: block; margin-top: 6px; color: var(--text-muted); font-size: 11px; }
 .mobile-agent-composer form,.mobile-agent-composer { display: grid; gap: 8px; }
-.mobile-agent-composer button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: 12px; background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
+.mobile-agent-composer button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: var(--radius-md); background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
 .mobile-agent-composer button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
 .mobile-agent-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .mobile-agent-composer-actions .is-primary { flex: none; }
@@ -641,12 +641,12 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-request-composer form { display: grid; gap: 8px; }
 .mobile-request-composer label { display: grid; gap: 5px; }
 .mobile-request-composer label > span { color: var(--text-secondary); font-size: 11.5px; font-weight: 500; }
-.mobile-request-composer textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font: 13px/1.5 inherit; resize: vertical; }
+.mobile-request-composer textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-primary); font: 13px/1.5 inherit; resize: vertical; }
 .mobile-request-actions { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; }
-.mobile-request-profile select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
-.mobile-request-actions button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: 12px; background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
+.mobile-request-profile select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
+.mobile-request-actions button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: var(--radius-md); background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
 .mobile-request-actions button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
-.mobile-request-empty { margin: 0; padding: 13px; border: 1px dashed var(--border-muted); border-radius: 12px; color: var(--text-muted); font-size: 12px; line-height: 1.5; text-align: center; }
+.mobile-request-empty { margin: 0; padding: 13px; border: 1px dashed var(--border-muted); border-radius: var(--radius-md); color: var(--text-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 
 @media (max-width: 380px) {
   .mobile-conversation { padding-inline: 12px; }
