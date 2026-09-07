@@ -25,6 +25,7 @@ import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSession
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
+import { OverviewView } from './workspace/OverviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
@@ -445,6 +446,11 @@ export function App() {
 
   const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
   const selectRun = (run: WorkRun) => { setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
+  // Ticket 47: Overview/Repository rows hand off to the same Run/Session
+  // detail every other entry point (sidebar, command palette) already
+  // opens — selectSession alone doesn't switch tabs, so pair it with the
+  // view change the way CommandPalette's onSelectSession already does.
+  const selectSessionFromOverview = (session: Session) => { selectSession(session); setView('operations'); };
   const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
 
   const prepareRun = async (run: WorkRun) => {
@@ -659,6 +665,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onDeleteRun={(run) => void deleteRun(run)} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
+          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>

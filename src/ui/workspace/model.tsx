@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
+export type WorkspaceView = 'overview' | 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
   { id: 'operations', label: 'Operations' },
   { id: 'terminal', label: 'Session' },
   { id: 'changes', label: 'Changes' },

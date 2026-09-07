@@ -152,6 +152,30 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .empty-workspace.compact { min-height: 140px; }
 .micro-heading { margin-bottom: 9px; color: var(--text-muted); font-size: 10.5px; letter-spacing: .02em; }
 
+/* Ticket 47: cross-Repository Overview and its per-Repository page. */
+.repo-overview-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.repo-overview-card { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-panel); padding: 14px 16px; color: var(--text-primary); text-align: left; cursor: pointer; }
+.repo-overview-card:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.repo-overview-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.repo-overview-card-head strong { font-size: 14px; }
+.repo-overview-card-head > span { color: var(--text-muted); font-size: 11px; }
+.repo-overview-card-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-muted); font-size: 11px; }
+.repo-overview-card-counts .is-active-count { color: var(--text-secondary); font-weight: 600; }
+.repo-overview-attention { padding: 2px 7px; border: 1px solid color-mix(in srgb, var(--status-waiting) 55%, transparent); border-radius: 999px; background: var(--status-waiting-bg); color: var(--status-waiting); font-size: 10.5px; font-style: normal; }
+
+.repository-page { display: flex; flex-direction: column; }
+.repository-page-back { align-self: flex-start; margin-bottom: 14px; border: 0; background: transparent; color: var(--text-muted); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.repository-page-back:hover { color: var(--text-primary); }
+.overview-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 0; border-top: 1px solid var(--border-muted); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
+.overview-row:hover { background: var(--surface-hover); }
+.overview-row.is-selected { background: var(--surface-selected); }
+.overview-row-glyph { flex-shrink: 0; padding: 2px 6px; border-radius: 4px; background: var(--surface-hover); color: var(--text-muted); font-size: 9.5px; font-weight: 700; letter-spacing: .04em; }
+.overview-row-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.overview-row-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.overview-row-content small { color: var(--text-muted); font-size: 11px; }
+.overview-row-attention { color: var(--status-waiting); font-size: 11px; font-weight: 600; }
+.overview-empty-row { padding: 16px; color: var(--text-muted); font-size: 12px; }
+
 .operation-group { margin-bottom: 16px; overflow: hidden; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-panel); }
 .operation-group-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border-muted); }
 .operation-group-header strong { font-size: 13px; font-weight: 600; }
