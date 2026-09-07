@@ -119,6 +119,30 @@ describe('OverviewView landing', () => {
 });
 
 describe('OverviewView Repository page', () => {
+  it('filters Run and Session lists by their real status distinctions', async () => {
+    const host = await mount({
+      runs: [run(), run({ id: 'run-unverified', status: 'completed_unverified' })],
+      sessions: [session(), session({ id: 'session-waiting', status: 'waiting_input' })],
+    });
+    await act(async () => { (host.querySelector('[data-repo-id="repo-1"]') as HTMLButtonElement).click(); });
+    const runFilter = host.querySelector('select[aria-label="Filter Runs by status"]') as HTMLSelectElement;
+    const sessionFilter = host.querySelector('select[aria-label="Filter Sessions by status"]') as HTMLSelectElement;
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(runFilter, 'completed_unverified');
+      runFilter.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(host.querySelector('[data-run-id="run-unverified"]')).not.toBeNull();
+    expect(host.querySelector('[data-run-id="run-1"]')).toBeNull();
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(sessionFilter, 'waiting_input');
+      sessionFilter.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(host.querySelector('[data-session-id="session-waiting"]')).not.toBeNull();
+    expect(host.querySelector('[data-session-id="session-1"]')).toBeNull();
+  });
+
   it('distinguishes Run rows from Session rows', async () => {
     const host = await mount({ runs: [run()], sessions: [session()] });
     const card = host.querySelector('[data-repo-id="repo-1"]') as HTMLButtonElement;
@@ -188,6 +212,12 @@ describe('OverviewView Repository page', () => {
 });
 
 describe('OverviewView restoring selection', () => {
+  it('opens the Repository identity requested by global search', async () => {
+    const host = await mount({ repos: [agentdeck, webClient], requestedRepositoryId: 'repo-2', requestedNavigationSequence: 1 });
+    expect(host.querySelector('.repository-page')).not.toBeNull();
+    expect(host.querySelector('.view-heading h1')?.textContent).toBe('web-client');
+  });
+
   it('opens on the Repository behind an already-selected Run, e.g. from a deep link', async () => {
     const host = await mount({
       repos: [agentdeck, webClient],

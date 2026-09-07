@@ -51,6 +51,11 @@ async function mount(props: Partial<Props> = {}) {
   return container;
 }
 
+function choose(select: HTMLSelectElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, value);
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 afterEach(() => {
   if (root && container) act(() => { root!.unmount(); });
   container?.remove();
@@ -145,5 +150,29 @@ describe('TasksView', () => {
     await act(async () => { deleteButtons[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(onDeleteRun).toHaveBeenCalledWith(expect.objectContaining({ id: 'run-done' }));
     confirmSpy.mockRestore();
+  });
+
+  it('filters by real Run statuses without collapsing unverified or failure outcomes', async () => {
+    const host = await mount({
+      runs: [
+        run({ id: 'run-active', status: 'running' }),
+        run({ id: 'run-unverified', status: 'completed_unverified' }),
+        run({ id: 'run-verification-failed', status: 'failed_verification' }),
+        run({ id: 'run-budget-failed', status: 'failed_budget' }),
+      ],
+    });
+    const filter = host.querySelector('select[aria-label="Filter Runs by status"]') as HTMLSelectElement;
+    expect([...filter.options].map((option) => option.value)).toEqual(expect.arrayContaining([
+      'completed_unverified', 'failed_verification', 'failed_budget', 'failed', 'cancelled',
+    ]));
+
+    await act(async () => { choose(filter, 'completed_unverified'); });
+    expect(host.querySelector('[data-run-id="run-unverified"]')).not.toBeNull();
+    expect(host.querySelector('[data-run-id="run-active"]')).toBeNull();
+    expect(host.querySelector('[data-run-id="run-verification-failed"]')).toBeNull();
+
+    await act(async () => { choose(filter, 'failed_verification'); });
+    expect(host.querySelector('[data-run-id="run-verification-failed"]')).not.toBeNull();
+    expect(host.querySelector('[data-run-id="run-budget-failed"]')).toBeNull();
   });
 });

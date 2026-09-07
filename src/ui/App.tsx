@@ -87,6 +87,7 @@ export function App() {
   const [showRunSubmission, setShowRunSubmission] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [repositoryNavigationRequest, setRepositoryNavigationRequest] = useState<{ repositoryId: string | null; sequence: number }>({ repositoryId: null, sequence: 0 });
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
@@ -650,7 +651,7 @@ export function App() {
         <nav className="workspace-tabs" aria-label="Workspace views">
           {WORKSPACE_VIEWS.map((item) => <button className={view === item.id ? 'is-active' : ''} key={item.id} onClick={() => setView(item.id)} type="button">{item.label}{item.id === 'changes' && changeCount > 0 && <span>{changeCount}</span>}{item.id === 'history' && historySessions.length > 0 && <span>{historySessions.length}</span>}</button>)}
         </nav>
-        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Jump to session, file, or action…</strong><kbd>⌘K</kbd></button>
+        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Search repositories, runs, sessions, or actions…</strong><kbd>⌘K</kbd></button>
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
@@ -666,7 +667,7 @@ export function App() {
       <div className="app-body">
         <SessionSidebar discoveryStatus={discoveryStatus} onDeleteRun={(run) => void deleteRun(run)} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
           <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
@@ -701,7 +702,23 @@ export function App() {
         <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
 
-      <CommandPalette onClose={() => setPaletteOpen(false)} onLaunch={() => setShowLaunch(true)} onSelectSession={(session) => { selectSession(session); setView('operations'); }} onView={setView} open={paletteOpen} repos={repos} sessions={sessions} />
+      <CommandPalette
+        onClose={() => setPaletteOpen(false)}
+        onLaunch={() => setShowLaunch(true)}
+        onSelectRepo={(repo) => {
+          setSelectedId(null);
+          setSelectedRunId(null);
+          setRepositoryNavigationRequest((current) => ({ repositoryId: repo.id, sequence: current.sequence + 1 }));
+          setView('overview');
+        }}
+        onSelectRun={selectRun}
+        onSelectSession={(session) => { selectSession(session); setView('operations'); }}
+        onView={setView}
+        open={paletteOpen}
+        repos={repos}
+        runs={runs}
+        sessions={sessions}
+      />
       {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
       {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} repos={repos} />}

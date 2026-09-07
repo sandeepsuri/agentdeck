@@ -27,7 +27,7 @@ export function RunRow({ run, selected, onSelect, onDelete }: {
 }) {
   const canDelete = isTerminalRunStatus(run.status) && Boolean(onDelete);
   return (
-    <div className={`work-run-row${selected ? ' is-selected' : ''}`}>
+    <div className={`work-run-row${selected ? ' is-selected' : ''}`} data-run-id={run.id}>
       <button className="work-run-select" onClick={onSelect} type="button">
         <span className="work-run-glyph">RUN</span>
         <span className="work-run-content">

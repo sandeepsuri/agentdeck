@@ -676,3 +676,12 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .session-chat .mobile-request-composer { width: min(100%, 760px); box-sizing: border-box; align-self: center; }
 .session-terminal-panel { display: flex; flex: 1; min-height: 0; }
 .session-terminal-panel[hidden] { display: none; }
+
+/* Ticket 49: visible keyboard selection and truthful status filters for the new work lists. */
+.palette-results > button.is-selected { background: var(--surface-selected); color: var(--text-primary); }
+.work-status-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--text-muted); font-size: 11px; }
+.work-status-filter select, .operation-group-header select { padding: 6px 28px 6px 9px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-secondary); font-size: 11px; }
+.operation-group-header select { margin-left: auto; }
+.mobile-run-list-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mobile-run-list-heading-row .mobile-run-list-heading { margin-right: auto; }
+.mobile-run-list-heading-row select { max-width: 52%; padding: 6px 24px 6px 8px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-secondary); font-size: 11px; }

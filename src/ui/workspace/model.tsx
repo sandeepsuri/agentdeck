@@ -23,6 +23,11 @@ export const STATUS_LABELS: Record<SessionStatus, string> = {
   unknown: 'Unknown',
 };
 
+/** Every Session state, shared by admin and collaborator filters so the two projections cannot drift. */
+export const SESSION_STATUS_OPTIONS: readonly SessionStatus[] = [
+  'starting', 'working', 'waiting_input', 'idle', 'completed', 'exited', 'unknown',
+];
+
 /**
  * True for a managed session whose process has exited. It stays listed
  * (ticket 04: ended sessions are kept, not deleted) but has no live PTY

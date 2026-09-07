@@ -1,4 +1,11 @@
-import type { WorkRun } from '../../work-engine/types.js';
+import type { RunStatus, WorkRun } from '../../work-engine/types.js';
+
+/** Every durable Run state, kept explicit so filters cannot silently merge failures or unverified completion. */
+export const RUN_STATUS_OPTIONS: readonly RunStatus[] = [
+  'queued', 'preparing', 'running', 'waiting_approval', 'waiting_input', 'waiting_dependency',
+  'verifying', 'reviewing', 'pause_requested', 'paused', 'completed', 'completed_unverified',
+  'failed_verification', 'failed_budget', 'failed', 'cancelled',
+];
 
 export function formatRunLabel(value: string): string {
   const words = value.replaceAll('-', ' ').replaceAll('_', ' ');

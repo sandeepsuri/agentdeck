@@ -14,11 +14,11 @@
 // rather than trusted blindly, so a Repository that disappears (discovery
 // change, revoked path) falls back to the overview list instead of showing
 // stale content for a Repository that is no longer there.
-import { useState } from 'react';
-import type { Repo, Session } from '../../types.js';
-import type { WorkRun } from '../../work-engine/types.js';
-import { formatRunLabel, isTerminalRunStatus, orderRuns } from './runModel.js';
-import { ElapsedTime, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
+import { useEffect, useState } from 'react';
+import type { Repo, Session, SessionStatus } from '../../types.js';
+import type { RunStatus, WorkRun } from '../../work-engine/types.js';
+import { formatRunLabel, isTerminalRunStatus, orderRuns, RUN_STATUS_OPTIONS } from './runModel.js';
+import { ElapsedTime, SESSION_STATUS_OPTIONS, STATUS_LABELS, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
 export interface Props {
   repos: Repo[];
@@ -26,6 +26,10 @@ export interface Props {
   sessions: Session[];
   selectedRunId?: string | null;
   selectedId?: string | null;
+  /** A stable Repository destination chosen outside this view, such as global search. */
+  requestedRepositoryId?: string | null;
+  /** Changes for each navigation request so selecting the same Repository again still reopens it after Back. */
+  requestedNavigationSequence?: number;
   onSelectRun: (run: WorkRun) => void;
   onSelectSession: (session: Session) => void;
 }
@@ -116,6 +120,10 @@ function RepositoryPage({ repo, runs, sessions, selectedRunId, selectedId, onSel
 }) {
   const orderedRuns = orderRuns(runs);
   const orderedSessions = orderSessions(sessions);
+  const [runStatus, setRunStatus] = useState<'all' | RunStatus>('all');
+  const [sessionStatus, setSessionStatus] = useState<'all' | SessionStatus>('all');
+  const visibleRuns = runStatus === 'all' ? orderedRuns : orderedRuns.filter((run) => run.status === runStatus);
+  const visibleSessions = sessionStatus === 'all' ? orderedSessions : orderedSessions.filter((session) => session.status === sessionStatus);
   return (
     <section aria-label={`${repo.name} repository`} className="workspace-scroll repository-page">
       <button className="repository-page-back" onClick={onBack} type="button">‹ Overview</button>
@@ -125,25 +133,39 @@ function RepositoryPage({ repo, runs, sessions, selectedRunId, selectedId, onSel
       </div>
 
       <section className="operation-group">
-        <header className="operation-group-header"><strong>Runs</strong><small>{orderedRuns.length}</small></header>
-        {orderedRuns.map((run) => (
+        <header className="operation-group-header">
+          <strong>Runs</strong><small>{visibleRuns.length} of {orderedRuns.length}</small>
+          <select aria-label="Filter Runs by status" onChange={(event) => setRunStatus(event.target.value as 'all' | RunStatus)} value={runStatus}>
+            <option value="all">All statuses</option>
+            {RUN_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{formatRunLabel(status)}</option>)}
+          </select>
+        </header>
+        {visibleRuns.map((run) => (
           <RunRow key={run.id} onSelect={() => onSelectRun(run)} run={run} selected={run.id === selectedRunId} />
         ))}
         {orderedRuns.length === 0 && <div className="overview-empty-row">No Runs have been requested in {repo.name} yet.</div>}
+        {orderedRuns.length > 0 && visibleRuns.length === 0 && <div className="overview-empty-row">No Runs match {formatRunLabel(runStatus)}.</div>}
       </section>
 
       <section className="operation-group">
-        <header className="operation-group-header"><strong>Sessions</strong><small>{orderedSessions.length}</small></header>
-        {orderedSessions.map((session) => (
+        <header className="operation-group-header">
+          <strong>Sessions</strong><small>{visibleSessions.length} of {orderedSessions.length}</small>
+          <select aria-label="Filter Sessions by status" onChange={(event) => setSessionStatus(event.target.value as 'all' | SessionStatus)} value={sessionStatus}>
+            <option value="all">All statuses</option>
+            {SESSION_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}
+          </select>
+        </header>
+        {visibleSessions.map((session) => (
           <SessionRow key={session.id} onSelect={() => onSelectSession(session)} selected={session.id === selectedId} session={session} />
         ))}
         {orderedSessions.length === 0 && <div className="overview-empty-row">No agents are running in {repo.name}.</div>}
+        {orderedSessions.length > 0 && visibleSessions.length === 0 && <div className="overview-empty-row">No Sessions match {sessionStatus === 'all' ? 'all statuses' : STATUS_LABELS[sessionStatus]}.</div>}
       </section>
     </section>
   );
 }
 
-export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, onSelectRun, onSelectSession }: Props) {
+export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, requestedRepositoryId = null, requestedNavigationSequence = 0, onSelectRun, onSelectSession }: Props) {
   // Opens on the Repository behind whatever is already selected (a run/session
   // reached via deep link, the sidebar, or the command palette) rather than
   // an arbitrary first entry — but only as a starting point: once a person
@@ -151,11 +173,16 @@ export function OverviewView({ repos, runs, sessions, selectedRunId = null, sele
   // is what persists (this component stays mounted across tab switches, so
   // no effect re-derives it from `selected*` again after the initial render).
   const [activeRepoId, setActiveRepoId] = useState<string | null>(() => {
+    if (requestedRepositoryId && repoOf(repos, requestedRepositoryId)) return requestedRepositoryId;
     const selectedRun = selectedRunId ? runs.find((run) => run.id === selectedRunId) : undefined;
     if (selectedRun) return selectedRun.spec.repository.id;
     const selectedSession = selectedId ? sessions.find((session) => session.id === selectedId) : undefined;
     return selectedSession ? repoPathOf(selectedSession) : null;
   });
+
+  useEffect(() => {
+    if (requestedRepositoryId) setActiveRepoId(requestedRepositoryId);
+  }, [requestedRepositoryId, requestedNavigationSequence]);
 
   // Re-resolved every render (never trusted from state directly) so a
   // Repository that stops being discoverable — an unwatched path, a revoked

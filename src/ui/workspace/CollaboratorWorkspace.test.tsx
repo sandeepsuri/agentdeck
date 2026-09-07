@@ -89,6 +89,24 @@ async function mount(props: Partial<Props> = {}) {
   return container;
 }
 
+async function renderWorkspace(props: Partial<Props> = {}) {
+  await act(async () => {
+    root!.render(
+      <CollaboratorWorkspace
+        onError={() => undefined}
+        onResolveRunAttention={() => undefined}
+        onRunsStale={() => undefined}
+        principal={principal}
+        profiles={[profile]}
+        repos={[granted]}
+        runs={[]}
+        sessions={[]}
+        {...props}
+      />,
+    );
+  });
+}
+
 afterEach(() => {
   if (root && container) act(() => { root!.unmount(); });
   container?.remove();
@@ -98,6 +116,88 @@ afterEach(() => {
 });
 
 describe('CollaboratorWorkspace navigation', () => {
+  it('searches only the current authorized projection and opens a granted Repository destination', async () => {
+    const webRun = summary({ id: 'run-web', objective: 'Repair web checkout', repository: { id: other.id, name: other.name } });
+    const host = await mount({ repos: [granted, other], runs: [summary(), webRun] });
+    const trigger = host.querySelector('[aria-label="Search accessible work"]') as HTMLButtonElement;
+    await act(async () => { trigger.click(); });
+    const input = host.querySelector('.command-palette input') as HTMLInputElement;
+    await act(async () => { setInputValue(input, 'web'); });
+    expect(host.querySelector('[data-repo-id="repo-2"]')).not.toBeNull();
+    expect(host.querySelector('[data-run-id="run-web"]')).not.toBeNull();
+
+    await act(async () => { (host.querySelector('[data-repo-id="repo-2"]') as HTMLButtonElement).click(); });
+    expect(host.textContent).toContain('Repair web checkout');
+    expect(host.textContent).not.toContain('Fix the flaky auth test');
+  });
+
+  it('removes collaborator search results as soon as a grant-scoped projection refresh drops them', async () => {
+    const webRun = summary({ id: 'run-web', objective: 'Repair web checkout', repository: { id: other.id, name: other.name } });
+    const host = await mount({ repos: [granted, other], runs: [webRun] });
+    await act(async () => { (host.querySelector('[aria-label="Search accessible work"]') as HTMLButtonElement).click(); });
+    const input = host.querySelector('.command-palette input') as HTMLInputElement;
+    await act(async () => { setInputValue(input, 'web'); });
+    expect(host.querySelector('[data-run-id="run-web"]')).not.toBeNull();
+
+    await renderWorkspace({ repos: [granted], runs: [] });
+    expect(host.querySelector('[data-run-id="run-web"]')).toBeNull();
+    expect(host.querySelector('[data-repo-id="repo-2"]')).toBeNull();
+    expect(host.querySelector('.palette-empty')).not.toBeNull();
+  });
+
+  it('opens Run and Session destinations from search by their stable identity', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/chat')) return jsonResponse([]);
+      if (url.includes('/capabilities')) return jsonResponse({ send: 'queued' });
+      return jsonResponse(detail());
+    }));
+    const host = await mount({ runs: [summary()], sessions: [agent()] });
+    const trigger = host.querySelector('[aria-label="Search accessible work"]') as HTMLButtonElement;
+
+    await act(async () => { trigger.click(); });
+    await act(async () => { setInputValue(host.querySelector('.command-palette input') as HTMLInputElement, 'flaky auth'); });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+    expect(host.querySelector('.mobile-conversation')).not.toBeNull();
+
+    await act(async () => { (host.querySelector('[aria-label="Search accessible work"]') as HTMLButtonElement).click(); });
+    await act(async () => { setInputValue(host.querySelector('.command-palette input') as HTMLInputElement, 'claude'); });
+    await act(async () => { (host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement).click(); });
+    expect(host.querySelector('.session-chat')).not.toBeNull();
+  });
+
+  it('stops rendering cached Run detail when the grant-scoped list no longer contains that Run', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({
+      narrative: { answer: 'Sensitive result', steps: [], stepsTruncated: false },
+    }))));
+    const host = await mount({ runs: [summary()] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+    expect(host.textContent).toContain('Sensitive result');
+
+    await renderWorkspace({ repos: [granted], runs: [] });
+    expect(host.textContent).not.toContain('Sensitive result');
+    expect(host.textContent).toContain('No work has been requested in agentdeck yet');
+  });
+
+  it('filters the collaborator work list by exact Run and Session status', async () => {
+    const host = await mount({
+      runs: [summary(), summary({ id: 'run-unverified', status: 'completed_unverified' })],
+      sessions: [agent(), agent({ id: 'session-waiting', status: 'waiting_input' })],
+    });
+    const runFilter = host.querySelector('select[aria-label="Filter Runs by status"]') as HTMLSelectElement;
+    const sessionFilter = host.querySelector('select[aria-label="Filter Sessions by status"]') as HTMLSelectElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(runFilter, 'completed_unverified');
+      runFilter.dispatchEvent(new Event('change', { bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(sessionFilter, 'waiting_input');
+      sessionFilter.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(host.querySelector('[data-run-id="run-unverified"]')).not.toBeNull();
+    expect(host.querySelector('[data-run-id="run-1"]')).toBeNull();
+    expect(host.querySelector('[data-session-id="session-waiting"]')).not.toBeNull();
+    expect(host.querySelector('[data-session-id="session-1"]')).toBeNull();
+  });
+
   it('lands on the first granted Repository rather than an empty screen', async () => {
     const host = await mount({ runs: [summary()] });
     expect(host.textContent).toContain('agentdeck');

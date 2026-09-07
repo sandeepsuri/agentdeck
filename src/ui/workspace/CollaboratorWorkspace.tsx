@@ -28,17 +28,18 @@
 // of Sessions ever reach here.
 import { useEffect, useRef, useState } from 'react';
 import type {
-  AgentType, CollaboratorSession, Repo,
+  AgentType, CollaboratorSession, Repo, SessionStatus,
 } from '../../types.js';
 import type {
-  AttentionDecisionInput, CollaboratorRunDetail, CollaboratorRunSummary, Profile, WorkSpec,
+  AttentionDecisionInput, CollaboratorRunDetail, CollaboratorRunSummary, Profile, RunStatus, WorkSpec,
 } from '../../work-engine/types.js';
 import { describeOutcome, formatTokenCount } from '../../work-engine/attempt-narrative.js';
 import { getCollaboratorRun, requestWork } from '../collaboratorRuns.js';
 import { SessionChat } from './SessionChat.js';
 import { lines } from '../components/RunSubmissionModal.js';
-import { STATUS_LABELS, relativeTime } from './model.js';
-import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
+import { SESSION_STATUS_OPTIONS, STATUS_LABELS, relativeTime } from './model.js';
+import { CommandPalette } from './CommandPalette.js';
+import { formatRunLabel, isTerminalRunStatus, RUN_STATUS_OPTIONS } from './runModel.js';
 
 export interface Props {
   principal: { id: string; displayName: string };
@@ -480,8 +481,12 @@ export function CollaboratorWorkspace({
 }: Props) {
   const [view, setView] = useState<View | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [runStatus, setRunStatus] = useState<'all' | RunStatus>('all');
+  const [sessionStatus, setSessionStatus] = useState<'all' | SessionStatus>('all');
   const [detail, setDetail] = useState<CollaboratorRunDetail | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const pendingRequestedRunRef = useRef<{ runId: string; beforeRefresh: readonly CollaboratorRunSummary[] } | null>(null);
 
 
   // Land on the first granted Repository rather than an empty screen — with
@@ -518,6 +523,26 @@ export function CollaboratorWorkspace({
   const sessionId = view?.kind === 'session' ? view.sessionId : null;
   const openSession = sessions.find((item) => item.id === sessionId) ?? null;
 
+  // The list projections are the live authorization boundary. If either an
+  // item or its Repository disappears, discard any cached detail immediately
+  // rather than waiting for a rejected detail poll to retry indefinitely.
+  useEffect(() => {
+    const run = view?.kind === 'run' ? runs.find((item) => item.id === view.runId) : undefined;
+    const session = view?.kind === 'session' ? sessions.find((item) => item.id === view.sessionId) : undefined;
+    if (run && pendingRequestedRunRef.current?.runId === run.id) pendingRequestedRunRef.current = null;
+    const awaitingFirstListRefresh = view?.kind === 'run'
+      && pendingRequestedRunRef.current?.runId === view.runId
+      && pendingRequestedRunRef.current.beforeRefresh === runs;
+    const runAuthorized = run && repos.some((repo) => repo.id === run.repository.id);
+    const sessionAuthorized = session && repos.some((repo) => repo.id === session.repoId);
+    if ((view?.kind === 'run' && !runAuthorized && !awaitingFirstListRefresh) || (view?.kind === 'session' && !sessionAuthorized)) {
+      pendingRequestedRunRef.current = null;
+      setDetail(null);
+      setNotice(null);
+      setView(repos[0] ? { kind: 'repository', repositoryId: repos[0].id } : null);
+    }
+  }, [repos, runs, sessions, view]);
+
   const repository = repos.find((repo) => repo.id === (
     view?.kind === 'repository' ? view.repositoryId
       : view?.kind === 'session' ? openSession?.repoId
@@ -525,6 +550,8 @@ export function CollaboratorWorkspace({
   ));
   const repositoryRuns = repository ? orderRuns(runs.filter((run) => run.repository.id === repository.id)) : [];
   const repositorySessions = repository ? orderSessions(sessions.filter((item) => item.repoId === repository.id)) : [];
+  const visibleRuns = runStatus === 'all' ? repositoryRuns : repositoryRuns.filter((run) => run.status === runStatus);
+  const visibleSessions = sessionStatus === 'all' ? repositorySessions : repositorySessions.filter((session) => session.status === sessionStatus);
 
   const openRun = (id: string, carriedNotice: string | null = null) => {
     setNotice(carriedNotice);
@@ -562,6 +589,7 @@ export function CollaboratorWorkspace({
                 : `Signed in as ${principal.displayName}`}
           </small>
         </span>
+        <button aria-label="Search accessible work" className="mobile-icon-button" onClick={() => setSearchOpen(true)} type="button">⌕</button>
         {onSignOut && view?.kind !== 'run' && view?.kind !== 'session'
           ? <button className="mobile-signout" onClick={onSignOut} type="button">Sign out</button>
           : <span aria-hidden="true" className="mobile-topbar-spacer" />}
@@ -589,21 +617,27 @@ export function CollaboratorWorkspace({
           <main aria-label="Work in this repository" className="mobile-run-list">
             {repositorySessions.length > 0 && (
               <>
-                <h2 className="mobile-run-list-heading">Agents</h2>
-                {repositorySessions.map((item) => (
+                <div className="mobile-run-list-heading-row"><h2 className="mobile-run-list-heading">Agents</h2><select aria-label="Filter Sessions by status" onChange={(event) => setSessionStatus(event.target.value as 'all' | SessionStatus)} value={sessionStatus}><option value="all">All statuses</option>{SESSION_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{STATUS_LABELS[status]}</option>)}</select></div>
+                {visibleSessions.map((item) => (
                   <AgentTile key={item.id} onSelect={() => openAgent(item.id)} session={item} />
                 ))}
+                {visibleSessions.length === 0 && <p className="mobile-run-list-empty">No agents match {sessionStatus === 'all' ? 'all statuses' : STATUS_LABELS[sessionStatus]}.</p>}
               </>
             )}
-            <h2 className="mobile-run-list-heading">Runs</h2>
-            {repositoryRuns.map((run) => <RunTile key={run.id} onSelect={() => openRun(run.id)} run={run} />)}
+            <div className="mobile-run-list-heading-row"><h2 className="mobile-run-list-heading">Runs</h2><select aria-label="Filter Runs by status" onChange={(event) => setRunStatus(event.target.value as 'all' | RunStatus)} value={runStatus}><option value="all">All statuses</option>{RUN_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{formatRunLabel(status)}</option>)}</select></div>
+            {visibleRuns.map((run) => <RunTile key={run.id} onSelect={() => openRun(run.id)} run={run} />)}
             {repositoryRuns.length === 0 && (
               <p className="mobile-run-list-empty">No work has been requested in {repository.name} yet. Ask for some below.</p>
             )}
+            {repositoryRuns.length > 0 && visibleRuns.length === 0 && <p className="mobile-run-list-empty">No Runs match {formatRunLabel(runStatus)}.</p>}
           </main>
           <RequestWorkComposer
             onError={onError}
-            onRequested={(newRunId, note) => { onRunsStale(); openRun(newRunId, note ?? null); }}
+            onRequested={(newRunId, note) => {
+              pendingRequestedRunRef.current = { runId: newRunId, beforeRefresh: runs };
+              onRunsStale();
+              openRun(newRunId, note ?? null);
+            }}
             profiles={profiles}
             repository={repository}
           />
@@ -624,6 +658,16 @@ export function CollaboratorWorkspace({
         repos={repos}
         runs={runs}
         selectedId={repository?.id ?? null}
+        sessions={sessions}
+      />
+      <CommandPalette
+        onClose={() => setSearchOpen(false)}
+        onSelectRepo={(repo) => { setDetail(null); setNotice(null); setView({ kind: 'repository', repositoryId: repo.id }); }}
+        onSelectRun={(run) => openRun(run.id)}
+        onSelectSession={(session) => openAgent(session.id)}
+        open={searchOpen}
+        repos={repos}
+        runs={runs}
         sessions={sessions}
       />
     </section>
