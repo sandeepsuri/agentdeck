@@ -39,7 +39,7 @@ const fullRun = {
 const narrowedRun = {
   id: 'run-2', status: 'running', objective: 'Fix the flaky auth test', acceptanceCriteria: [],
   repository: { id: REPO, name: 'example' }, submittedAt: '2026-09-01T00:00:00.000Z',
-  requestedBy: 'Brandon', preparation: { state: 'ready' }, attemptState: 'running',
+  requestedBy: 'Brandon', isRequestedByMe: false, preparation: { state: 'ready' }, attemptState: 'running',
 } as unknown as WorkRun;
 
 const fullRepo: Repo = { id: REPO, name: 'example', path: REPO, currentBranch: 'main' };

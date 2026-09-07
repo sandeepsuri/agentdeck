@@ -29,7 +29,10 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 /** A real repository, never the caller's real ~/.agentdeck/runs, so prepare() has something to resolve against. */
-function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3], deps?: WorkRoutesDeps) {
+function makeApp(
+  runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3],
+  deps?: WorkRoutesDeps | ((repositoryId: string) => WorkRoutesDeps),
+) {
   const root = tempDir();
   const repoPath = path.join(root, 'repo');
   fs.mkdirSync(repoPath, { recursive: true });
@@ -52,7 +55,7 @@ function makeApp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngin
   const engine = runtimeAdapters
     ? new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), runtimeAdapters)
     : new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource());
-  registerWorkRoutes(app, engine, deps);
+  registerWorkRoutes(app, engine, typeof deps === 'function' ? deps(repoPath) : deps);
   apps.push(app);
   stores.push(store);
   return { app, repoPath, store, engine };
@@ -68,6 +71,17 @@ function submittedIntent(repoPath: string, requestedBaseReference = 'feature/exa
     budget: { maxWallClockMs: 900_000, maxModelTurns: 25 },
     verificationIntent: { required: true, commands: ['npm test'] },
     requestedDeliveryResult: 'local-commit',
+  };
+}
+
+/** A named collaborator read without turning this suite's admin fixture submissions into collaborator submissions. */
+function collaboratorReadDeps(repositoryIds: readonly string[]): WorkRoutesDeps {
+  return {
+    resolveGrantedRepositoryIds: () => repositoryIds,
+    resolveActor: (request) => request.method === 'GET' ? {
+      principal: { id: 'collab-reader', displayName: 'Alice' },
+      grants: { repositoryIds, profileIds: [] },
+    } : undefined,
   };
 }
 
@@ -133,7 +147,7 @@ describe('work routes', () => {
 
 describe('collaborator grant scoping (ticket 11 AC4)', () => {
   it('omits an ungranted Run from the list and 404s reading it by id directly', async () => {
-    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [] });
+    const { app, repoPath } = makeApp(undefined, collaboratorReadDeps([]));
     const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
     const run = created.json();
 
@@ -145,7 +159,7 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
   });
 
   it('includes a Run whose Repository id is in the resolved grant set', async () => {
-    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    const { app, repoPath } = makeApp(undefined, (repositoryId) => collaboratorReadDeps([repositoryId]));
     const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
     const run = created.json();
 
@@ -161,7 +175,7 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
   // exactly the same condition it filters on -- so a caller can never end up
   // filtered but not narrowed, or narrowed but not filtered.
   it('narrows every listed Run to the collaborator projection whenever grants resolved', async () => {
-    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    const { app, repoPath } = makeApp(undefined, (repositoryId) => collaboratorReadDeps([repositoryId]));
     await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
 
     const listed = await app.inject({ method: 'GET', url: '/api/runs' });
@@ -175,7 +189,7 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
   });
 
   it('narrows a Run read by id to the collaborator detail projection, and leaves it raw when no grants resolved', async () => {
-    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => [repoPath] });
+    const { app, repoPath } = makeApp(undefined, (repositoryId) => collaboratorReadDeps([repositoryId]));
     const run = (await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) })).json();
 
     const scoped = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
@@ -188,10 +202,11 @@ describe('collaborator grant scoping (ticket 11 AC4)', () => {
     const adminRun = (await adminApp.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(adminRepo) })).json();
     const raw = (await adminApp.inject({ method: 'GET', url: `/api/runs/${adminRun.id}` })).json() as { spec: { repository: { path: string } } };
     expect(raw.spec.repository.path).toBe(adminRepo);
+    expect(raw).not.toHaveProperty('isRequestedByMe');
   });
 
   it('404s a granted-elsewhere Run read by id -- never leaking that it exists', async () => {
-    const { app, repoPath } = makeApp(undefined, { resolveGrantedRepositoryIds: () => ['some-other-repo'] });
+    const { app, repoPath } = makeApp(undefined, collaboratorReadDeps(['some-other-repo']));
     const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
     const run = created.json();
 
@@ -446,7 +461,7 @@ describe('run attention routes (ticket 07)', () => {
     // Same Run, re-registered against the same engine with a resolver
     // granting its Repository — proves the filter *includes* a granted Run.
     const grantedRoutesApp = Fastify();
-    registerWorkRoutes(grantedRoutesApp, granted.engine, { resolveGrantedRepositoryIds: () => [granted.repoPath] });
+    registerWorkRoutes(grantedRoutesApp, granted.engine, collaboratorReadDeps([granted.repoPath]));
     apps.push(grantedRoutesApp);
     const asGranted = await grantedRoutesApp.inject({ method: 'GET', url: '/api/runs/attention' });
     expect(asGranted.json()).toHaveLength(1);
@@ -455,7 +470,7 @@ describe('run attention routes (ticket 07)', () => {
     // And with nothing granted at all — proves the filter *excludes* it,
     // never falling back to the unfiltered system-wide queue.
     const ungrantedRoutesApp = Fastify();
-    registerWorkRoutes(ungrantedRoutesApp, granted.engine, { resolveGrantedRepositoryIds: () => [] });
+    registerWorkRoutes(ungrantedRoutesApp, granted.engine, collaboratorReadDeps([]));
     apps.push(ungrantedRoutesApp);
     const asUngranted = await ungrantedRoutesApp.inject({ method: 'GET', url: '/api/runs/attention' });
     expect(asUngranted.json()).toEqual([]);

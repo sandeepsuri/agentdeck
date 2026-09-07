@@ -52,7 +52,7 @@ function summary(overrides: Partial<CollaboratorRunSummary> = {}): CollaboratorR
   return {
     id: 'run-1', status: 'running', objective: 'Fix the flaky auth test', acceptanceCriteria: ['It passes'],
     repository: { id: 'repo-1', name: 'agentdeck' }, submittedAt: '2026-09-01T00:00:00.000Z',
-    requestedBy: 'Alice', preparation: { state: 'ready' }, attemptState: 'running', ...overrides,
+    requestedBy: 'Alice', isRequestedByMe: true, preparation: { state: 'ready' }, attemptState: 'running', ...overrides,
   };
 }
 
@@ -113,9 +113,95 @@ afterEach(() => {
   container = null;
   root = null;
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('CollaboratorWorkspace navigation', () => {
+  it('lists only server-derived personal requests across Repositories and opens existing Run detail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({
+      id: 'mine-elsewhere', objective: 'Update web copy',
+      repository: { id: other.id, name: other.name }, isRequestedByMe: true,
+    }))));
+    const sameNameOtherPrincipal = summary({ id: 'not-mine', objective: 'Other Alice request', isRequestedByMe: false });
+    const mineElsewhere = summary({
+      id: 'mine-elsewhere', objective: 'Update web copy', repository: { id: other.id, name: other.name },
+      isRequestedByMe: true, pendingAttentionKind: 'approval',
+    });
+    const host = await mount({ repos: [granted, other], runs: [sameNameOtherPrincipal, mineElsewhere] });
+
+    await act(async () => { (host.querySelector('[aria-label="Open repositories"]') as HTMLButtonElement).click(); });
+    await act(async () => { (host.querySelector('[data-personal-requests]') as HTMLButtonElement).click(); });
+
+    expect(host.textContent).toContain('Update web copy');
+    expect(host.textContent).not.toContain('Other Alice request');
+    expect(host.textContent).toContain('Repository approval pending');
+    expect(host.textContent).not.toContain('Needs your approval');
+    await act(async () => { (host.querySelector('[data-run-id="mine-elsewhere"]') as HTMLButtonElement).click(); });
+    expect(host.querySelector('.mobile-conversation')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Back to your requests"]')).not.toBeNull();
+    await act(async () => { (host.querySelector('[aria-label="Back to your requests"]') as HTMLButtonElement).click(); });
+    expect(host.querySelector('[data-run-id="mine-elsewhere"]')).not.toBeNull();
+  });
+
+  it('shows honest loading, error, empty, and revoked personal-request states', async () => {
+    const host = await mount({ runListState: 'loading' });
+    await act(async () => { (host.querySelector('[aria-label="Open repositories"]') as HTMLButtonElement).click(); });
+    await act(async () => { (host.querySelector('[data-personal-requests]') as HTMLButtonElement).click(); });
+    expect(host.textContent).toContain('Loading your requests');
+
+    await renderWorkspace({ runListState: 'error' });
+    expect(host.textContent).toContain('could not refresh your requests');
+
+    await renderWorkspace({ repositoryListState: 'error', repos: [], runListState: 'ready' });
+    expect(host.textContent).toContain('could not refresh your Repository access');
+    expect(host.textContent).not.toContain('No Repositories are currently granted');
+
+    await renderWorkspace({ runListState: 'ready', runs: [] });
+    expect(host.textContent).toContain('No requests are available in your granted Repositories');
+
+    await renderWorkspace({ runListState: 'ready', runs: [summary({ id: 'mine', isRequestedByMe: true })] });
+    expect(host.querySelector('[data-run-id="mine"]')).not.toBeNull();
+    await renderWorkspace({
+      repos: [granted],
+      runListState: 'ready',
+      runs: [summary({ id: 'mine', isRequestedByMe: true, repository: { id: other.id, name: other.name } })],
+    });
+    expect(host.querySelector('[data-run-id="mine"]')).toBeNull();
+    expect(host.textContent).toContain('No requests are available in your granted Repositories');
+  });
+
+  it('shows an out-of-scope Run detail response as unavailable instead of loading forever', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'no such run' }, 404)));
+    const host = await mount({ runs: [summary()] });
+
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    expect(host.textContent).toContain('Run unavailable');
+    expect(host.textContent).toContain('Repository access may have changed');
+    expect(host.textContent).not.toContain('Loading this Run');
+  });
+
+  it('clears already-rendered Run detail when a later poll says it is out of scope', async () => {
+    vi.useFakeTimers();
+    const sensitive = detail({ narrative: { answer: 'Previously authorized result', steps: [], stepsTruncated: false } });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(sensitive))
+      .mockResolvedValueOnce(jsonResponse({ error: 'no such run' }, 404));
+    vi.stubGlobal('fetch', fetchMock);
+    const host = await mount({ runs: [summary()] });
+
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+    expect(host.textContent).toContain('Previously authorized result');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(host.textContent).not.toContain('Previously authorized result');
+    expect(host.textContent).toContain('Run unavailable');
+  });
+
   it('searches only the current authorized projection and opens a granted Repository destination', async () => {
     const webRun = summary({ id: 'run-web', objective: 'Repair web checkout', repository: { id: other.id, name: other.name } });
     const host = await mount({ repos: [granted, other], runs: [summary(), webRun] });

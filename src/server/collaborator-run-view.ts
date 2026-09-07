@@ -72,7 +72,7 @@ function runRoots(run: WorkRun): readonly string[] {
   return [run.preparation.worktreePath, run.spec.repository.path].filter((value): value is string => Boolean(value));
 }
 
-export function collaboratorRunSummary(run: WorkRun): CollaboratorRunSummary {
+export function collaboratorRunSummary(run: WorkRun, requestingPrincipalId: string): CollaboratorRunSummary {
   const note = preparationNote(run);
   return {
     id: run.id,
@@ -82,6 +82,7 @@ export function collaboratorRunSummary(run: WorkRun): CollaboratorRunSummary {
     repository: { id: run.spec.repository.id, name: run.spec.repository.name },
     submittedAt: run.submittedAt,
     requestedBy: run.principal.displayName,
+    isRequestedByMe: run.principal.id === requestingPrincipalId,
     preparation: { state: run.preparation.state, ...(note ? { note } : {}) },
     attemptState: run.attempt.state,
     ...(run.pendingAttention ? { pendingAttentionKind: run.pendingAttention.kind } : {}),
@@ -133,11 +134,11 @@ function narrowResult(run: WorkRun): CollaboratorRunResult | undefined {
   };
 }
 
-export function collaboratorRunDetail(run: WorkRun): CollaboratorRunDetail {
+export function collaboratorRunDetail(run: WorkRun, requestingPrincipalId: string): CollaboratorRunDetail {
   const roots = runRoots(run);
   const result = narrowResult(run);
   return {
-    ...collaboratorRunSummary(run),
+    ...collaboratorRunSummary(run, requestingPrincipalId),
     requestedBaseReference: run.spec.requestedBaseReference,
     ...(run.spec.profileId ? { profileId: run.spec.profileId } : {}),
     narrative: narrate(run),

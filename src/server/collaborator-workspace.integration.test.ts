@@ -94,11 +94,11 @@ function setUp() {
       return device && toRunActor(device);
     },
   });
-  const { code } = collaborators.inviteCollaborator({
+  const { code, collaborator } = collaborators.inviteCollaborator({
     displayName: 'Alice', grantedRepositoryIds: [REPO_PATH], grantedProfileIds: [profile.id],
   });
   const { token } = collaborators.exchangeInvitation(code, "Alice's phone");
-  return { app, token, workEngine, setSessions: (next: Session[]) => { sessions = next; } };
+  return { app, collaborators, collaborator, token, workEngine, setSessions: (next: Session[]) => { sessions = next; } };
 }
 
 const asAlice = (token: string) => ({ host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: token, 'content-type': 'application/json' });
@@ -120,6 +120,46 @@ function requestBody(): string {
 }
 
 describe('a named collaborator device, end to end', () => {
+  it('marks requests by Principal across devices and keeps a same-name Principal distinct', async () => {
+    const { app, collaborators, collaborator: alice, token: alicePhone } = setUp();
+    const aliceRun = (await app.inject({
+      method: 'POST', url: '/api/runs', headers: asAlice(alicePhone), payload: requestBody(),
+    })).json<{ id: string }>();
+
+    const { code: laptopCode } = collaborators.inviteCollaborator({ collaboratorId: alice.id });
+    const { token: aliceLaptop } = collaborators.exchangeInvitation(laptopCode, "Alice's laptop");
+    const { code: otherCode, collaborator: otherAlice } = collaborators.inviteCollaborator({
+      displayName: 'Alice', grantedRepositoryIds: [REPO_PATH], grantedProfileIds: [profile.id],
+    });
+    const { token: otherAlicePhone } = collaborators.exchangeInvitation(otherCode, "Other Alice's phone");
+    const otherRun = (await app.inject({
+      method: 'POST', url: '/api/runs', headers: asAlice(otherAlicePhone), payload: requestBody(),
+    })).json<{ id: string }>();
+
+    for (const token of [alicePhone, aliceLaptop]) {
+      const rows = (await app.inject({ method: 'GET', url: '/api/runs', headers: asAlice(token) }))
+        .json<Array<{ id: string; requestedBy: string; isRequestedByMe: boolean }>>();
+      expect(rows.find((run) => run.id === aliceRun.id)).toMatchObject({ requestedBy: 'Alice', isRequestedByMe: true });
+      expect(rows.find((run) => run.id === otherRun.id)).toMatchObject({ requestedBy: 'Alice', isRequestedByMe: false });
+      expect(JSON.stringify(rows)).not.toContain(alice.id);
+      expect(JSON.stringify(rows)).not.toContain(otherAlice.id);
+    }
+
+    const aliceDetail = (await app.inject({ method: 'GET', url: `/api/runs/${aliceRun.id}`, headers: asAlice(aliceLaptop) }))
+      .json<{ isRequestedByMe: boolean }>();
+    const otherDetail = (await app.inject({ method: 'GET', url: `/api/runs/${otherRun.id}`, headers: asAlice(aliceLaptop) }))
+      .json<{ isRequestedByMe: boolean }>();
+    expect(aliceDetail.isRequestedByMe).toBe(true);
+    expect(otherDetail.isRequestedByMe).toBe(false);
+
+    collaborators.updateGrants(alice.id, { repositoryIds: [], profileIds: [profile.id] });
+    for (const token of [alicePhone, aliceLaptop]) {
+      expect((await app.inject({ method: 'GET', url: '/api/runs', headers: asAlice(token) })).json()).toEqual([]);
+      expect((await app.inject({ method: 'GET', url: `/api/runs/${aliceRun.id}`, headers: asAlice(token) })).statusCode).toBe(404);
+    }
+    await app.close();
+  });
+
   it('requests work with no Repository path and the engine still freezes the real one', async () => {
     const { app, token, workEngine } = setUp();
 

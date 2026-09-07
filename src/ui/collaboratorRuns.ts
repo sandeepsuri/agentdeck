@@ -10,12 +10,23 @@ import type { CollaboratorRunDetail, CollaboratorRunSummary, WorkSpec } from '..
 
 type RunFetcher = (path: string, init?: RequestInit) => Promise<Response>;
 
+export type CollaboratorListState = 'loading' | 'ready' | 'error';
+
+export class CollaboratorRunReadError extends Error {
+  constructor(readonly status: number) {
+    super(`request failed: ${status}`);
+    this.name = 'CollaboratorRunReadError';
+  }
+}
+
 export function listCollaboratorRuns(fetcher: RunFetcher = apiFetch): Promise<CollaboratorRunSummary[]> {
   return fetcher('/api/runs').then((response) => responseJsonArray<CollaboratorRunSummary>(response));
 }
 
-export function getCollaboratorRun(runId: string, fetcher: RunFetcher = apiFetch): Promise<CollaboratorRunDetail> {
-  return fetcher(`/api/runs/${encodeURIComponent(runId)}`).then((response) => responseJson<CollaboratorRunDetail>(response));
+export async function getCollaboratorRun(runId: string, fetcher: RunFetcher = apiFetch): Promise<CollaboratorRunDetail> {
+  const response = await fetcher(`/api/runs/${encodeURIComponent(runId)}`);
+  if (!response.ok) throw new CollaboratorRunReadError(response.status);
+  return responseJson<CollaboratorRunDetail>(response);
 }
 
 /** Where the request chain stopped short of a running Attempt, if it did. */

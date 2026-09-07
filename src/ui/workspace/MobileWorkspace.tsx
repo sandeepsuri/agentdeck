@@ -11,6 +11,7 @@ import type { AttentionDecisionInput, CollaboratorRunSummary, Profile } from '..
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
 import { SessionChat } from './SessionChat.js';
 import { CollaboratorWorkspace } from './CollaboratorWorkspace.js';
+import type { CollaboratorListState } from '../collaboratorRuns.js';
 import { ControlKeys } from '../components/ControlKeys.js';
 import { STATUS_LABELS, isEndedSession, relativeTime, sessionLabel } from './model.js';
 
@@ -31,6 +32,8 @@ interface Props {
   collaboratorProfiles?: Profile[];
   /** This Principal's granted Runs, already filtered and narrowed by the server (GET /api/runs). Only ever populated alongside collaboratorPrincipal. */
   collaboratorRuns?: CollaboratorRunSummary[];
+  collaboratorRunListState?: CollaboratorListState;
+  collaboratorRepositoryListState?: CollaboratorListState;
   /** This Principal's granted agent Sessions, already filtered and narrowed by the server (GET /api/sessions). Only ever populated alongside collaboratorPrincipal — the admin path below reads `sessions` instead, which carries the full Session shape it needs. */
   collaboratorSessions?: CollaboratorSession[];
   /** Asks App to refresh the Run list now rather than at the next poll — used the moment a request creates one. */
@@ -179,7 +182,9 @@ export function MobileWorkspace(props: Props) {
         onSignOut={props.onSignOut}
         principal={collaboratorPrincipal}
         profiles={props.collaboratorProfiles ?? []}
+        repositoryListState={props.collaboratorRepositoryListState ?? 'ready'}
         repos={props.collaboratorRepos ?? []}
+        runListState={props.collaboratorRunListState ?? 'ready'}
         runs={props.collaboratorRuns ?? []}
         sessions={props.collaboratorSessions ?? []}
       />

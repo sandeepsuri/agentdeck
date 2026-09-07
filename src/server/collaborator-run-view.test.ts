@@ -80,14 +80,24 @@ describe('relativizePaths', () => {
 });
 
 describe('collaboratorRunSummary', () => {
+  it('derives ownership from Principal identity, never a matching display name', () => {
+    const mine = collaboratorRunSummary(baseRun(), 'collab-1');
+    const sameNameOtherPrincipal = collaboratorRunSummary(baseRun(), 'collab-2');
+
+    expect(mine.isRequestedByMe).toBe(true);
+    expect(sameNameOtherPrincipal.isRequestedByMe).toBe(false);
+    expect(JSON.stringify([mine, sameNameOtherPrincipal])).not.toContain('collab-1');
+    expect(JSON.stringify([mine, sameNameOtherPrincipal])).not.toContain('collab-2');
+  });
+
   it('carries the Repository id and name but never its path', () => {
-    const summary = collaboratorRunSummary(baseRun());
+    const summary = collaboratorRunSummary(baseRun(), 'collab-1');
     expect(summary.repository).toEqual({ id: 'repo-1', name: 'example' });
     expect(JSON.stringify(summary)).not.toContain(REPO_PATH);
   });
 
   it('reports who requested the Run by display name only, never the Principal id', () => {
-    const summary = collaboratorRunSummary(baseRun());
+    const summary = collaboratorRunSummary(baseRun(), 'collab-1');
     expect(summary.requestedBy).toBe('Alice');
     expect(JSON.stringify(summary)).not.toContain('collab-1');
   });
@@ -99,7 +109,7 @@ describe('collaboratorRunSummary', () => {
         error: 'No verification policy is configured for this Repository. Configure required gates or explicitly allow unverified work before starting the Run.',
       },
     });
-    const summary = collaboratorRunSummary(run);
+    const summary = collaboratorRunSummary(run, 'collab-1');
     expect(summary.preparation.state).toBe('failed');
     expect(summary.preparation.note).toBe('This Repository has no verification policy configured yet, so work cannot start. Ask the admin to set one up.');
     expect(JSON.stringify(summary)).not.toContain('Configure required gates');
@@ -109,9 +119,9 @@ describe('collaboratorRunSummary', () => {
     const run = baseRun({
       preparation: { state: 'failed', error: `fatal: could not create work tree dir '${WORKTREE}'` },
     });
-    expect(collaboratorRunSummary(run).preparation.note)
+    expect(collaboratorRunSummary(run, 'collab-1').preparation.note)
       .toBe('AgentDeck could not prepare a workspace for this Run. Ask the admin to check it.');
-    expect(JSON.stringify(collaboratorRunSummary(run))).not.toContain(WORKTREE);
+    expect(JSON.stringify(collaboratorRunSummary(run, 'collab-1'))).not.toContain(WORKTREE);
   });
 });
 
@@ -137,7 +147,7 @@ describe('collaboratorRunDetail', () => {
   ];
 
   it('narrates the Attempt without shipping a single raw command', () => {
-    const detail = collaboratorRunDetail(completed(events));
+    const detail = collaboratorRunDetail(completed(events), 'collab-1');
     const serialized = JSON.stringify(detail);
     expect(detail.narrative.steps.length).toBeGreaterThan(0);
     expect(serialized).not.toContain('/bin/zsh');
@@ -145,7 +155,7 @@ describe('collaboratorRunDetail', () => {
   });
 
   it('drops the Repository path, the worktree path, the Capability envelope and the frozen gate commands entirely', () => {
-    const serialized = JSON.stringify(collaboratorRunDetail(completed(events)));
+    const serialized = JSON.stringify(collaboratorRunDetail(completed(events), 'collab-1'));
     expect(serialized).not.toContain(REPO_PATH);
     expect(serialized).not.toContain(WORKTREE);
     expect(serialized).not.toContain('keychain://agentdeck/gh');
@@ -154,18 +164,18 @@ describe('collaboratorRunDetail', () => {
   });
 
   it('keeps a gate verdict by name, without its command or its raw output', () => {
-    const { result } = collaboratorRunDetail(completed(events));
+    const { result } = collaboratorRunDetail(completed(events), 'collab-1');
     expect(result?.verification).toEqual([{ gate: 'tests', required: true, passed: true }]);
     expect(JSON.stringify(result)).not.toContain('PASS src/auth/session.test.ts');
   });
 
   it('relativizes a worktree path the runtime itself wrote into its answer', () => {
-    const { narrative } = collaboratorRunDetail(completed(events));
+    const { narrative } = collaboratorRunDetail(completed(events), 'collab-1');
     expect(narrative.answer).toBe('Added the missing test in ./src/auth/session.test.ts.');
   });
 
   it('keeps the delivery commit and the repository-relative changed files', () => {
-    const { result } = collaboratorRunDetail(completed(events));
+    const { result } = collaboratorRunDetail(completed(events), 'collab-1');
     expect(result?.commit).toEqual({ sha: 'deadbeefcafe', branch: 'agentdeck/run/1', signed: false });
     expect(result?.changedFiles).toEqual(['src/auth/session.ts']);
   });
@@ -181,14 +191,14 @@ describe('collaboratorRunDetail', () => {
         updatedAt: '2026-09-01T00:06:30.000Z', executions: 1,
       },
     });
-    const serialized = JSON.stringify(collaboratorRunDetail(run));
+    const serialized = JSON.stringify(collaboratorRunDetail(run, 'collab-1'));
     expect(serialized).not.toContain('maxCostUsd');
     expect(serialized).not.toContain('publication');
     expect(serialized).not.toContain('pub-1');
   });
 
   it('has no narrative and no result for a Run whose Attempt has not started', () => {
-    const detail = collaboratorRunDetail(baseRun());
+    const detail = collaboratorRunDetail(baseRun(), 'collab-1');
     expect(detail.narrative.steps).toEqual([]);
     expect(detail.result).toBeUndefined();
   });

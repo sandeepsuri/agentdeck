@@ -720,6 +720,8 @@ export interface CollaboratorRunSummary {
   readonly submittedAt: string;
   /** Display name only — never the Principal id. */
   readonly requestedBy: string;
+  /** Derived by the server from the authenticated Principal id; clients must never infer ownership from requestedBy. */
+  readonly isRequestedByMe: boolean;
   /** State only; the worktree path, base commit and branch are dropped, and `note` is re-authored for this reader. */
   readonly preparation: { readonly state: RunPreparationState; readonly note?: string };
   readonly attemptState: AttemptState['state'];

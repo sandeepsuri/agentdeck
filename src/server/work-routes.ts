@@ -22,8 +22,7 @@ export interface WorkRoutesDeps {
    */
   resolveGrantedRepositoryIds?: (request: FastifyRequest) => readonly string[] | undefined;
   /**
-   * Ticket 12 AC1/AC2/AC7: the RunActor a mutating request (submit,
-   * prepare, start, cancel, resolveAttention) is made as — undefined for
+   * Ticket 12 AC1/AC2/AC7: the RunActor a request is made as — undefined for
    * local and legacy-shared-token connections, which stay unrestricted
    * (the Work Engine itself defaults to its own principalSource, exactly
    * pre-ticket-12 behavior). A resolved collaborator device's RunActor
@@ -44,6 +43,13 @@ function handlePolicyDenied(error: unknown, reply: FastifyReply): boolean {
 
 /** Local admin REST adapter; all behavior remains owned by WorkEngine. */
 export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine, deps: WorkRoutesDeps = {}): void {
+  const resolveCollaboratorReadContext = (request: FastifyRequest) => {
+    const actor = deps.resolveActor?.(request);
+    const granted = deps.resolveGrantedRepositoryIds?.(request);
+    if (granted && !actor?.grants) throw new Error('Collaborator Run reads require an authenticated Principal.');
+    return { granted, principalId: granted ? actor!.principal.id : undefined };
+  };
+
   /**
    * Resolves, exactly once per request, both halves of "what may this
    * caller read": whether grants apply at all, and the Runs left after
@@ -55,9 +61,9 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
    * narrowed, or narrowed but not filtered.
    */
   const resolveScope = (request: FastifyRequest) => {
-    const granted = deps.resolveGrantedRepositoryIds?.(request);
+    const { granted, principalId } = resolveCollaboratorReadContext(request);
     const runs = workEngine.list();
-    return { granted, runs: granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs };
+    return { granted, principalId, runs: granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs };
   };
   const scopeRuns = (request: FastifyRequest) => resolveScope(request).runs;
 
@@ -66,8 +72,8 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   // why. The admin and legacy-shared-token paths are byte-identical to
   // before, because `granted` is undefined for them.
   app.get('/api/runs', async (request) => {
-    const { granted, runs } = resolveScope(request);
-    return granted ? runs.map(collaboratorRunSummary) : runs;
+    const { granted, principalId, runs } = resolveScope(request);
+    return granted ? runs.map((run) => collaboratorRunSummary(run, principalId!)) : runs;
   });
 
   // Ticket 07: the one minimal, remote-safe read a mobile client needs to
@@ -93,12 +99,12 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     // AC4: a Run outside a collaborator device's grants doesn't exist as
     // far as it's concerned — 404, not 403, so an id it can't view never
     // leaks even the fact that it exists.
-    const granted = deps.resolveGrantedRepositoryIds?.(request);
+    const { granted, principalId } = resolveCollaboratorReadContext(request);
     if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
     // The Run conversation a collaborator's workspace reads. Narrated, not
     // the raw event log -- a tool-activity summary is the literal command a
     // runtime ran (collaborator-run-view.ts).
-    return granted ? collaboratorRunDetail(run) : run;
+    return granted ? collaboratorRunDetail(run, principalId!) : run;
   });
 
   // Ticket 12 AC5: how the admin actually observes who did what to a

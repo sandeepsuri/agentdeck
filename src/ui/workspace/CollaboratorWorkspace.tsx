@@ -7,13 +7,11 @@
 // permanently empty — plus a '+' button whose Run went to 'queued' and stayed
 // there. Three disconnected things, none of which worked end to end.
 //
-// So this is deliberately NOT a session view with Runs bolted on. It is one
-// navigation stack — Repository, then the work in it, then one piece of that
-// work's conversation — with a single composer at the bottom whose meaning
-// follows the level you are at: "request work in this Repository", "answer
-// this Run", or "message this agent". The Repository is the top of the stack
-// because the Repository is exactly what a grant is about; there is no level
-// above it a Collaborator could navigate to.
+// So this is deliberately NOT a session view with Runs bolted on. Repository
+// pages remain the grant-scoped home for work and their request composer. A
+// small cross-Repository "Your requests" list sits beside those pages and
+// hands off to the same authorized Run detail; its membership is the server's
+// Principal-derived isRequestedByMe value, never display-name comparison.
 //
 // A granted Repository has two kinds of work happening in it, and both hang
 // off that one level: the Runs requested against it, and the agents already
@@ -34,7 +32,9 @@ import type {
   AttentionDecisionInput, CollaboratorRunDetail, CollaboratorRunSummary, Profile, RunStatus, WorkSpec,
 } from '../../work-engine/types.js';
 import { describeOutcome, formatTokenCount } from '../../work-engine/attempt-narrative.js';
-import { getCollaboratorRun, requestWork } from '../collaboratorRuns.js';
+import {
+  CollaboratorRunReadError, getCollaboratorRun, requestWork, type CollaboratorListState,
+} from '../collaboratorRuns.js';
 import { SessionChat } from './SessionChat.js';
 import { lines } from '../components/RunSubmissionModal.js';
 import { SESSION_STATUS_OPTIONS, STATUS_LABELS, relativeTime } from './model.js';
@@ -54,13 +54,17 @@ export interface Props {
   /** Pulls the Run list forward immediately after a request, rather than waiting for the next poll. */
   onRunsStale: () => void;
   onResolveRunAttention: (runId: string, attentionId: string, decision: AttentionDecisionInput) => void;
+  runListState?: CollaboratorListState;
+  repositoryListState?: CollaboratorListState;
   /** Drops this device's credential and returns to the gate. Optional so existing callers/tests need no change. */
   onSignOut?: () => void;
 }
 
+type RunReturnTarget = { kind: 'repository'; repositoryId: string } | { kind: 'requests' };
+
 type View =
-  | { kind: 'repository'; repositoryId: string }
-  | { kind: 'run'; runId: string }
+  | RunReturnTarget
+  | { kind: 'run'; runId: string; returnTo: RunReturnTarget }
   | { kind: 'session'; sessionId: string };
 
 const STATUS_MARK: Record<'started' | 'completed' | 'failed', string> = {
@@ -101,14 +105,16 @@ function MenuIcon() {
   return <span aria-hidden="true" className="mobile-menu-icon"><i /><i /><i /></span>;
 }
 
-function RepositoryDrawer({ open, repos, runs, sessions, selectedId, onClose, onSelect }: {
+function RepositoryDrawer({ open, repos, runs, sessions, selectedId, requestsSelected, onClose, onSelect, onSelectRequests }: {
   open: boolean;
   repos: Repo[];
   runs: readonly CollaboratorRunSummary[];
   sessions: readonly CollaboratorSession[];
   selectedId: string | null;
+  requestsSelected: boolean;
   onClose: () => void;
   onSelect: (repositoryId: string) => void;
+  onSelectRequests: () => void;
 }) {
   return (
     <>
@@ -126,6 +132,19 @@ function RepositoryDrawer({ open, repos, runs, sessions, selectedId, onClose, on
           <button aria-label="Close repositories" className="mobile-icon-button" onClick={onClose} tabIndex={open ? 0 : -1} type="button">×</button>
         </header>
 
+        <div className="mobile-drawer-label">Work</div>
+        <button
+          className={`mobile-repo-row${requestsSelected ? ' is-selected' : ''}`}
+          data-personal-requests
+          onClick={() => { onSelectRequests(); onClose(); }}
+          tabIndex={open ? 0 : -1}
+          type="button"
+        >
+          <span className="mobile-session-copy">
+            <strong>Your requests</strong>
+            <small>Across your Repositories</small>
+          </span>
+        </button>
         <div className="mobile-drawer-label">Your repositories</div>
         <nav aria-label="Your repositories" className="mobile-session-list">
           {repos.map((repo) => {
@@ -161,7 +180,7 @@ function RepositoryDrawer({ open, repos, runs, sessions, selectedId, onClose, on
   );
 }
 
-function RunTile({ run, onSelect }: { run: CollaboratorRunSummary; onSelect: () => void }) {
+function RunTile({ run, onSelect, showRepository = false }: { run: CollaboratorRunSummary; onSelect: () => void; showRepository?: boolean }) {
   const terminal = isTerminalRunStatus(run.status);
   return (
     <button
@@ -176,11 +195,13 @@ function RunTile({ run, onSelect }: { run: CollaboratorRunSummary; onSelect: () 
       </span>
       <span className="mobile-run-tile-meta">
         <span className={`mobile-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
-        <small>{run.requestedBy} · {relativeTime(run.submittedAt)}</small>
+        <small>{showRepository ? run.repository.name : run.requestedBy} · {relativeTime(run.submittedAt)}</small>
       </span>
       {run.pendingAttentionKind && (
         <span className="mobile-run-badge">
-          {run.pendingAttentionKind === 'approval' ? 'Needs your approval' : 'Needs your input'}
+          {showRepository
+            ? (run.pendingAttentionKind === 'approval' ? 'Repository approval pending' : 'Repository input pending')
+            : (run.pendingAttentionKind === 'approval' ? 'Needs your approval' : 'Needs your input')}
         </span>
       )}
       {run.preparation.note && <span className="mobile-run-blocked">{run.preparation.note}</span>}
@@ -478,6 +499,7 @@ function RunConversation({ detail, onResolveRunAttention }: {
 
 export function CollaboratorWorkspace({
   principal, repos, profiles, runs, sessions, onError, onRunsStale, onResolveRunAttention, onSignOut,
+  runListState = 'ready', repositoryListState = 'ready',
 }: Props) {
   const [view, setView] = useState<View | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -485,6 +507,7 @@ export function CollaboratorWorkspace({
   const [runStatus, setRunStatus] = useState<'all' | RunStatus>('all');
   const [sessionStatus, setSessionStatus] = useState<'all' | SessionStatus>('all');
   const [detail, setDetail] = useState<CollaboratorRunDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const pendingRequestedRunRef = useRef<{ runId: string; beforeRefresh: readonly CollaboratorRunSummary[] } | null>(null);
 
@@ -497,7 +520,11 @@ export function CollaboratorWorkspace({
 
   const runId = view?.kind === 'run' ? view.runId : null;
   const detailRef = useRef<string | null>(null);
-  useEffect(() => { detailRef.current = runId; if (!runId) setDetail(null); }, [runId]);
+  useEffect(() => {
+    detailRef.current = runId;
+    setDetailError(null);
+    if (!runId) setDetail(null);
+  }, [runId]);
 
   // The open Run's own poll. Only one Run is ever open, and the detail
   // payload is the expensive one, so it lives here rather than in App's
@@ -511,9 +538,17 @@ export function CollaboratorWorkspace({
         const next = await getCollaboratorRun(runId);
         if (disposed || detailRef.current !== runId) return;
         setDetail(next);
+        setDetailError(null);
         if (!isTerminalRunStatus(next.status)) timer = setTimeout(() => { void tick(); }, 2000);
-      } catch {
-        if (!disposed) timer = setTimeout(() => { void tick(); }, 5000);
+      } catch (error) {
+        if (disposed) return;
+        if (error instanceof CollaboratorRunReadError && (error.status === 403 || error.status === 404)) {
+          setDetail(null);
+          setDetailError('This Run is no longer available. Your Repository access may have changed.');
+          return;
+        }
+        setDetailError('AgentDeck could not load this Run. Retrying…');
+        timer = setTimeout(() => { void tick(); }, 5000);
       }
     };
     void tick();
@@ -539,7 +574,8 @@ export function CollaboratorWorkspace({
       pendingRequestedRunRef.current = null;
       setDetail(null);
       setNotice(null);
-      setView(repos[0] ? { kind: 'repository', repositoryId: repos[0].id } : null);
+      const returnTo = view?.kind === 'run' ? view.returnTo : undefined;
+      setView(returnTo?.kind === 'requests' ? returnTo : (repos[0] ? { kind: 'repository', repositoryId: repos[0].id } : null));
     }
   }, [repos, runs, sessions, view]);
 
@@ -548,15 +584,26 @@ export function CollaboratorWorkspace({
       : view?.kind === 'session' ? openSession?.repoId
         : detail?.repository.id
   ));
-  const repositoryRuns = repository ? orderRuns(runs.filter((run) => run.repository.id === repository.id)) : [];
+  const grantedRepositoryIds = new Set(repos.map((repo) => repo.id));
+  const accessibleRuns = runs.filter((run) => grantedRepositoryIds.has(run.repository.id));
+  const repositoryRuns = repository ? orderRuns(accessibleRuns.filter((run) => run.repository.id === repository.id)) : [];
   const repositorySessions = repository ? orderSessions(sessions.filter((item) => item.repoId === repository.id)) : [];
   const visibleRuns = runStatus === 'all' ? repositoryRuns : repositoryRuns.filter((run) => run.status === runStatus);
   const visibleSessions = sessionStatus === 'all' ? repositorySessions : repositorySessions.filter((session) => session.status === sessionStatus);
+  const personalRuns = orderRuns(accessibleRuns.filter((run) => run.isRequestedByMe));
+  const visiblePersonalRuns = runStatus === 'all' ? personalRuns : personalRuns.filter((run) => run.status === runStatus);
 
-  const openRun = (id: string, carriedNotice: string | null = null) => {
+  const openRun = (
+    id: string,
+    carriedNotice: string | null = null,
+    returnTo: RunReturnTarget = view?.kind === 'requests'
+      ? { kind: 'requests' }
+      : { kind: 'repository', repositoryId: repository?.id ?? runs.find((run) => run.id === id)?.repository.id ?? repos[0]?.id ?? '' },
+  ) => {
     setNotice(carriedNotice);
     setDetail(null);
-    setView({ kind: 'run', runId: id });
+    setDetailError(null);
+    setView({ kind: 'run', runId: id, returnTo });
   };
   const openAgent = (id: string) => {
     setNotice(null);
@@ -564,6 +611,11 @@ export function CollaboratorWorkspace({
     setView({ kind: 'session', sessionId: id });
   };
   const backToRepository = () => {
+    if (view?.kind === 'run' && view.returnTo.kind === 'requests') {
+      setDetail(null);
+      setView(view.returnTo);
+      return;
+    }
     const id = repository?.id ?? detail?.repository.id ?? repos[0]?.id;
     setDetail(null);
     setView(id ? { kind: 'repository', repositoryId: id } : null);
@@ -573,12 +625,13 @@ export function CollaboratorWorkspace({
     <section className="mobile-workspace">
       <header className="mobile-topbar">
         {view?.kind === 'run' || view?.kind === 'session'
-          ? <button aria-label="Back to repository" className="mobile-icon-button" onClick={backToRepository} type="button">‹</button>
+          ? <button aria-label={view.kind === 'run' && view.returnTo.kind === 'requests' ? 'Back to your requests' : 'Back to repository'} className="mobile-icon-button" onClick={backToRepository} type="button">‹</button>
           : <button aria-label="Open repositories" className="mobile-icon-button" onClick={() => setDrawerOpen(true)} type="button"><MenuIcon /></button>}
         <span className="mobile-topbar-copy">
           <strong>
             {view?.kind === 'run' ? (detail?.objective ?? 'Run')
               : view?.kind === 'session' ? (openSession ? agentLabel(openSession) : 'Agent')
+                : view?.kind === 'requests' ? 'Your requests'
                 : (repository?.name ?? 'AgentDeck')}
           </strong>
           <small>
@@ -600,7 +653,11 @@ export function CollaboratorWorkspace({
       {view?.kind === 'run' && detail && (
         <RunConversation detail={detail} onResolveRunAttention={onResolveRunAttention} />
       )}
-      {view?.kind === 'run' && !detail && <main className="mobile-workspace-empty"><span>Loading this Run…</span></main>}
+      {view?.kind === 'run' && !detail && (
+        <main className="mobile-workspace-empty">
+          {detailError ? <><strong>Run unavailable</strong><span role="status">{detailError}</span></> : <span>Loading this Run…</span>}
+        </main>
+      )}
 
       {view?.kind === 'session' && openSession && (
         <SessionChat key={openSession.id} session={openSession} principal={principal} onError={onError} />
@@ -609,6 +666,30 @@ export function CollaboratorWorkspace({
         <main className="mobile-workspace-empty">
           <strong>This agent is no longer listed</strong>
           <span>It may have finished, or your access to its Repository may have changed.</span>
+        </main>
+      )}
+
+      {view?.kind === 'requests' && (
+        <main aria-label="Your requests" className="mobile-run-list">
+          <div className="mobile-run-list-heading-row">
+            <h2 className="mobile-run-list-heading">Your requests</h2>
+            <select aria-label="Filter your requests by status" onChange={(event) => setRunStatus(event.target.value as 'all' | RunStatus)} value={runStatus}>
+              <option value="all">All statuses</option>
+              {RUN_STATUS_OPTIONS.map((status) => <option key={status} value={status}>{formatRunLabel(status)}</option>)}
+            </select>
+          </div>
+          {(runListState === 'loading' || repositoryListState === 'loading') && <p className="mobile-run-list-empty">Loading your requests…</p>}
+          {runListState === 'error' && <p className="mobile-run-list-empty" role="status">AgentDeck could not refresh your requests. Showing the last available results.</p>}
+          {repositoryListState === 'error' && <p className="mobile-run-list-empty" role="status">AgentDeck could not refresh your Repository access. Showing the last available results.</p>}
+          {visiblePersonalRuns.map((run) => <RunTile key={run.id} onSelect={() => openRun(run.id)} run={run} showRepository />)}
+          {runListState === 'ready' && repositoryListState === 'ready' && personalRuns.length === 0 && (
+            <p className="mobile-run-list-empty">
+              {repos.length === 0
+                ? 'No Repositories are currently granted to you, so no requests are available.'
+                : 'No requests are available in your granted Repositories.'}
+            </p>
+          )}
+          {personalRuns.length > 0 && visiblePersonalRuns.length === 0 && <p className="mobile-run-list-empty">No requests match {formatRunLabel(runStatus)}.</p>}
         </main>
       )}
 
@@ -644,7 +725,13 @@ export function CollaboratorWorkspace({
         </>
       )}
 
-      {!repository && view?.kind !== 'run' && view?.kind !== 'session' && (
+      {!repository && view?.kind !== 'run' && view?.kind !== 'session' && view?.kind !== 'requests' && repositoryListState === 'loading' && (
+        <main className="mobile-workspace-empty"><span>Loading your Repository access…</span></main>
+      )}
+      {!repository && view?.kind !== 'run' && view?.kind !== 'session' && view?.kind !== 'requests' && repositoryListState === 'error' && (
+        <main className="mobile-workspace-empty"><strong>Repository access unavailable</strong><span>AgentDeck could not refresh your Repository access.</span></main>
+      )}
+      {!repository && view?.kind !== 'run' && view?.kind !== 'session' && view?.kind !== 'requests' && repositoryListState === 'ready' && (
         <main className="mobile-workspace-empty">
           <strong>Nothing granted yet</strong>
           <span>No Repositories have been granted to you. Ask the admin for access.</span>
@@ -653,10 +740,12 @@ export function CollaboratorWorkspace({
 
       <RepositoryDrawer
         onClose={() => setDrawerOpen(false)}
+        onSelectRequests={() => { setDetail(null); setNotice(null); setView({ kind: 'requests' }); }}
         onSelect={(repositoryId) => { setDetail(null); setView({ kind: 'repository', repositoryId }); }}
         open={drawerOpen}
         repos={repos}
-        runs={runs}
+        requestsSelected={view?.kind === 'requests'}
+        runs={accessibleRuns}
         selectedId={repository?.id ?? null}
         sessions={sessions}
       />
@@ -667,7 +756,7 @@ export function CollaboratorWorkspace({
         onSelectSession={(session) => openAgent(session.id)}
         open={searchOpen}
         repos={repos}
-        runs={runs}
+        runs={accessibleRuns}
         sessions={sessions}
       />
     </section>

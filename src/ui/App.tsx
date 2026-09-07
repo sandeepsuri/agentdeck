@@ -8,7 +8,7 @@ import type {
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { adminRepos, adminRuns, adminSessions } from './adminProjection.js';
-import { listCollaboratorRuns } from './collaboratorRuns.js';
+import { listCollaboratorRuns, type CollaboratorListState } from './collaboratorRuns.js';
 import { listCollaboratorSessions } from './collaboratorSessions.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
@@ -126,6 +126,8 @@ export function App() {
   const [collaboratorProfiles, setCollaboratorProfiles] = useState<Profile[]>([]);
   /** Kept apart from `runs` above: a collaborator device receives the narrowed projection (server/collaborator-run-view.ts), not a WorkRun, and the desktop's deep-link/selection logic reads `runs` expecting the full shape. */
   const [collaboratorRuns, setCollaboratorRuns] = useState<CollaboratorRunSummary[]>([]);
+  const [collaboratorRunListState, setCollaboratorRunListState] = useState<CollaboratorListState>('loading');
+  const [collaboratorRepositoryListState, setCollaboratorRepositoryListState] = useState<CollaboratorListState>('loading');
   /** Kept apart from `sessions` above for the same reason: GET /api/sessions answers a collaborator device with CollaboratorSession (server/collaborator-session-view.ts), which has no cwd, worktreePath, pid or launchSpec — the desktop tree reads `sessions` expecting all of them. */
   const [collaboratorSessions, setCollaboratorSessions] = useState<CollaboratorSession[]>([]);
 
@@ -201,7 +203,10 @@ export function App() {
     }
   }).catch(() => undefined), []);
   const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
-  const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then(setCollaboratorRuns).catch(() => undefined), []);
+  const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then((next) => {
+    setCollaboratorRuns(next);
+    setCollaboratorRunListState('ready');
+  }).catch(() => setCollaboratorRunListState('error')), []);
   const refreshCollaboratorSessions = useCallback(() => listCollaboratorSessions().then(setCollaboratorSessions).catch(() => undefined), []);
   // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
   // Repositories and Profiles — GET /api/repos and GET /api/profiles are
@@ -212,12 +217,15 @@ export function App() {
   // collaborator's persistent navigation, so a grant revoked mid-session has
   // to stop appearing in it.
   const refreshCollaboratorGrants = useCallback(() => Promise.all([
-    apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).catch(() => []),
-    apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []),
-  ]).then(([grantedRepos, grantedProfiles]) => {
-    setCollaboratorRepos(grantedRepos);
-    setCollaboratorProfiles(grantedProfiles);
-  }), []);
+    apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((grantedRepos) => {
+      setCollaboratorRepos(grantedRepos);
+      setCollaboratorRepositoryListState('ready');
+    }).catch(() => setCollaboratorRepositoryListState('error')),
+    // Profile loading keeps its previous behavior: a failed refresh exposes
+    // no request Profile choices. Crucially, it cannot now suppress an
+    // independently successful Repository revocation response.
+    apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []).then(setCollaboratorProfiles),
+  ]).then(() => undefined), []);
   const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
   const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
   const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
@@ -383,6 +391,8 @@ export function App() {
     setCollaboratorRepos([]);
     setCollaboratorProfiles([]);
     setCollaboratorRuns([]);
+    setCollaboratorRunListState('loading');
+    setCollaboratorRepositoryListState('loading');
     setCollaboratorSessions([]);
     setSessions([]);
     setRunAttention([]);
@@ -628,6 +638,8 @@ export function App() {
           collaboratorProfiles={collaboratorProfiles}
           collaboratorRepos={collaboratorRepos}
           collaboratorRuns={collaboratorRuns}
+          collaboratorRunListState={collaboratorRunListState}
+          collaboratorRepositoryListState={collaboratorRepositoryListState}
           collaboratorSessions={collaboratorSessions}
           onError={setError}
           onResolveRunAttention={resolveRunAttention}
