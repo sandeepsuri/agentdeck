@@ -439,8 +439,8 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-workspace-empty > span { max-width: 280px; line-height: 1.5; }
 .mobile-empty-action { min-height: 44px; margin-top: 8px; padding: 9px 16px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font-weight: 600; cursor: pointer; }
 
-.mobile-approval-card { width: calc(min(100%,760px) - 28px); flex: none; align-self: center; display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; margin: 0 14px 8px; padding: 13px; border: 1px solid var(--status-waiting); border-radius: 15px; background: var(--status-waiting-bg); }
-.mobile-approval-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--surface-panel); color: var(--status-waiting); font: 700 13px var(--font-mono); }
+.mobile-approval-card { width: calc(min(100%,760px) - 28px); flex: none; align-self: center; display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; margin: 0 14px 8px; padding: 13px; border: 1px solid var(--status-waiting); border-radius: var(--radius-lg); background: var(--status-waiting-bg); }
+.mobile-approval-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--surface-panel); color: var(--status-waiting); font-size: 15px; font-weight: 700; }
 .mobile-approval-copy { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .mobile-approval-copy strong { font-size: 13px; }
 .mobile-approval-copy small { color: var(--text-muted); font-size: 11px; }
@@ -593,7 +593,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-run-list-heading { margin: 6px 2px 0; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
 .mobile-run-list-heading:first-child { margin-top: 0; }
 .mobile-agent-messages { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
-.mobile-agent-message { padding: 11px 13px; border: 1px solid var(--border-muted); border-radius: 14px; background: var(--surface-panel); }
+.mobile-agent-message { padding: 11px 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); }
 .mobile-agent-message.is-human { border-color: var(--action-primary); background: var(--surface-elevated); }
 .mobile-agent-message.is-done { border-color: var(--status-completed); }
 .mobile-agent-message.is-addressed { border-style: dashed; }
@@ -615,7 +615,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-request-composer { width: min(100%,760px); flex: none; align-self: center; padding: 10px 14px max(12px,env(safe-area-inset-bottom)); border-top: 1px solid var(--border-muted); background: var(--surface-panel); }
 .mobile-request-composer form { display: grid; gap: 8px; }
 .mobile-request-composer label { display: grid; gap: 5px; }
-.mobile-request-composer label > span { color: var(--text-muted); font: 9.5px var(--font-mono); letter-spacing: .05em; }
+.mobile-request-composer label > span { color: var(--text-secondary); font-size: 11.5px; font-weight: 500; }
 .mobile-request-composer textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font: 13px/1.5 inherit; resize: vertical; }
 .mobile-request-actions { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; }
 .mobile-request-profile select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: 12px; background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
