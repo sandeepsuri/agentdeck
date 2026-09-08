@@ -37,8 +37,9 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 
 .app-brand { display: flex; align-items: center; gap: 9px; flex: none; }
 .app-brand strong { font-size: 14.5px; letter-spacing: -.01em; }
-.brand-mark { width: 22px; height: 22px; border: 1px solid var(--accent); background: var(--accent); display: grid; place-items: center; border-radius: var(--radius-sm); }
-.brand-mark i { width: 7px; height: 7px; background: var(--accent-contrast); border-radius: 2px; transform: rotate(45deg); }
+.brand-mark { position: relative; width: 22px; height: 22px; flex: none; display: block; }
+.brand-mark::before { content: ''; position: absolute; top: 18%; left: 4%; width: 62%; height: 62%; background: var(--accent); opacity: .5; border-radius: 25%; transform: rotate(-12deg); }
+.brand-mark i { position: absolute; top: 10%; left: 26%; width: 62%; height: 62%; display: block; background: var(--accent); border: 1px solid var(--accent-contrast); border-radius: 25%; transform: rotate(8deg); }
 
 .workspace-tabs { display: flex; gap: 4px; }
 .workspace-tabs button { display: flex; align-items: center; gap: 6px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 7px 10px 6px; background: transparent; color: var(--text-muted); font-size: 12.5px; font-weight: 600; cursor: pointer; }
@@ -460,8 +461,9 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-topbar-actions .top-icon-button:hover { background: var(--surface-hover); color: var(--text-primary); }
 .mobile-topbar-actions .theme-menu { position: fixed; top: calc(max(8px,env(safe-area-inset-top)) + 56px); right: 8px; }
 
-.mobile-agent-mark { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--action-primary); }
-.mobile-agent-mark i { width: 8px; height: 8px; border-radius: 2px; background: var(--text-on-action); transform: rotate(45deg); }
+.mobile-agent-mark { position: relative; width: 28px; height: 28px; flex: none; display: block; }
+.mobile-agent-mark::before { content: ''; position: absolute; top: 18%; left: 4%; width: 62%; height: 62%; background: var(--action-primary); opacity: .55; border-radius: 25%; transform: rotate(-12deg); }
+.mobile-agent-mark i { position: absolute; top: 10%; left: 26%; width: 62%; height: 62%; display: block; background: var(--action-primary); border: 1px solid var(--border-strong); border-radius: 25%; transform: rotate(8deg); }
 .mobile-conversation { width: min(100%,760px); min-width: 0; min-height: 0; flex: 1; align-self: center; overflow-y: auto; overflow-x: hidden; padding: 18px 16px 28px; overscroll-behavior: contain; }
 .mobile-conversation-date { margin-bottom: 20px; color: var(--text-muted); font: 9.5px var(--font-mono); text-align: center; text-transform: uppercase; letter-spacing: .08em; }
 .mobile-agent-response { min-width: 0; display: grid; grid-template-columns: 28px minmax(0,1fr); gap: 10px; }
