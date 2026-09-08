@@ -601,9 +601,10 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-run-answer p { margin: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mobile-run-steps ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
 .mobile-run-step { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 8px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.mobile-run-step > span { color: var(--text-muted); font: 11px var(--font-mono); }
-.mobile-run-step.status-completed > span { color: var(--status-working); }
-.mobile-run-step.status-failed > span { color: var(--status-error); }
+.mobile-run-step-icon { color: var(--text-muted); font: 11px var(--font-mono); }
+.mobile-run-step.status-completed .mobile-run-step-icon { color: var(--status-working); }
+.mobile-run-step.status-failed .mobile-run-step-icon { color: var(--status-error); }
+.mobile-run-step-time { color: var(--text-muted); font-size: 11px; }
 .mobile-run-truncated { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 10.5px; }
 .mobile-run-verdict { margin: 0 0 18px; padding: 11px 13px; border-radius: var(--radius-lg); background: var(--surface-elevated); font-size: 12px; }
 .mobile-run-verdict.is-success { color: var(--status-working); }

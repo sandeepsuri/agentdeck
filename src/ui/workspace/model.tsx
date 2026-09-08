@@ -67,6 +67,25 @@ export function relativeTime(iso: string, now = Date.now()): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+/**
+ * Ticket 53 (B19): a narrative step's actual event time, rendered
+ * accessibly — never fabricated. Absent or unparseable `at` (a legacy step,
+ * a step that predates this field) returns `undefined` rather than a
+ * placeholder, so the caller can simply omit the time instead of showing a
+ * misleading one. `title` carries the full date and time zone for a screen
+ * reader or hover, while `label` stays short enough to sit next to the step.
+ */
+export function narrativeStepTime(at: string | undefined): { iso: string; label: string; title: string } | undefined {
+  if (at === undefined) return undefined;
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return {
+    iso: at,
+    label: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    title: date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' }),
+  };
+}
+
 export function elapsedTime(startedAt: string, now = Date.now()): string {
   const seconds = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
   const hours = Math.floor(seconds / 3600);

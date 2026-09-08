@@ -92,6 +92,31 @@ describe('summarizeAttempt', () => {
     expect(running.outcome).toBeUndefined();
   });
 
+  it('carries the producing event\'s own timestamp on each step', () => {
+    const { steps } = summarizeAttempt(events);
+    expect(steps.map((step) => step.at)).toEqual(['2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z']);
+  });
+
+  it('moves a step\'s timestamp to whichever event last set its status, matching its label/status', () => {
+    const startedThenCompleted: AttemptEvent[] = [
+      event({
+        kind: 'tool-activity', sequence: 0, at: '2026-09-01T00:01:00.000Z',
+        tool: 'commandExecution', status: 'started', summary: 'npm test',
+      } as never),
+      event({
+        kind: 'tool-activity', sequence: 1, at: '2026-09-01T00:04:00.000Z',
+        tool: 'commandExecution', status: 'completed', summary: 'npm test',
+      } as never),
+    ];
+    const { steps } = summarizeAttempt(startedThenCompleted);
+    expect(steps).toEqual([expect.objectContaining({ status: 'completed', sequence: 0, at: '2026-09-01T00:04:00.000Z' })]);
+  });
+
+  it('leaves a step\'s timestamp unset when its event carries none, rather than inventing one', () => {
+    const untimed = { kind: 'message', sequence: 0, role: 'assistant', text: 'Done.' } as unknown as AttemptEvent;
+    expect(summarizeAttempt([untimed]).steps[0]!.at).toBeUndefined();
+  });
+
   it('reports the latest cumulative usage', () => {
     expect(summarizeAttempt(events).usage).toEqual({ inputTokens: 4200, outputTokens: 310 });
   });

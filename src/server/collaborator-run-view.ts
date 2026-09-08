@@ -42,6 +42,17 @@ const MAX_STEPS = 400;
 const ABSOLUTE_PATH = /(?:\/(?:Users|home|var|tmp|private|opt|etc)\b)(?:\/[^\s"'`,;:)\]}]*)*/g;
 
 /**
+ * Ticket 53 (B19): the one narrow addition this ticket makes to the
+ * narrative — a step's actual event timestamp, and only when it is one. A
+ * missing or malformed `at` (legacy data, a hand-built fixture) is dropped
+ * silently rather than defaulted to "now" or any other invented value; the
+ * collaborator UI already treats an absent time as "unknown", never as "then".
+ */
+function safeTimestamp(at: string | undefined): string | undefined {
+  return at !== undefined && Number.isFinite(Date.parse(at)) ? at : undefined;
+}
+
+/**
  * Rewrites this Run's own worktree and Repository roots to '.', then masks any
  * other absolute path left behind. Best effort by construction -- it is
  * defense in depth over the field-level drops above, never the guarantee
@@ -98,9 +109,13 @@ function narrate(run: WorkRun): CollaboratorRunNarrative {
     ...(summary.answer ? { answer: relativizePaths(summary.answer, roots) } : {}),
     // The tail, not the head: the newest steps are the ones a reader is
     // following. Dropping `detail` here is what keeps raw commands server-side.
-    steps: summary.steps.slice(-MAX_STEPS).map((step) => ({
-      label: relativizePaths(step.label, roots), status: step.status, sequence: step.sequence,
-    })),
+    steps: summary.steps.slice(-MAX_STEPS).map((step) => {
+      const at = safeTimestamp(step.at);
+      return {
+        label: relativizePaths(step.label, roots), status: step.status, sequence: step.sequence,
+        ...(at ? { at } : {}),
+      };
+    }),
     stepsTruncated,
     ...(summary.outcome ? { outcome: {
       kind: summary.outcome.kind,

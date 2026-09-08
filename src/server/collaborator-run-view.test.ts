@@ -197,6 +197,28 @@ describe('collaboratorRunDetail', () => {
     expect(serialized).not.toContain('pub-1');
   });
 
+  it('carries each step\'s actual event timestamp alongside its label/status/sequence', () => {
+    const { narrative } = collaboratorRunDetail(completed(events), 'collab-1');
+    const commandStep = narrative.steps.find((step) => step.label.startsWith('Read'));
+    expect(commandStep?.at).toBe('2026-09-01T00:01:10.000Z');
+  });
+
+  it('drops a legacy step\'s timestamp instead of fabricating one, for both a missing and an invalid `at`', () => {
+    const missingAt = events.map((event) => {
+      if (event.sequence !== 1) return event;
+      const { at: _at, ...rest } = event;
+      return rest as AttemptEvent;
+    });
+    const invalidAt = events.map((event) => (event.sequence === 1 ? { ...event, at: 'not-a-real-timestamp' } : event));
+
+    for (const mixedLegacyEvents of [missingAt, invalidAt]) {
+      const { narrative } = collaboratorRunDetail(completed(mixedLegacyEvents), 'collab-1');
+      const commandStep = narrative.steps.find((step) => step.label.startsWith('Read'));
+      expect(commandStep?.at).toBeUndefined();
+      expect(JSON.stringify(narrative)).not.toContain('not-a-real-timestamp');
+    }
+  });
+
   it('has no narrative and no result for a Run whose Attempt has not started', () => {
     const detail = collaboratorRunDetail(baseRun(), 'collab-1');
     expect(detail.narrative.steps).toEqual([]);

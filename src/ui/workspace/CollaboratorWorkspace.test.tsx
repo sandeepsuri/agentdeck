@@ -354,6 +354,31 @@ describe('CollaboratorWorkspace Run conversation', () => {
     expect(host.textContent).toContain('Completed successfully');
   });
 
+  it('renders each step\'s actual time accessibly, and renders no time at all for a legacy step that carries none', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({
+      status: 'completed',
+      narrative: {
+        steps: [
+          { label: 'Read src/auth/session.ts', status: 'completed', sequence: 1, at: '2026-09-01T00:04:00.000Z' },
+          { label: 'Ran the test suite', status: 'completed', sequence: 2 },
+        ],
+        stepsTruncated: false,
+        outcome: { kind: 'success' },
+      },
+    }))));
+
+    const host = await mount({ runs: [summary()] });
+    const tile = host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement;
+    await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const steps = [...host.querySelectorAll('.mobile-run-step')];
+    expect(steps).toHaveLength(2);
+    const timed = steps[0]!.querySelector('time');
+    expect(timed?.getAttribute('dateTime')).toBe('2026-09-01T00:04:00.000Z');
+    expect(timed?.textContent).toBeTruthy();
+    expect(steps[1]!.querySelector('time')).toBeNull();
+  });
+
   it('answers a pending approval through the one policy path, naming the Run and the attention request', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({
       status: 'waiting_approval',

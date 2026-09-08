@@ -37,7 +37,7 @@ import {
 } from '../collaboratorRuns.js';
 import { SessionChat } from './SessionChat.js';
 import { lines } from '../components/RunSubmissionModal.js';
-import { SESSION_STATUS_OPTIONS, STATUS_LABELS, relativeTime } from './model.js';
+import { SESSION_STATUS_OPTIONS, STATUS_LABELS, narrativeStepTime, relativeTime } from './model.js';
 import { CommandPalette } from './CommandPalette.js';
 import { formatRunLabel, isTerminalRunStatus, RUN_STATUS_OPTIONS } from './runModel.js';
 
@@ -439,12 +439,20 @@ function RunConversation({ detail, onResolveRunAttention }: {
           <h3>What it did</h3>
           {narrative.stepsTruncated && <small className="mobile-run-truncated">Showing the most recent steps.</small>}
           <ol>
-            {narrative.steps.map((step) => (
-              <li className={`mobile-run-step status-${step.status}`} key={step.sequence}>
-                <span aria-hidden="true">{STATUS_MARK[step.status]}</span>
-                {step.label}
-              </li>
-            ))}
+            {narrative.steps.map((step) => {
+              const time = narrativeStepTime(step.at);
+              return (
+                <li className={`mobile-run-step status-${step.status}`} key={step.sequence}>
+                  <span aria-hidden="true" className="mobile-run-step-icon">{STATUS_MARK[step.status]}</span>
+                  <span className="mobile-run-step-label">
+                    {step.label}
+                    {time && (
+                      <time className="mobile-run-step-time" dateTime={time.iso} title={time.title}> · {time.label}</time>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
           </ol>
         </section>
       )}

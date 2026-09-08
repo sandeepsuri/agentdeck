@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Repo, Session } from '../../types.js';
-import { isEndedSession, repoDisplayName } from './model.js';
+import { isEndedSession, narrativeStepTime, repoDisplayName } from './model.js';
 
 const base = {
   cwd: '/repos/alpha',
@@ -35,6 +35,27 @@ describe('isEndedSession', () => {
     // external sessions); external rows with a dead process disappear
     // entirely via DiscoveryPoller instead.
     expect(isEndedSession(external('exited'))).toBe(false);
+  });
+});
+
+describe('narrativeStepTime', () => {
+  it('renders a valid timestamp with a short label and a full accessible title that names the time zone', () => {
+    const time = narrativeStepTime('2026-09-01T00:04:00.000Z')!;
+    expect(time.iso).toBe('2026-09-01T00:04:00.000Z');
+    expect(time.label.length).toBeGreaterThan(0);
+    expect(time.title.length).toBeGreaterThan(time.label.length);
+    // 'long' time style guarantees a trailing zone name/offset (e.g. "EDT", "GMT+2") —
+    // AC2's "timezone display", not just a longer string.
+    expect(time.title).toMatch(/(?:[A-Za-z]{2,5}|GMT[+-]\d{1,2}(?::\d{2})?)$/);
+  });
+
+  it('is undefined for an absent timestamp, never a fabricated placeholder', () => {
+    expect(narrativeStepTime(undefined)).toBeUndefined();
+  });
+
+  it('is undefined for a legacy/invalid timestamp, never a fabricated placeholder', () => {
+    expect(narrativeStepTime('not-a-real-timestamp')).toBeUndefined();
+    expect(narrativeStepTime('')).toBeUndefined();
   });
 });
 

@@ -674,6 +674,13 @@ export interface CollaboratorRunStep {
   readonly label: string;
   readonly status: ActivityStatus;
   readonly sequence: number;
+  /**
+   * Ticket 53 (B19): the actual moment this step reached its current status,
+   * verbatim from the underlying event's `at` — never a fabricated or
+   * reconstructed time. Absent for a step whose event carried no parseable
+   * timestamp (e.g. legacy data); the raw activity log itself stays admin-only.
+   */
+  readonly at?: string;
 }
 
 export interface CollaboratorRunNarrative {
