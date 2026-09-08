@@ -238,6 +238,74 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
     expect(html).not.toContain('Turn started');
   });
 
+  it('offers a Pause action for a running Attempt, but no Resume — and neither without their handlers (ticket 54, B11)', () => {
+    const run: WorkRun = {
+      ...eligibleRun(), status: 'running', attempt: { state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', events: [] },
+    };
+
+    const withHandlers = renderToStaticMarkup(createElement(RunWorkspace, {
+      run, structuredAttemptsEnabled: true, onPause: () => undefined, onResume: () => undefined,
+    }));
+    expect(withHandlers).toContain('Pause');
+    expect(withHandlers).not.toContain('Resume');
+
+    const withoutHandlers = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true }));
+    expect(withoutHandlers).not.toContain('Pause');
+  });
+
+  it.each(['verifying', 'waiting_approval', 'waiting_input'] as const)(
+    'offers Pause while status is %s, matching the engine\'s own eligibility — every one of these still has a live, running Attempt (ticket 54, B11)',
+    (status) => {
+      const run: WorkRun = {
+        ...eligibleRun(), status, attempt: { state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', events: [] },
+      };
+
+      const html = renderToStaticMarkup(createElement(RunWorkspace, {
+        run, structuredAttemptsEnabled: true, onPause: () => undefined, onResume: () => undefined,
+      }));
+
+      expect(html).toContain('>Pause<');
+      expect(html).not.toContain('Resume');
+    },
+  );
+
+  it('distinguishes pause requested from paused, and offers Resume — never Pause — for either (ticket 54, B11)', () => {
+    const runningAttempt = { state: 'running' as const, runtime: 'codex' as const, startedAt: '2026-09-01T00:05:00.000Z', events: [] };
+
+    const requested = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: { ...eligibleRun(), status: 'pause_requested', attempt: runningAttempt },
+      structuredAttemptsEnabled: true, onPause: () => undefined, onResume: () => undefined,
+    }));
+    expect(requested).toContain('Pause requested');
+    expect(requested).not.toContain('>Paused<');
+    expect(requested).toContain('Resume');
+    expect(requested).not.toContain('>Pause<');
+
+    const paused = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: { ...eligibleRun(), status: 'paused', attempt: runningAttempt },
+      structuredAttemptsEnabled: true, onPause: () => undefined, onResume: () => undefined,
+    }));
+    expect(paused).toContain('>Paused<');
+    expect(paused).toContain('Resume');
+    expect(paused).not.toContain('>Pause<');
+  });
+
+  it('offers neither Pause nor Resume once the Attempt has settled, even with both handlers provided (ticket 54, B11)', () => {
+    const run: WorkRun = {
+      ...eligibleRun(),
+      status: 'completed_unverified',
+      attempt: {
+        state: 'completed', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', completedAt: '2026-09-01T00:06:00.000Z',
+        events: [{ kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' }],
+      },
+    };
+
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPause: () => undefined, onResume: () => undefined }));
+
+    expect(html).not.toContain('>Pause<');
+    expect(html).not.toContain('Resume');
+  });
+
   it('leads with the answer the Run was asked for, instead of burying it in the log', () => {
     const summary = 'AgentDeck is a local-first control panel for Claude Code and Codex CLI sessions on macOS.';
     const run: WorkRun = {

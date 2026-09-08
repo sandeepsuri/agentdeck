@@ -243,10 +243,12 @@ describe('named collaborator device credentials (ticket 11)', () => {
   it.each([
     ['GET', '/api/runs/some-id/activity'],
     ['POST', '/api/runs/some-id/publish'],
+    ['POST', '/api/runs/some-id/pause'],
+    ['POST', '/api/runs/some-id/resume'],
     ['DELETE', '/api/runs/some-id'],
     ['GET', '/api/repos/verification-policy'],
   ])(
-    'a collaborator device stays refused %s %s — session terminals, the admin-only activity audit trail, and publication are never in scope, only grant-checked Run/Repository/Profile routes (ticket 12 AC1/AC5, ticket 13 AC2)',
+    'a collaborator device stays refused %s %s — session terminals, the admin-only activity audit trail, publication, and pause/resume are never in scope, only grant-checked Run/Repository/Profile routes (ticket 12 AC1/AC5, ticket 13 AC2, ticket 54)',
     async (method, url) => {
       build();
       const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
@@ -536,6 +538,8 @@ describe('remote route allowlist (code-review finding: an authenticated remote c
     ['POST', '/api/runs/some-id/start'],
     ['POST', '/api/runs/some-id/cancel'],
     ['POST', '/api/runs/some-id/publish'],
+    ['POST', '/api/runs/some-id/pause'],
+    ['POST', '/api/runs/some-id/resume'],
   ])('an authenticated remote connection is refused %s %s — not on the mobile allowlist, regardless of a valid token', async (method, url) => {
     app = makeApp({ config: { ...defaultConfig(), tailscaleToken: TOKEN }, remoteHosts: [REMOTE_HOST] });
     const response = await app.inject({ method: method as 'POST' | 'PATCH', url, headers: remoteHeaders() });

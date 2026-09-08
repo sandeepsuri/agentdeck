@@ -230,6 +230,40 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     }
   });
 
+  // Ticket 54 (B11): the smallest local-admin transport around the existing
+  // engine pause()/resume() — never on isRemoteAllowedRoute or
+  // isCollaboratorAllowedRoute (app.ts), so a legacy-shared-token remote
+  // connection or a named collaborator device cannot reach either route.
+  // All policy (who may guide this Run), safe-boundary timing (pause takes
+  // effect only at the engine's next safe boundary, not immediately), and
+  // idempotency (repeating pause/resume against an already-settled state)
+  // are owned entirely by DurableWorkEngine.pause()/resume() — this adapter
+  // only resolves the actor and maps engine errors to HTTP status, exactly
+  // like every other route above.
+  app.post('/api/runs/:id/pause', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.pause(id, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.post('/api/runs/:id/resume', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.resume(id, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+  });
+
   // Ticket 07 AC2: the one policy path every transport's approve/deny/
   // provide-input command reaches — local UI and mobile UI both call these
   // three REST routes (see app.ts's isRemoteAllowedRoute for the mobile

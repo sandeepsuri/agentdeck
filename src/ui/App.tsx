@@ -486,6 +486,19 @@ export function App() {
     setRuns((current) => current.map((item) => item.id === body.id ? body : item));
   };
 
+  // Ticket 54 (B11): requests pause/resume against the existing engine's
+  // safe-boundary controls (work-routes.ts's POST .../pause and .../resume).
+  // The Run state shown afterward is always the server's response body —
+  // never a locally-guessed "paused" label — so a refusal, a completion
+  // that beat the request, or a pause that hasn't reached its safe boundary
+  // yet all render exactly what the engine actually did.
+  const guideRun = async (run: WorkRun, actionName: 'pause' | 'resume') => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/${actionName}`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? `Run ${actionName} failed.`);
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
   // Ticket 13 AC2: the admin's explicit authorization of an external effect
   // — the request blocks until publication reaches a settled state, and the
   // returned Run carries the durable publication record whatever it is.
@@ -682,7 +695,7 @@ export function App() {
         <main className="workspace-stage">
           <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>

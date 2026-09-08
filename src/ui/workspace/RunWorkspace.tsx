@@ -302,6 +302,10 @@ interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
   onStart?: (run: WorkRun) => void;
+  /** Ticket 54 (B11): requests a pause at the engine's next safe boundary (App.tsx's guideRun → POST /api/runs/:id/pause). Offered only while a live Attempt is actually running, never merely "queued" or "verifying between rounds is possible in principle." */
+  onPause?: (run: WorkRun) => void;
+  /** Ticket 54 (B11): lets a paused or pause-requested Attempt proceed (App.tsx's guideRun → POST /api/runs/:id/resume). Offered for both pause_requested and paused — the engine allows resuming before the request has even taken effect. */
+  onResume?: (run: WorkRun) => void;
   onApply?: (run: WorkRun) => void;
   onReverify?: (run: WorkRun) => void;
   onViewChanges?: (run: WorkRun) => void;
@@ -316,7 +320,7 @@ interface Props {
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
+  run, onPrepare, onStart, onPause, onResume, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
   structuredAttemptsEnabled = false,
 }: Props) {
   const { preparation, envelope, attempt } = run;
@@ -329,6 +333,21 @@ export function RunWorkspace({
   // Run this section can actually start.
   const eligibleForStructuredAttempt = preparation.state === 'ready' && envelope.state === 'ready';
   const canStart = structuredAttemptsEnabled && eligibleForStructuredAttempt && attempt.state === 'idle' && Boolean(onStart);
+  // Ticket 54 (B11): mirrors DurableWorkEngine.pause()/resume()'s own
+  // eligibility exactly (engine.ts) — both require only a live Attempt
+  // (attempt.state === 'running'); the engine itself never additionally
+  // requires run.status === 'running', so pause is offered through
+  // 'verifying'/'waiting_approval'/'waiting_input' too (deriveRunStatus,
+  // attempt-projection.ts, folds all of those from the same underlying
+  // attempt.state === 'running'), not only the bare 'running' label. Pause
+  // is withheld only once a request already landed (pause_requested or
+  // paused), where Resume takes over instead. Computed from the current
+  // run, never toggled locally, so a transition invalid on the server
+  // never shows as available here.
+  const live = attempt.state === 'running' && run.status !== 'pause_requested' && run.status !== 'paused';
+  const canPause = structuredAttemptsEnabled && live && Boolean(onPause);
+  const canResume = structuredAttemptsEnabled && attempt.state === 'running'
+    && (run.status === 'pause_requested' || run.status === 'paused') && Boolean(onResume);
   return (
     <article className="run-workspace">
       <header>
@@ -465,6 +484,20 @@ export function RunWorkspace({
             <button className="button button-primary" onClick={() => onStart?.(run)} type="button">
               Start Attempt
             </button>
+          )}
+          {(canPause || canResume) && (
+            <div className="run-attention-actions" role="group" aria-label="Pause and resume">
+              {canPause && (
+                <button className="button" onClick={() => onPause?.(run)} type="button">
+                  Pause
+                </button>
+              )}
+              {canResume && (
+                <button className="button button-primary" onClick={() => onResume?.(run)} type="button">
+                  Resume
+                </button>
+              )}
+            </div>
           )}
           {run.pendingAttention && (() => {
             const pending = run.pendingAttention;

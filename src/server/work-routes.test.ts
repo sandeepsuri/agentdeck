@@ -12,6 +12,7 @@ import { Store } from '../store/index.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
 import type { Profile, RunActor, WorkSpec } from '../work-engine/types.js';
+import type { VerificationGateRunner } from '../work-engine/verification.js';
 import { registerWorkRoutes, type WorkRoutesDeps } from './work-routes.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
@@ -418,6 +419,164 @@ describe('run Attempt start route', () => {
       const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
       return polled.json().status === 'completed_unverified';
     });
+  });
+});
+
+describe('run pause/resume routes (ticket 54, B11)', () => {
+  /**
+   * An engine wired to a caller-controlled VerificationGateRunner, so a test
+   * can pause a Run from inside a gate call — the exact "safe boundary"
+   * DurableWorkEngine.runVerification checks between gates (engine.ts) —
+   * and observe the effect purely through this REST surface. Shared by the
+   * round-trip and cancel-while-paused tests below rather than duplicated,
+   * since both need the identical repo/engine/app wiring.
+   */
+  function setUpPausableApp(gateRunner: VerificationGateRunner) {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    fs.mkdirSync(repoPath, { recursive: true });
+    git(repoPath, 'init');
+    git(repoPath, 'config', 'user.email', 'agentdeck@example.test');
+    git(repoPath, 'config', 'user.name', 'AgentDeck Test');
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'fixture\n');
+    git(repoPath, 'add', 'README.md');
+    git(repoPath, 'commit', '-m', 'fixture');
+    git(repoPath, 'branch', '-M', 'main');
+
+    const store = new Store(':memory:');
+    store.upsertRepo({ id: repoPath, name: 'example', path: repoPath });
+    store.setRepositoryVerificationPolicy(repoPath, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const engine = new DurableWorkEngine(
+      store,
+      path.join(root, 'runs'),
+      stubRuntimeReadinessSource(),
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) },
+      gateRunner,
+    );
+    const app = Fastify();
+    registerWorkRoutes(app, engine);
+    apps.push(app);
+    stores.push(store);
+    return { app, repoPath };
+  }
+
+  async function startPausable(app: ReturnType<typeof Fastify>, repoPath: string) {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/runs',
+      payload: { ...submittedIntent(repoPath, 'main'), verificationIntent: { required: false, commands: [] } },
+    });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    const started = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    expect(started.statusCode).toBe(200);
+    return run;
+  }
+
+
+  it('404s pausing/resuming an unknown run, and 400s pausing a run with no live Attempt or resuming one never paused', async () => {
+    const { app, repoPath } = makeApp();
+
+    const missingPause = await app.inject({ method: 'POST', url: '/api/runs/unknown/pause' });
+    expect(missingPause.statusCode).toBe(404);
+    expect(missingPause.json()).toEqual({ error: 'no such run: unknown' });
+    const missingResume = await app.inject({ method: 'POST', url: '/api/runs/unknown/resume' });
+    expect(missingResume.statusCode).toBe(404);
+    expect(missingResume.json()).toEqual({ error: 'no such run: unknown' });
+
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json(); // freshly submitted — queued, no live Attempt in this process
+
+    const pause = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/pause` });
+    expect(pause.statusCode).toBe(400);
+
+    const resume = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/resume` });
+    expect(resume.statusCode).toBe(400);
+  });
+
+  it('403s a collaborator actor pausing/resuming a Run outside their grants, leaving it untouched', async () => {
+    const { app, repoPath, engine } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+
+    const outsideApp = Fastify();
+    const outsideActor: RunActor = { principal: { id: 'collab-2', displayName: 'Bob' }, grants: { repositoryIds: [], profileIds: [] } };
+    registerWorkRoutes(outsideApp, engine, { resolveActor: () => outsideActor });
+    apps.push(outsideApp);
+
+    const pause = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/pause` });
+    expect(pause.statusCode).toBe(403);
+    const resume = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/resume` });
+    expect(resume.statusCode).toBe(403);
+    expect(engine.get(run.id)?.status).toBe('queued');
+  });
+
+  it('pauses a running Attempt at its next safe boundary and resumes it to completion, entirely through REST — repeated pause is a no-op, never an error (B11 AC3)', async () => {
+    let runId: string | undefined;
+    let app: ReturnType<typeof Fastify> | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && app) {
+        const paused = await app.inject({ method: 'POST', url: `/api/runs/${runId}/pause` });
+        expect(paused.statusCode).toBe(200);
+        expect(paused.json().status).toBe('pause_requested');
+      }
+      return gateCalls === 1
+        ? { passed: false, exitCode: 1, evidence: 'not fixed yet' }
+        : { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const setup = setUpPausableApp(gateRunner);
+    app = setup.app;
+    const run = await startPausable(app, setup.repoPath);
+    runId = run.id;
+
+    await vi.waitUntil(async () => {
+      const polled = await app!.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'paused';
+    }, { timeout: 20_000 });
+
+    const repeated = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/pause` });
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json().status).toBe('paused');
+
+    const resumed = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/resume` });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json().status).not.toBe('paused');
+    expect(resumed.json().status).not.toBe('pause_requested');
+
+    await vi.waitUntil(async () => {
+      const polled = await app!.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'completed';
+    }, { timeout: 20_000 });
+    expect(gateCalls).toBe(2);
+  });
+
+  it('lets a REST cancel end a paused Attempt through this same transport, rather than leaving it hanging for a resume that never comes (B11 AC3: cancellation during the request)', async () => {
+    let runId: string | undefined;
+    let app: ReturnType<typeof Fastify> | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && app) await app.inject({ method: 'POST', url: `/api/runs/${runId}/pause` });
+      return { passed: false, exitCode: 1, evidence: 'still broken' };
+    };
+    const setup = setUpPausableApp(gateRunner);
+    app = setup.app;
+    const run = await startPausable(app, setup.repoPath);
+    runId = run.id;
+
+    await vi.waitUntil(async () => {
+      const polled = await app!.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'paused';
+    }, { timeout: 20_000 });
+
+    const cancelled = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/cancel` });
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json().status).toBe('cancelled');
+    // Never resumed — cancel alone ended a paused Attempt through REST.
+    expect(gateCalls).toBe(1);
   });
 });
 
