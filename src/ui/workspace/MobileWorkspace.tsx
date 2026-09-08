@@ -5,7 +5,7 @@
 // the viewport, not an xterm grid — but the WS attach/detach lifecycle is
 // the same shape (see docs/specs/session-persistence-and-remote-access.md,
 // Stage 4 step 3, and src/sessions/live-reflow.ts for the server side).
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import type { CollaboratorSession, Repo, RunAttentionItem, Session } from '../../types.js';
 import type { AttentionDecisionInput, CollaboratorRunSummary, Profile } from '../../work-engine/types.js';
 import type { ClientFrame, ServerFrame } from '../../protocol.js';
@@ -16,6 +16,8 @@ import { ControlKeys } from '../components/ControlKeys.js';
 import { STATUS_LABELS, isEndedSession, relativeTime, sessionLabel } from './model.js';
 
 interface Props {
+  /** The desktop appearance picker, rendered in collaborator mode without duplicating its theme logic. */
+  appearanceControl?: ReactNode;
   session: Session | null;
   sessions: Session[];
   ws: WebSocket | null;
@@ -176,6 +178,7 @@ export function MobileWorkspace(props: Props) {
   if (collaboratorPrincipal) {
     return (
       <CollaboratorWorkspace
+        appearanceControl={props.appearanceControl}
         onError={props.onError}
         onResolveRunAttention={(runId, attentionId, decision) => props.onResolveRunAttention?.(runId, attentionId, decision)}
         onRunsStale={props.onRunsStale ?? (() => undefined)}

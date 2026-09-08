@@ -454,6 +454,11 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-topbar-copy > strong { width: 100%; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .mobile-topbar-copy > small { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .mobile-topbar-spacer { width: 44px; height: 44px; }
+.mobile-topbar-actions { justify-self: end; display: flex; align-items: center; }
+.mobile-topbar-actions .theme-control { z-index: 1; }
+.mobile-topbar-actions .top-icon-button { width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent; font-size: 17px; }
+.mobile-topbar-actions .top-icon-button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mobile-topbar-actions .theme-menu { position: fixed; top: calc(max(8px,env(safe-area-inset-top)) + 56px); right: 8px; }
 
 .mobile-agent-mark { width: 28px; height: 28px; display: grid; flex: none; place-items: center; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--action-primary); }
 .mobile-agent-mark i { width: 8px; height: 8px; border-radius: 2px; background: var(--text-on-action); transform: rotate(45deg); }

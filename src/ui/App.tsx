@@ -55,7 +55,7 @@ function ThemeControl() {
   }, [open]);
   return (
     <div className="theme-control" ref={hostRef}>
-      <button aria-expanded={open} aria-haspopup="menu" className="top-icon-button" onClick={() => setOpen((current) => !current)} title={`Appearance: ${selected.label}`} type="button">{selected.glyph}</button>
+      <button aria-expanded={open} aria-haspopup="menu" aria-label={`Appearance: ${selected.label}`} className="top-icon-button" onClick={() => setOpen((current) => !current)} title={`Appearance: ${selected.label}`} type="button">{selected.glyph}</button>
       {open && <div className="theme-menu" role="menu"><div>Appearance</div>{THEME_OPTIONS.map((option) => <button aria-checked={preference === option.value} key={option.value} onClick={() => { setPreference(option.value); setOpen(false); }} role="menuitemradio" type="button"><span>{option.glyph}</span><strong>{option.label}</strong>{option.value === 'system' && <small>{resolvedTheme}</small>}<em>{preference === option.value ? '✓' : ''}</em></button>)}</div>}
     </div>
   );
@@ -634,6 +634,7 @@ export function App() {
       <div className="mobile-shell">
         {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
         <MobileWorkspace
+          appearanceControl={<ThemeControl />}
           collaboratorPrincipal={collaboratorPrincipal}
           collaboratorProfiles={collaboratorProfiles}
           collaboratorRepos={collaboratorRepos}

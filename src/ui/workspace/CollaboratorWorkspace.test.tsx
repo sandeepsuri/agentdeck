@@ -117,6 +117,12 @@ afterEach(() => {
 });
 
 describe('CollaboratorWorkspace navigation', () => {
+  it('shows the appearance control supplied by the shared app chrome', async () => {
+    const host = await mount({ appearanceControl: <button aria-label="Appearance: System" type="button">◐</button> });
+
+    expect(host.querySelector('[aria-label="Appearance: System"]')).not.toBeNull();
+  });
+
   it('lists only server-derived personal requests across Repositories and opens existing Run detail', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({
       id: 'mine-elsewhere', objective: 'Update web copy',
