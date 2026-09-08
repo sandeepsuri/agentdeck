@@ -24,7 +24,7 @@
 // over grant-scoped REST. A collaborator socket is still refused 'attach' and
 // both session broadcasts (ws.ts), so no PTY bytes and no machine-wide view
 // of Sessions ever reach here.
-import { useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import type {
   AgentType, CollaboratorSession, Repo, SessionStatus,
 } from '../../types.js';
@@ -42,6 +42,8 @@ import { CommandPalette } from './CommandPalette.js';
 import { formatRunLabel, isTerminalRunStatus, RUN_STATUS_OPTIONS } from './runModel.js';
 
 export interface Props {
+  /** Supplied by App so this surface reuses the desktop appearance picker and its existing behavior. */
+  appearanceControl?: ReactNode;
   principal: { id: string; displayName: string };
   /** Already grant-filtered and narrowed by the server (GET /api/repos). */
   repos: Repo[];
@@ -498,7 +500,7 @@ function RunConversation({ detail, onResolveRunAttention }: {
 }
 
 export function CollaboratorWorkspace({
-  principal, repos, profiles, runs, sessions, onError, onRunsStale, onResolveRunAttention, onSignOut,
+  appearanceControl, principal, repos, profiles, runs, sessions, onError, onRunsStale, onResolveRunAttention, onSignOut,
   runListState = 'ready', repositoryListState = 'ready',
 }: Props) {
   const [view, setView] = useState<View | null>(null);
@@ -642,10 +644,13 @@ export function CollaboratorWorkspace({
                 : `Signed in as ${principal.displayName}`}
           </small>
         </span>
-        <button aria-label="Search accessible work" className="mobile-icon-button" onClick={() => setSearchOpen(true)} type="button">⌕</button>
-        {onSignOut && view?.kind !== 'run' && view?.kind !== 'session'
-          ? <button className="mobile-signout" onClick={onSignOut} type="button">Sign out</button>
-          : <span aria-hidden="true" className="mobile-topbar-spacer" />}
+        <div className="mobile-topbar-actions">
+          {appearanceControl}
+          <button aria-label="Search accessible work" className="mobile-icon-button" onClick={() => setSearchOpen(true)} type="button">⌕</button>
+          {onSignOut && view?.kind !== 'run' && view?.kind !== 'session'
+            ? <button className="mobile-signout" onClick={onSignOut} type="button">Sign out</button>
+            : null}
+        </div>
       </header>
 
       {notice && <p className="mobile-run-blocked-banner" role="status">{notice}</p>}
