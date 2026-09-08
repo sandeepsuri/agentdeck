@@ -48,11 +48,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 describe('CollaboratorsPanel', () => {
   it('loads and lists collaborators with their devices on mount', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse([
-      { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [], devices: [
-        { id: 'd1', collaboratorId: 'c1', deviceLabel: "Alice's phone", createdAt: '2026-01-01T00:00:00.000Z' },
-      ] },
-    ]));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/profiles') return jsonResponse([]);
+      return jsonResponse([
+        { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [], devices: [
+          { id: 'd1', collaboratorId: 'c1', deviceLabel: "Alice's phone", createdAt: '2026-01-01T00:00:00.000Z' },
+        ] },
+      ]);
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     const host = await mount();
@@ -363,5 +366,216 @@ describe('CollaboratorsPanel', () => {
 
     expect(host.querySelectorAll('.collaborators-profile-grants input[type="checkbox"]')).toHaveLength(1);
     expect(host.textContent).toContain('Standard Codex run');
+  });
+
+  const sourceProfile = {
+    id: 'profile-1',
+    name: 'Standard Codex run',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 3_600_000, maxModelTurns: 25 },
+    verificationIntent: { required: true, commands: ['npm test'] },
+    requestedDeliveryResult: 'pull-request',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('ticket 55: lists existing Profiles with their actual runtime, budget, verification, and delivery fields', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse([]);
+      if (url === '/api/profiles') return jsonResponse([sourceProfile]);
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+
+    expect(host.textContent).toContain('Standard Codex run');
+    expect(host.textContent).toContain('60 min wall clock');
+    expect(host.textContent).toContain('verification required (1)');
+    expect(host.textContent).toContain('Open draft pull request');
+    expect(host.textContent).toContain('npm test');
+    expect(host.textContent).toContain('Model turns');
+    expect(host.querySelector('button[aria-label="Create new from Standard Codex run"]')).not.toBeNull();
+  });
+
+  it('ticket 55: "Create new from this Profile" seeds every actual field from the source Profile, and submits them unchanged', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse([]);
+      if (url === '/api/profiles' && (!init || init.method === undefined)) return jsonResponse([sourceProfile]);
+      if (url === '/api/profiles' && init?.method === 'POST') {
+        return jsonResponse({ id: 'profile-2', ...JSON.parse(init.body as string), createdAt: '2026-01-02T00:00:00.000Z' }, 201);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const cloneButton = host.querySelector('button[aria-label="Create new from Standard Codex run"]') as HTMLButtonElement;
+    await act(async () => { cloneButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const nameInput = host.querySelector('input[aria-label="New profile name"]') as HTMLInputElement;
+    expect(nameInput.value).toBe('Standard Codex run copy');
+    const runtimeCheckboxes = host.querySelectorAll('.collaborators-subpanel .collaborators-chip-row input[type="checkbox"]') as NodeListOf<HTMLInputElement>;
+    expect(runtimeCheckboxes[0]!.checked).toBe(true); // codex, from the source Profile
+    expect(runtimeCheckboxes[1]!.checked).toBe(false); // claude was never in runtimePreference
+    const wallClockInput = host.querySelector('.collaborators-subpanel input[type="number"]') as HTMLInputElement;
+    expect(wallClockInput.value).toBe('60');
+    const deliverySelect = host.querySelector('select[aria-label="Requested delivery result"]') as HTMLSelectElement;
+    expect(deliverySelect.value).toBe('pull-request');
+    const verifyCheckbox = host.querySelector('.collaborators-subpanel .collaborators-verify-toggle input') as HTMLInputElement;
+    expect(verifyCheckbox.checked).toBe(true);
+    const commandsTextarea = host.querySelector('.collaborators-subpanel textarea') as HTMLTextAreaElement;
+    expect(commandsTextarea.value).toBe('npm test');
+    const modelTurnsInput = host.querySelector('input[aria-label="Model turns"]') as HTMLInputElement;
+    expect(modelTurnsInput.value).toBe('25');
+
+    const createButton = Array.from(host.querySelectorAll('.collaborators-subpanel button')).find((b) => b.textContent === 'Create new from this Profile')!;
+    await act(async () => {
+      createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const postCall = fetchMock.mock.calls.find(([input, init]) => String(input) === '/api/profiles' && (init as RequestInit | undefined)?.method === 'POST')!;
+    const body = JSON.parse((postCall[1] as RequestInit).body as string);
+    expect(body).toEqual({
+      name: 'Standard Codex run copy',
+      runtimePreference: ['codex'],
+      budget: { maxWallClockMs: 3_600_000, maxModelTurns: 25 },
+      verificationIntent: { required: true, commands: ['npm test'] },
+      requestedDeliveryResult: 'pull-request',
+    });
+
+    // the original Profile is untouched — still present, and nothing was ever sent to a per-Profile URL (create-only, no update route)
+    expect(host.textContent).toContain('Standard Codex run');
+    expect(fetchMock.mock.calls.some(([input]) => /^\/api\/profiles\/.+/.test(String(input)))).toBe(false);
+  });
+
+  it('ticket 55: Cancel closes the "Create new from this Profile" form without creating anything', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse([]);
+      if (url === '/api/profiles') return jsonResponse([sourceProfile]);
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const cloneButton = host.querySelector('button[aria-label="Create new from Standard Codex run"]') as HTMLButtonElement;
+    await act(async () => { cloneButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(host.querySelector('.collaborators-subpanel')).not.toBeNull();
+
+    const cancelButton = Array.from(host.querySelectorAll('.collaborators-subpanel button')).find((b) => b.textContent === 'Cancel')!;
+    await act(async () => { cancelButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.querySelector('.collaborators-subpanel')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/profiles', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('ticket 55: reassigning collaborator grants after cloning is a separate explicit action, touching only selected collaborators', async () => {
+    const collaboratorsFixture = [
+      { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: ['profile-1', 'profile-9'], devices: [] },
+      { id: 'c2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [], devices: [] },
+    ];
+    const patchCalls: { id: string; body: unknown }[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse(collaboratorsFixture);
+      if (url === '/api/profiles' && (!init || init.method === undefined)) return jsonResponse([sourceProfile]);
+      if (url === '/api/profiles' && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'profile-2', name: 'Standard Codex run copy', runtimePreference: ['codex'],
+          budget: { maxWallClockMs: 3_600_000, maxModelTurns: 25 }, verificationIntent: { required: true, commands: ['npm test'] },
+          requestedDeliveryResult: 'pull-request', createdAt: '2026-01-02T00:00:00.000Z',
+        }, 201);
+      }
+      const match = /^\/api\/collaborators\/(.+)$/.exec(url);
+      if (match && init?.method === 'PATCH') {
+        patchCalls.push({ id: match[1]!, body: JSON.parse(init.body as string) });
+        return jsonResponse({ ...collaboratorsFixture.find((c) => c.id === match[1]), ...JSON.parse(init.body as string) });
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const cloneButton = host.querySelector('button[aria-label="Create new from Standard Codex run"]') as HTMLButtonElement;
+    await act(async () => { cloneButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const createButton = Array.from(host.querySelectorAll('.collaborators-subpanel button')).find((b) => b.textContent === 'Create new from this Profile')!;
+    await act(async () => {
+      createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const reassignPanel = Array.from(host.querySelectorAll('.collaborators-subpanel'))
+      .find((el) => el.textContent?.includes('Update collaborator grants'))!;
+    expect(reassignPanel.textContent).toContain('Alice');
+    expect(reassignPanel.textContent).not.toContain('Bob'); // Bob was never granted the source Profile
+
+    const checkbox = reassignPanel.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(checkbox.checked).toBe(false); // nothing pre-selected — the admin must opt in explicitly
+    expect(patchCalls).toHaveLength(0);
+
+    await act(async () => { checkbox.click(); });
+    const updateButton = Array.from(reassignPanel.querySelectorAll('button')).find((b) => b.textContent?.startsWith('Update selected to'))!;
+    await act(async () => {
+      updateButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+
+    // Alice's unrelated Repository grant and other Profile grant both survive the swap
+    expect(patchCalls).toEqual([{ id: 'c1', body: { grantedProfileIds: ['profile-2', 'profile-9'] } }]);
+  });
+
+  it('ticket 55: a partial grant-reassignment failure is shown per collaborator without deleting or hiding the new Profile', async () => {
+    const collaboratorsFixture = [
+      { id: 'c1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: ['profile-1'], devices: [] },
+      { id: 'c2', displayName: 'Carol', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: ['profile-1'], devices: [] },
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse(collaboratorsFixture);
+      if (url === '/api/profiles' && (!init || init.method === undefined)) return jsonResponse([sourceProfile]);
+      if (url === '/api/profiles' && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'profile-2', name: 'Standard Codex run copy', runtimePreference: ['codex'],
+          budget: { maxWallClockMs: 3_600_000, maxModelTurns: 25 }, verificationIntent: { required: true, commands: ['npm test'] },
+          requestedDeliveryResult: 'pull-request', createdAt: '2026-01-02T00:00:00.000Z',
+        }, 201);
+      }
+      if (url === '/api/collaborators/c1' && init?.method === 'PATCH') {
+        return jsonResponse({ ...collaboratorsFixture[0], grantedProfileIds: ['profile-2'] });
+      }
+      if (url === '/api/collaborators/c2' && init?.method === 'PATCH') {
+        return jsonResponse({ error: 'boom' }, 500);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const cloneButton = host.querySelector('button[aria-label="Create new from Standard Codex run"]') as HTMLButtonElement;
+    await act(async () => { cloneButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const createButton = Array.from(host.querySelectorAll('.collaborators-subpanel button')).find((b) => b.textContent === 'Create new from this Profile')!;
+    await act(async () => {
+      createButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+
+    const reassignPanel = Array.from(host.querySelectorAll('.collaborators-subpanel'))
+      .find((el) => el.textContent?.includes('Update collaborator grants'))!;
+    const checkboxes = Array.from(reassignPanel.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+    await act(async () => { checkboxes.forEach((checkbox) => checkbox.click()); });
+
+    const updateButton = Array.from(reassignPanel.querySelectorAll('button')).find((b) => b.textContent?.startsWith('Update selected to'))!;
+    await act(async () => {
+      updateButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+
+    expect(reassignPanel.textContent).toContain('Updated to Standard Codex run copy');
+    expect(reassignPanel.textContent).toContain('Unable to update — still granted Standard Codex run');
+    // the failure never rolls back or hides the newly created replacement Profile
+    expect(host.textContent).toContain('Standard Codex run copy');
   });
 });
