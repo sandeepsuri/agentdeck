@@ -190,9 +190,15 @@ describe('CollaboratorWorkspace navigation', () => {
   it('clears already-rendered Run detail when a later poll says it is out of scope', async () => {
     vi.useFakeTimers();
     const sensitive = detail({ narrative: { answer: 'Previously authorized result', steps: [], stepsTruncated: false } });
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(sensitive))
-      .mockResolvedValueOnce(jsonResponse({ error: 'no such run' }, 404));
+    // Ticket 67 (B07): routed by URL rather than call order/count, so the
+    // Run detail poll's own sequencing stays independent of the separate
+    // feedback poll this workspace now also issues.
+    let detailCalls = 0;
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).includes('/feedback')) return jsonResponse([]);
+      detailCalls += 1;
+      return detailCalls === 1 ? jsonResponse(sensitive) : jsonResponse({ error: 'no such run' }, 404);
+    });
     vi.stubGlobal('fetch', fetchMock);
     const host = await mount({ runs: [summary()] });
 
@@ -203,7 +209,7 @@ describe('CollaboratorWorkspace navigation', () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(detailCalls).toBe(2);
     expect(host.textContent).not.toContain('Previously authorized result');
     expect(host.textContent).toContain('Run unavailable');
   });
@@ -444,6 +450,27 @@ describe('CollaboratorWorkspace Run conversation', () => {
     expect(host.textContent).toContain('src/auth/session.ts');
     expect(host.textContent).toContain('deadbeefcafe');
     expect(host.textContent).toContain('tests');
+  });
+});
+
+// Ticket 67 (B07, docs/specs/run-feedback-review.md): the shared
+// RunFeedbackPanel (RunFeedbackPanel.tsx) is exercised directly, at the
+// composer/list behavior level, in RunFeedbackPanel.test.tsx — the same
+// split RunWorkspace.test.tsx already has from SessionChat.test.tsx for the
+// shared SessionChat component. This is only the integration check: does
+// opening a Run in the collaborator workspace actually mount the panel,
+// scoped to the right Run, with the right heading level.
+describe('CollaboratorWorkspace Run feedback (B07)', () => {
+  it('mounts the shared feedback panel for the open Run, nested under an h3', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => (
+      String(url).includes('/feedback') ? jsonResponse([]) : jsonResponse(detail())
+    )));
+
+    const host = await mount({ runs: [summary()] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(host.querySelector('[aria-label="Feedback"] h3')?.textContent).toBe('Feedback');
+    expect(host.textContent).toContain('No comments yet.');
   });
 });
 

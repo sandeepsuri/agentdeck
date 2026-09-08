@@ -35,6 +35,7 @@ import { describeOutcome, formatTokenCount } from '../../work-engine/attempt-nar
 import {
   CollaboratorRunReadError, getCollaboratorRun, requestWork, type CollaboratorListState,
 } from '../collaboratorRuns.js';
+import { RunFeedbackPanel } from './RunFeedbackPanel.js';
 import { SessionChat } from './SessionChat.js';
 import { lines } from '../components/RunSubmissionModal.js';
 import { SESSION_STATUS_OPTIONS, STATUS_LABELS, narrativeStepTime, relativeTime } from './model.js';
@@ -503,6 +504,8 @@ function RunConversation({ detail, onResolveRunAttention }: {
       )}
 
       {detail.result && <RunResultPanel result={detail.result} />}
+
+      <RunFeedbackPanel headingLevel="h3" runId={detail.id} />
     </main>
   );
 }

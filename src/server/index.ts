@@ -25,6 +25,7 @@ import { DurableWorkEngine } from '../work-engine/engine.js';
 import { registerWorkRoutes } from './work-routes.js';
 import { CollaboratorService } from '../collaborators/service.js';
 import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
+import { resolveSenderIdentity } from './session-conversation.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -124,6 +125,11 @@ export async function startServer(): Promise<RunningServer> {
       const device = requestTrust(req).device;
       return device && toRunActor(device);
     },
+    // B07: reuses the exact identity resolution shared session chat already
+    // established (docs/specs/shared-session-chat.md) rather than a second,
+    // parallel "who sent this" decision.
+    resolveAuthor: (req) => resolveSenderIdentity(requestTrust(req)),
+    runFeedbackStore: store,
   });
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;

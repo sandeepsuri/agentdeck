@@ -6,6 +6,7 @@
 // what a Collaborator may see. It only knows the shapes.
 import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
 import { submitWorkRun } from './components/RunSubmissionModal.js';
+import type { RunFeedbackEntry } from '../types.js';
 import type { CollaboratorRunDetail, CollaboratorRunSummary, WorkSpec } from '../work-engine/types.js';
 
 type RunFetcher = (path: string, init?: RequestInit) => Promise<Response>;
@@ -27,6 +28,31 @@ export async function getCollaboratorRun(runId: string, fetcher: RunFetcher = ap
   const response = await fetcher(`/api/runs/${encodeURIComponent(runId)}`);
   if (!response.ok) throw new CollaboratorRunReadError(response.status);
   return responseJson<CollaboratorRunDetail>(response);
+}
+
+/**
+ * Ticket 67 (B07, docs/specs/run-feedback-review.md): a granted Run's plain
+ * commentary — the same grant-scoped 404-never-403 read GET /api/runs/:id
+ * itself uses, so a Run outside this collaborator's grant reads as "no such
+ * run" here too, not as an empty list.
+ */
+export function listRunFeedback(runId: string, fetcher: RunFetcher = apiFetch): Promise<RunFeedbackEntry[]> {
+  return fetcher(`/api/runs/${encodeURIComponent(runId)}/feedback`).then((response) => {
+    if (!response.ok) throw new CollaboratorRunReadError(response.status);
+    return responseJsonArray<RunFeedbackEntry>(response);
+  });
+}
+
+/** Posts one comment, attributed server-side to this collaborator's own Principal — never a caller-supplied name. */
+export async function postRunFeedback(runId: string, text: string, fetcher: RunFetcher = apiFetch): Promise<RunFeedbackEntry> {
+  const response = await fetcher(`/api/runs/${encodeURIComponent(runId)}/feedback`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  const body = await response.json().catch(() => ({})) as Partial<RunFeedbackEntry> & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? 'Unable to post this comment.');
+  return body as RunFeedbackEntry;
 }
 
 /** Where the request chain stopped short of a running Attempt, if it did. */

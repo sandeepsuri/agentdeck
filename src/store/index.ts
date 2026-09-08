@@ -274,6 +274,32 @@ function rowToSessionChatMessage(r: SessionChatMessageRow): StoredSessionChatMes
   return message;
 }
 
+interface RunFeedbackRow {
+  id: string; task_id: string; run_id: string; sequence: number; posted_at: string;
+  principal_id: string | null; display_name: string; text: string;
+}
+
+/** One durably stored, plain-commentary Task/Run post (docs/specs/run-feedback-review.md, B07) — independent of StoredSessionChatMessage above; never routed to a runtime. */
+export interface StoredRunFeedback {
+  id: string;
+  taskId: string;
+  runId: string;
+  sequence: number;
+  postedAt: string;
+  principalId?: string;
+  displayName: string;
+  text: string;
+}
+
+function rowToRunFeedback(r: RunFeedbackRow): StoredRunFeedback {
+  const entry: StoredRunFeedback = {
+    id: r.id, taskId: r.task_id, runId: r.run_id, sequence: r.sequence, postedAt: r.posted_at,
+    displayName: r.display_name, text: r.text,
+  };
+  if (r.principal_id !== null) entry.principalId = r.principal_id;
+  return entry;
+}
+
 // --- store -------------------------------------------------------------------
 
 export interface StoredEvent extends AgentMessage {
@@ -721,6 +747,44 @@ export class Store implements CollaboratorStore {
       .prepare('SELECT * FROM session_chat_messages WHERE session_id = ? ORDER BY sequence DESC LIMIT ?')
       .all(sessionId, limit) as SessionChatMessageRow[];
     return rows.reverse().map(rowToSessionChatMessage);
+  }
+
+  // -- run feedback (docs/specs/run-feedback-review.md, B07) --
+
+  /** `input.sequence` is never accepted from the caller — assigned as this Task's next value, mirroring appendSessionChatMessage's per-key monotonic ordering. Keyed by taskId (not runId): see migrations/020_run_feedback.sql's own header for why. */
+  appendRunFeedback(input: {
+    id: string; taskId: string; runId: string; postedAt: string; principalId?: string; displayName: string; text: string;
+  }): StoredRunFeedback {
+    const { sequence } = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_feedback WHERE task_id = ?')
+      .get(input.taskId) as { sequence: number };
+    this.db.prepare(
+      `INSERT INTO run_feedback (id, task_id, run_id, sequence, posted_at, principal_id, display_name, text)
+       VALUES (@id, @taskId, @runId, @sequence, @postedAt, @principalId, @displayName, @text)`,
+    ).run({
+      id: input.id,
+      taskId: input.taskId,
+      runId: input.runId,
+      sequence,
+      postedAt: input.postedAt,
+      principalId: input.principalId ?? null,
+      displayName: input.displayName,
+      text: input.text,
+    });
+    const entry: StoredRunFeedback = {
+      id: input.id, taskId: input.taskId, runId: input.runId, sequence, postedAt: input.postedAt,
+      displayName: input.displayName, text: input.text,
+    };
+    if (input.principalId !== undefined) entry.principalId = input.principalId;
+    return entry;
+  }
+
+  /** Every feedback entry for one Task, oldest first — never filtered by runId, so a Task's conversation stays whole across a future retried Attempt/Run (B12). */
+  listRunFeedback(taskId: string): StoredRunFeedback[] {
+    const rows = this.db
+      .prepare('SELECT * FROM run_feedback WHERE task_id = ? ORDER BY sequence ASC')
+      .all(taskId) as RunFeedbackRow[];
+    return rows.map(rowToRunFeedback);
   }
 
   // -- settings --

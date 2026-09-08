@@ -5,10 +5,12 @@ import {
   InvalidRunStateError, InvalidWorkSpecError, PolicyDeniedError, RunAttentionNotPendingError, RunNotFoundError,
   RunPreparationError, UnsupportedRuntimeError,
 } from '../work-engine/engine.js';
+import { resolveLocalPrincipal } from '../work-engine/principal.js';
 import { isPublicationTarget } from '../work-engine/publication.js';
 import type {
   AttentionDecisionInput, PublicationTarget, RunActor, WorkEngine, WorkSpec,
 } from '../work-engine/types.js';
+import { listRunFeedback, postRunFeedback, type RunFeedbackStore } from './run-feedback.js';
 import { nonEmptyString } from './validate.js';
 
 export interface WorkRoutesDeps {
@@ -32,6 +34,27 @@ export interface WorkRoutesDeps {
    * asking, never decides what they may do.
    */
   resolveActor?: (request: FastifyRequest) => RunActor | undefined;
+  /**
+   * B07: who to attribute a feedback post to — resolved the same way
+   * session-conversation.ts's resolveSenderIdentity already does (a
+   * collaborator device's own Principal, the local admin's principal, or
+   * the label "Shared access" for the legacy tailnet token, which has no
+   * individual identity to attribute to). Deliberately not derived from
+   * resolveActor above: that resolves to undefined for both the local admin
+   * and the legacy shared token, which is the right default for Work
+   * Engine authority (both stay unrestricted) but is not enough to tell
+   * those two apart for attribution, which the design doc requires.
+   * Undefined falls back to the local operator's own principal — the same
+   * default DurableWorkEngine.resolveActor uses internally.
+   */
+  resolveAuthor?: (request: FastifyRequest) => { principalId?: string; displayName: string };
+  /** B07: the durable-storage seam POST/GET .../feedback read and write through — Store (store/index.ts) already implements this. */
+  runFeedbackStore?: RunFeedbackStore;
+}
+
+function defaultAuthor(): { principalId?: string; displayName: string } {
+  const principal = resolveLocalPrincipal();
+  return { principalId: principal.id, displayName: principal.displayName };
 }
 
 /** Ticket 12 AC1/AC4: a PolicyDeniedError is a 403, everywhere it can surface below — never conflated with InvalidWorkSpecError/InvalidRunStateError's 400s, which mean "the request was malformed," not "you're not allowed." */
@@ -114,6 +137,40 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     const { id } = request.params as { id: string };
     if (!workEngine.get(id)) return reply.code(404).send({ error: 'no such run' });
     return workEngine.listActivity(id);
+  });
+
+  /**
+   * B07 (docs/specs/run-feedback-review.md): every feedback entry posted
+   * against this Run's Task — never restricted to `running`/`completed`,
+   * since plain commentary is never routed to a live runtime and must stay
+   * readable for any status, including every terminal failure. Grant check
+   * is byte-identical to GET /api/runs/:id's own (404, never 403, so a Run
+   * outside a collaborator's grant never leaks even its existence).
+   */
+  app.get('/api/runs/:id/feedback', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const run = workEngine.get(id);
+    if (!run) return reply.code(404).send({ error: 'no such run' });
+    const { granted } = resolveCollaboratorReadContext(request);
+    if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
+    if (!deps.runFeedbackStore) return [];
+    return listRunFeedback(deps.runFeedbackStore, run.taskId);
+  });
+
+  app.post('/api/runs/:id/feedback', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const run = workEngine.get(id);
+    if (!run) return reply.code(404).send({ error: 'no such run' });
+    const { granted } = resolveCollaboratorReadContext(request);
+    if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
+    if (!deps.runFeedbackStore) return reply.code(500).send({ error: 'feedback storage is not configured' });
+    const body = request.body as { text?: unknown } | null;
+    const author = deps.resolveAuthor?.(request) ?? defaultAuthor();
+    const result = postRunFeedback(deps.runFeedbackStore, {
+      taskId: run.taskId, runId: run.id, principalId: author.principalId, displayName: author.displayName, text: body?.text,
+    });
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return reply.code(201).send(result.entry);
   });
 
   app.post('/api/runs', async (request, reply) => {

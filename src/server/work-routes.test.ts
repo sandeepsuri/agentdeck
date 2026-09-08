@@ -56,7 +56,11 @@ function makeApp(
   const engine = runtimeAdapters
     ? new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), runtimeAdapters)
     : new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource());
-  registerWorkRoutes(app, engine, typeof deps === 'function' ? deps(repoPath) : deps);
+  // B07: wired by default, matching server/index.ts's own production
+  // wiring — a test that supplies its own deps still gets feedback storage
+  // unless it deliberately overrides `runFeedbackStore` itself.
+  const resolvedDeps = typeof deps === 'function' ? deps(repoPath) : deps;
+  registerWorkRoutes(app, engine, { runFeedbackStore: store, ...resolvedDeps });
   apps.push(app);
   stores.push(store);
   return { app, repoPath, store, engine };
@@ -803,5 +807,147 @@ describe('DELETE /api/runs/:id', () => {
     expect(response.statusCode).toBe(403);
     expect(response.json()).toEqual({ error: expect.stringContaining('admin'), rule: 'delete-admin-only' });
     expect(engine.get(run.id)).toBeDefined();
+  });
+});
+
+// B07 (docs/specs/run-feedback-review.md, ticket #67): durable, plain-text
+// Task/Run commentary — its own describe block since it is a genuinely
+// separate feature from Run lifecycle above, sharing only the Run/grant
+// fixtures.
+describe('Run feedback (B07)', () => {
+  function feedbackCollaboratorDeps(
+    repositoryIds: readonly string[],
+    principal: { id: string; displayName: string } = { id: 'collab-reader', displayName: 'Alice' },
+  ): WorkRoutesDeps {
+    return {
+      resolveGrantedRepositoryIds: () => repositoryIds,
+      resolveActor: () => ({ principal, grants: { repositoryIds, profileIds: [] } }),
+      resolveAuthor: () => ({ principalId: principal.id, displayName: principal.displayName }),
+    };
+  }
+
+  it('posts and lists feedback for an admin, attributed to the local operator', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const posted = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'Should this touch auth too?' } });
+    expect(posted.statusCode).toBe(201);
+    expect(posted.json()).toMatchObject({
+      taskId: run.taskId, runId: run.id, sequence: 1, text: 'Should this touch auth too?',
+    });
+    expect(posted.json().displayName).toEqual(expect.any(String));
+
+    const listed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual([posted.json()]);
+  });
+
+  it('assigns a monotonic sequence and returns entries oldest-first', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'first' } });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'second' } });
+
+    const listed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.json().map((entry: { text: string }) => entry.text)).toEqual(['first', 'second']);
+  });
+
+  it('400s empty text without creating an entry', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: '   ' } });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'text is required' });
+    const listed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.json()).toEqual([]);
+  });
+
+  it('404s GET and POST for an unknown Run', async () => {
+    const { app } = makeApp();
+
+    const listed = await app.inject({ method: 'GET', url: '/api/runs/does-not-exist/feedback' });
+    expect(listed.statusCode).toBe(404);
+
+    const posted = await app.inject({ method: 'POST', url: '/api/runs/does-not-exist/feedback', payload: { text: 'hi' } });
+    expect(posted.statusCode).toBe(404);
+  });
+
+  it('is readable/postable for a Run in a terminal failure status — feedback never assumes a live process', async () => {
+    const { app, repoPath, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+    store.updateRun({ ...run, status: 'failed' });
+
+    const posted = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'why did this fail?' } });
+    expect(posted.statusCode).toBe(201);
+
+    const listed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.json()).toHaveLength(1);
+  });
+
+  it('a granted collaborator can read and post feedback, attributed to their own Principal', async () => {
+    const { app, repoPath, engine, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const collaboratorApp = Fastify();
+    registerWorkRoutes(collaboratorApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([repoPath]) });
+    apps.push(collaboratorApp);
+
+    const posted = await collaboratorApp.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'looks good' } });
+    expect(posted.statusCode).toBe(201);
+    expect(posted.json()).toMatchObject({ principalId: 'collab-reader', displayName: 'Alice', text: 'looks good' });
+
+    const listed = await collaboratorApp.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.json()).toEqual([posted.json()]);
+  });
+
+  it('404s (never 403) GET and POST feedback for a collaborator outside the Run\'s grant, never leaking existence', async () => {
+    const { app, repoPath, engine, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const outsideApp = Fastify();
+    registerWorkRoutes(outsideApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([]) });
+    apps.push(outsideApp);
+
+    const listed = await outsideApp.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.statusCode).toBe(404);
+    expect(listed.json()).toEqual({ error: 'no such run' });
+
+    const posted = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'hi' } });
+    expect(posted.statusCode).toBe(404);
+  });
+
+  it('keeps a departed collaborator\'s already-posted feedback durable and visible to the admin after their grant is revoked', async () => {
+    const { app, repoPath, engine, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const collaboratorApp = Fastify();
+    registerWorkRoutes(collaboratorApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([repoPath]) });
+    apps.push(collaboratorApp);
+    await collaboratorApp.inject({ method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'from a collaborator' } });
+
+    // The admin (unfiltered) read still sees it durably, independent of the
+    // collaborator's own subsequent access.
+    const adminListed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(adminListed.json()).toHaveLength(1);
+    expect(adminListed.json()[0]).toMatchObject({ text: 'from a collaborator' });
+
+    // Revoked: a fresh app resolving zero grants for the same collaborator
+    // now 404s, exactly like it would for the Run itself — but the entry
+    // above remains, never deleted by the revocation.
+    const revokedApp = Fastify();
+    registerWorkRoutes(revokedApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([]) });
+    apps.push(revokedApp);
+    const revokedListed = await revokedApp.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(revokedListed.statusCode).toBe(404);
   });
 });

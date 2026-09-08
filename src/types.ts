@@ -136,6 +136,26 @@ export interface SessionChatMessage {
   deliveryReason?: string;
 }
 
+/**
+ * One durably posted, plain-text Task/Run comment (server/run-feedback.ts,
+ * docs/specs/run-feedback-review.md, B07) — deliberately parallel to
+ * SessionChatMessage above but independent of it: keyed by Task rather than
+ * Session, and with no runtime delivery, mention parsing, or agent-turn
+ * half at all. Never routed to a runtime and never a review/approval
+ * decision on its own.
+ */
+export interface RunFeedbackEntry {
+  id: string;
+  taskId: string;
+  runId: string;
+  sequence: number;
+  postedAt: string;
+  /** A named collaborator's or the local admin's Principal id — absent for the legacy shared-token path, never guessed. */
+  principalId?: string;
+  displayName: string;
+  text: string;
+}
+
 /** Whether a Collaborator's composer can reach this Session, and why not when it cannot. */
 export interface CollaboratorSessionCapabilities {
   send: 'managed' | 'queued' | 'unavailable';

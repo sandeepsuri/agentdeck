@@ -7,6 +7,7 @@ import type {
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
 } from './attemptActivity.js';
+import { RunFeedbackPanel } from './RunFeedbackPanel.js';
 import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
 /** The heading + status pill shared by every collapsible run-section-detail summary below. */
@@ -534,6 +535,7 @@ export function RunWorkspace({
        * flag.
        */}
       <PublicationPanel onPublish={onPublish} run={run} />
+      <RunFeedbackPanel runId={run.id} />
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>
   );
