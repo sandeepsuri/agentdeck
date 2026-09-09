@@ -20,10 +20,18 @@ let host: HTMLDivElement;
 afterEach(async () => {
   await act(async () => { root?.unmount(); });
   host?.remove();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+/** A Response whose resolution the test controls, for exercising in-flight requests (a slow fetch, a Run switch before it settles). */
+function deferredResponse() {
+  let resolve!: (value: Response) => void;
+  const promise = new Promise<Response>((res) => { resolve = res; });
+  return { promise, resolve };
+}
 
 const entry = (id: string, text: string, displayName = 'Alice') => ({
   id, taskId: 'task-1', runId: 'run-1', sequence: Number(id), postedAt: `2026-09-01T00:00:0${id}.000Z`, displayName, text,
@@ -233,5 +241,135 @@ describe('RunFeedbackPanel review state (ticket 71, B09)', () => {
     const buttons = [...host.querySelectorAll('button')];
     const requestChanges = buttons.find((button) => button.textContent === 'Request changes')!;
     expect(requestChanges.hasAttribute('disabled')).toBe(true);
+  });
+});
+
+// Feedback reliability fixes (docs/specs/run-feedback-review.md, tickets
+// #67/#71): a post that reaches the server must never be reported "Not
+// sent" just because the follow-up review-badge refresh fails, loading vs.
+// empty vs. failed must be distinguishable states with a retry action, a
+// failed background refresh must not blank out feedback/review already on
+// screen, and switching Runs mid-request must never let a stale response
+// land on the wrong Run's feedback, review, or composer draft.
+describe('RunFeedbackPanel reliability', () => {
+  it('shows the saved comment, clears the draft, and never reports "Not sent" when the post succeeds but the review refresh fails', async () => {
+    let reviewCalls = 0;
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        const { text } = JSON.parse(String(init.body)) as { text: string };
+        return json(entry('1', text, 'Admin'));
+      }
+      if (String(url).includes('/review')) {
+        reviewCalls += 1;
+        return reviewCalls === 1 ? json({ state: 'ready_to_review' }) : json({ error: 'boom' }, 500);
+      }
+      return json([]);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    await render();
+    expect(host.querySelector('.run-review-badge')?.textContent).toBe('Ready to review');
+
+    await submit('looks solid');
+
+    expect(host.textContent).toContain('looks solid');
+    expect(host.textContent).not.toContain('Not sent');
+    expect((host.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement).value).toBe('');
+    // The comment landed; only the badge refresh is stale, and says so distinctly.
+    expect(host.querySelector('.run-review-badge')?.textContent).toBe('Ready to review (may be out of date)');
+  });
+
+  it('shows a loading state before the first feedback fetch resolves, distinct from genuinely empty', async () => {
+    const gate = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => (
+      String(url).includes('/feedback') ? gate.promise : json({ state: 'not_applicable' })
+    )));
+    await render();
+
+    expect(host.textContent).toContain('Loading feedback…');
+    expect(host.textContent).not.toContain('No comments yet.');
+
+    await act(async () => {
+      gate.resolve(json([]));
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+    });
+    expect(host.textContent).toContain('No comments yet.');
+    expect(host.textContent).not.toContain('Loading feedback…');
+  });
+
+  it('shows a distinct load-failure state with a retry action, and recovers once retried', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      if (!String(url).includes('/feedback')) return json({ state: 'not_applicable' });
+      calls += 1;
+      return calls === 1 ? json({ error: 'boom' }, 500) : json([entry('1', 'recovered')]);
+    }));
+    await render();
+
+    expect(host.textContent).toContain('Couldn’t load feedback.');
+    expect(host.textContent).not.toContain('No comments yet.');
+
+    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!;
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+    });
+
+    expect(host.textContent).toContain('recovered');
+    expect(host.textContent).not.toContain('Couldn’t load feedback.');
+  });
+
+  it('preserves existing feedback and offers a retry when a later background refresh fails, without losing content', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      if (!String(url).includes('/feedback')) return json({ state: 'not_applicable' });
+      calls += 1;
+      if (calls === 1) return json([entry('1', 'first comment')]);
+      if (calls === 2) return json({ error: 'boom' }, 500);
+      return json([entry('1', 'first comment')]);
+    }));
+    await render();
+    expect(host.textContent).toContain('first comment');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(host.textContent).toContain('first comment');
+    expect(host.textContent).toContain('Feedback may be out of date.');
+
+    const retry = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!;
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(host.textContent).not.toContain('Feedback may be out of date.');
+    expect(host.textContent).toContain('first comment');
+  });
+
+  it('does not mix feedback or drafts between Runs when switching while an earlier Run\'s request is still pending', async () => {
+    const run1Feed = deferredResponse();
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes('run-1') && target.includes('/feedback')) return run1Feed.promise;
+      if (target.includes('run-2') && target.includes('/feedback')) return json([entry('9', 'from run 2')]);
+      return json({ state: 'not_applicable' });
+    }));
+    await render('run-1');
+
+    const draftField = host.querySelector('textarea[aria-label="Add feedback"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(draftField, 'draft for run 1');
+      draftField.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await act(async () => root.render(<RunFeedbackPanel runId="run-2" />));
+    expect(host.textContent).toContain('from run 2');
+    expect((host.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement).value).toBe('');
+
+    // Run 1's slow fetch finally resolves after the switch — it must not clobber Run 2's list.
+    await act(async () => {
+      run1Feed.resolve(json([entry('1', 'from run 1')]));
+      await new Promise((resolve) => { setTimeout(resolve, 0); });
+    });
+    expect(host.textContent).toContain('from run 2');
+    expect(host.textContent).not.toContain('from run 1');
   });
 });
