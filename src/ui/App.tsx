@@ -15,7 +15,7 @@ import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { RunSubmissionModal } from './components/RunSubmissionModal.js';
-import { SettingsModal } from './components/SettingsModal.js';
+import { SettingsWorkspace } from './components/SettingsWorkspace.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
 import { THEME_OPTIONS, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
@@ -146,14 +146,23 @@ export function App() {
     ? selectedRun.preparation.worktreePath ?? selectedRepoPath
     : selectedRepoPath;
   const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
-  const inspectorRelevant = isInspectorRelevant(view, Boolean(selected) && !selectedRun);
-  const pageTitle = view === 'overview' && overviewRepositoryName
-    ? overviewRepositoryName
-    : selectedRun && view === 'operations'
-      ? selectedRun.spec.objective
-      : selected && view === 'terminal'
-        ? sessionLabel(selected)
-        : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
+  const inspectorRelevant = !showSettings && isInspectorRelevant(view, Boolean(selected) && !selectedRun);
+  const pageTitle = showSettings
+    ? 'Settings & access'
+    : view === 'overview' && overviewRepositoryName
+      ? overviewRepositoryName
+      : selectedRun && view === 'operations'
+        ? selectedRun.spec.objective
+        : selected && view === 'terminal'
+          ? sessionLabel(selected)
+          : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
+  // A14: Settings is an additional workspace-stage layer, not a `view` of
+  // its own (it isn't a sidebar destination) — so a given view's layer is
+  // active only while Settings isn't showing, and Settings' own layer is
+  // active exactly when it is. This keeps whatever `view` was open
+  // underneath fully intact (mounted, unchanged) while Settings is shown,
+  // so leaving it is a plain visibility flip, not a re-navigation.
+  const layerClass = (id: WorkspaceView) => (!showSettings && view === id ? 'workspace-layer is-active' : 'workspace-layer');
 
   // Ticket 10: an ended managed session stays in the rail ~1h, then moves to
   // History. `historyWitnessRef` is advanced synchronously during render
@@ -475,14 +484,21 @@ export function App() {
   };
 
   const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
-  const selectRun = (run: WorkRun) => { setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
+  const selectRun = (run: WorkRun) => { setShowSettings(false); setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
   // Ticket 47: Overview/Repository rows hand off to the same Run/Session
   // detail every other entry point (sidebar, command palette) already
   // opens — selectSession alone doesn't switch tabs, so pair it with the
   // view change the way CommandPalette's onSelectSession already does.
-  const selectSessionFromOverview = (session: Session) => { selectSession(session); setView('operations'); };
-  const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  const selectSessionFromOverview = (session: Session) => { setShowSettings(false); selectSession(session); setView('operations'); };
+  const openTerminal = (session: Session) => { setShowSettings(false); setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  // A14: these are the two navigation surfaces that stay reachable while the
+  // Settings workspace is open (AdminSidebar, always visible; CommandPalette,
+  // reachable via ⌘K) — every view layer that could otherwise call this is
+  // itself hidden behind `!showSettings` (App.tsx's workspace-stage), so
+  // leaving Settings here is exactly the "navigate elsewhere" case, never a
+  // stray reset of an in-progress view.
   const navigateToView = (nextView: WorkspaceView) => {
+    setShowSettings(false);
     if (nextView === 'overview') {
       setRepositoryNavigationRequest((current) => ({ repositoryId: null, sequence: current.sequence + 1 }));
     }
@@ -731,7 +747,7 @@ export function App() {
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
-          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — summary model default and API key" type="button">⚙</button>
+          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — workspace configuration and access management" type="button">⚙</button>
           <button aria-label="Install hooks" className="button compact-button hooks-button" onClick={() => void installHooks()} title="Install hooks" type="button"><span aria-hidden="true">⌁</span><strong>Install hooks</strong></button>
           <button className="button compact-button top-new-run-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
           <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button"><span>Launch agent</span> <kbd>⌘L</kbd></button>
@@ -742,14 +758,15 @@ export function App() {
 
       <div className="app-body">
         <main className="workspace-stage">
-          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
-          <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
-          {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
-          <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
-          <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
-          <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
-          <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
+          <div className={layerClass('overview')}><OverviewView onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={layerClass('tasks')}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
+          <div className={layerClass('operations')}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          {terminalVisited && <div className={layerClass('terminal')}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
+          <div className={layerClass('changes')}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
+          <div className={layerClass('grid')}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
+          <div className={layerClass('signals')}><SignalsView events={events} /></div>
+          <div className={layerClass('history')}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
+          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}><SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} /></div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button
@@ -772,7 +789,7 @@ export function App() {
         <span>AgentDeck v0.1.0</span>
         <span>▣ {selectedRun ? selectedRun.spec.repository.name : selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
         {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
-        {(['operations', 'terminal', 'signals'] as WorkspaceView[]).includes(view) && <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>}
+        {!showSettings && (['operations', 'terminal', 'signals'] as WorkspaceView[]).includes(view) && <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>}
         <Clock />
         <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
@@ -783,22 +800,22 @@ export function App() {
         onClose={() => setPaletteOpen(false)}
         onLaunch={() => setShowLaunch(true)}
         onSelectRepo={(repo) => {
+          setShowSettings(false);
           setSelectedId(null);
           setSelectedRunId(null);
           setRepositoryNavigationRequest((current) => ({ repositoryId: repo.id, sequence: current.sequence + 1 }));
           setView('overview');
         }}
         onSelectRun={selectRun}
-        onSelectSession={(session) => { selectSession(session); setView('operations'); }}
+        onSelectSession={(session) => { setShowSettings(false); selectSession(session); setView('operations'); }}
         onView={navigateToView}
         open={paletteOpen}
         repos={repos}
         runs={runs}
         sessions={sessions}
       />
-      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
+      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { setShowSettings(false); upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
       {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
-      {showSettings && <SettingsModal appearanceControl={<ThemeControl />} onClose={() => setShowSettings(false)} repos={repos} />}
     </div>
   );
 }

@@ -1,17 +1,21 @@
 // @vitest-environment jsdom
 // A14 (parent #37): the Settings workspace's General/Profiles/
-// Collaborators tabs. Every panel stays mounted across a tab switch (only
-// `hidden` toggles), so this focuses on what that buys: an unsaved draft, a
-// freshly issued one-time invitation code, and a just-created Profile all
-// survive — or become visible — across tabs, exactly as the redesign slice
-// requires. Per-panel mutation flows (create Profile, invite collaborator,
-// revoke a device, …) are already covered directly in ProfilesPanel.test.tsx
-// and CollaboratorsPanel.test.tsx; this file only exercises what changes
-// once those panels sit behind shared tabs.
+// Collaborators tabs, rendered as a page in the Admin shell's main content
+// area rather than a modal. Every panel stays mounted across a tab switch
+// (only `hidden` toggles), so this focuses on what that buys: an unsaved
+// draft, a freshly issued one-time invitation code, and a just-created
+// Profile all survive — or become visible — across tabs, exactly as the
+// redesign slice requires. It also covers the page-vs-modal shape itself
+// (no backdrop/dialog role, a working "Back to workspace" action) and the
+// Profiles tab's collapsed "New profile" toggle. Per-panel mutation flows
+// (create Profile, invite collaborator, revoke a device, …) are already
+// covered directly in ProfilesPanel.test.tsx and CollaboratorsPanel.test.tsx;
+// this file only exercises what changes once those panels sit behind shared
+// tabs in one page.
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { SettingsModal } from './SettingsModal.js';
+import { SettingsWorkspace } from './SettingsWorkspace.js';
 
 beforeAll(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -26,12 +30,12 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-async function mount() {
+async function mount(onBack: () => void = () => {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
   await act(async () => {
     root = createRoot(container!);
-    root.render(<SettingsModal onClose={() => {}} repos={[]} />);
+    root.render(<SettingsWorkspace onBack={onBack} repos={[]} />);
     await Promise.resolve();
   });
   return container;
@@ -48,7 +52,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-/** Every SettingsModal test needs these four GETs satisfied at minimum; mutation-specific routes are layered on by each test. */
+/** Every SettingsWorkspace test needs these four GETs satisfied at minimum; mutation-specific routes are layered on by each test. */
 function baseFetchMock(overrides: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined = () => undefined) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -66,7 +70,33 @@ function tabButton(host: HTMLElement, label: string) {
   return Array.from(host.querySelectorAll('[role="tab"]')).find((b) => b.textContent === label) as HTMLButtonElement;
 }
 
-describe('SettingsModal', () => {
+/** A14: the "New profile" toggle on the Profiles tab — its `aria-expanded` state makes it findable whether it currently reads "+ New profile" or "Close new profile form". */
+function newProfileToggle(host: HTMLElement) {
+  return host.querySelector('button[aria-expanded]') as HTMLButtonElement;
+}
+
+function openNewProfileForm(host: HTMLElement) {
+  newProfileToggle(host).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
+describe('SettingsWorkspace', () => {
+  it('A14: renders as a page in the main content area, not a modal — no backdrop/dialog role, and a working "Back to workspace" action', async () => {
+    vi.stubGlobal('fetch', baseFetchMock());
+    let backCount = 0;
+    const host = await mount(() => { backCount += 1; });
+
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(host.querySelector('[aria-modal]')).toBeNull();
+    expect(host.querySelector('.launch-backdrop')).toBeNull();
+    expect(host.querySelector('.launch-dialog')).toBeNull();
+    expect(Array.from(host.querySelectorAll('button')).some((b) => b.textContent === 'Close')).toBe(false);
+
+    const backButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === '‹ Back to workspace')!;
+    expect(backButton).not.toBeUndefined();
+    await act(async () => { backButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(backCount).toBe(1);
+  });
+
   it('switches between General, Profiles, and Collaborators tabs, hiding the inactive panels', async () => {
     vi.stubGlobal('fetch', baseFetchMock());
     const host = await mount();
@@ -104,19 +134,25 @@ describe('SettingsModal', () => {
     expect(keyInputAfter.value).toBe('sk-draft-value');
   });
 
-  it('preserves an unsubmitted new-Profile draft on Profiles across a tab switch', async () => {
+  it('A14: preserves an unsubmitted new-Profile draft on Profiles across a tab switch, even while the "New profile" form is collapsed', async () => {
     vi.stubGlobal('fetch', baseFetchMock());
     const host = await mount();
 
     await act(async () => { tabButton(host, 'Profiles').click(); });
+    await act(async () => { openNewProfileForm(host); });
     const nameInput = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
     await act(async () => { setInputValue(nameInput, 'Draft profile name'); });
     expect(nameInput.value).toBe('Draft profile name');
+
+    // collapse the "New profile" form (still on the Profiles tab) — the draft must not be lost
+    await act(async () => { openNewProfileForm(host); });
+    expect(nameInput.closest('[hidden]')).not.toBeNull();
 
     await act(async () => { tabButton(host, 'General').click(); });
     await act(async () => { tabButton(host, 'Profiles').click(); });
 
     const nameInputAfter = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
+    expect(nameInputAfter.closest('[hidden]')).not.toBeNull(); // still collapsed, not reopened by the tab switch
     expect(nameInputAfter.value).toBe('Draft profile name');
   });
 
@@ -165,6 +201,7 @@ describe('SettingsModal', () => {
     const host = await mount();
 
     await act(async () => { tabButton(host, 'Profiles').click(); });
+    await act(async () => { openNewProfileForm(host); });
     const nameInput = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
     await act(async () => { setInputValue(nameInput, 'Standard Codex run'); });
     const createButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Create Profile')!;
@@ -199,7 +236,7 @@ describe('SettingsModal', () => {
       container = document.createElement('div');
       document.body.appendChild(container);
       root = createRoot(container);
-      root.render(<SettingsModal appearanceControl={<button type="button">Appearance control</button>} onClose={() => {}} repos={[]} />);
+      root.render(<SettingsWorkspace appearanceControl={<button type="button">Appearance control</button>} onBack={() => {}} repos={[]} />);
       await Promise.resolve();
     });
     expect(container!.textContent).toContain('Appearance control');

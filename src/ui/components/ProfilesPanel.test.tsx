@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // A14 (parent #37): browser UI test for the Settings workspace's
 // Profiles tab — rendered through a thin harness that calls useAccessData()
-// exactly like SettingsModal does, same pattern CollaboratorsPanel.test.tsx
+// exactly like SettingsWorkspace does, same pattern CollaboratorsPanel.test.tsx
 // already used before the split. Exercises Profile browsing, creation, and
 // the create-only replacement flow (ticket 55).
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -24,7 +24,7 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/** Mirrors how SettingsModal actually wires ProfilesPanel — access lives one level up. */
+/** Mirrors how SettingsWorkspace actually wires ProfilesPanel — access lives one level up. */
 function Harness() {
   const access = useAccessData();
   return <ProfilesPanel access={access} />;
@@ -52,11 +52,61 @@ function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+/** A14 redesign follow-up: creation sits behind a collapsed "New profile" toggle, so every test that needs the create form open must click it first. */
+function openNewProfileForm(host: HTMLElement) {
+  const toggle = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === '+ New profile')!;
+  toggle.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
 describe('ProfilesPanel', () => {
   it('shows "No Profiles yet." when the list is empty', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
     const host = await mount();
     expect(host.textContent).toContain('No Profiles yet.');
+  });
+
+  it('A14: puts creation behind a collapsed "New profile" action, after the existing-Profiles list', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/collaborators') return jsonResponse([]);
+      if (url === '/api/profiles') return jsonResponse([{
+        id: 'profile-1', name: 'Standard Codex run', runtimePreference: ['codex'],
+        budget: { maxWallClockMs: 3_600_000 }, verificationIntent: { required: false, commands: [] },
+        requestedDeliveryResult: 'local-commit', createdAt: '2026-01-01T00:00:00.000Z',
+      }]);
+      return jsonResponse([]);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = await mount();
+    const nameInputHidden = () => Boolean((host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement).closest('[hidden]'));
+    expect(nameInputHidden()).toBe(true); // collapsed by default
+    const toggle = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === '+ New profile')!;
+
+    // the existing Profile's row and the "New profile" toggle both exist — the row comes first in document order
+    const profileRow = Array.from(host.querySelectorAll('li')).find((li) => li.textContent?.includes('Standard Codex run'))!;
+    expect(profileRow.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(nameInputHidden()).toBe(false);
+  });
+
+  it('A14: preserves an unsubmitted "New profile" draft when the form is collapsed and reopened', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
+    const host = await mount();
+
+    await act(async () => { openNewProfileForm(host); });
+    const nameInput = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
+    await act(async () => { setInputValue(nameInput, 'Draft profile name'); });
+
+    const toggle = Array.from(host.querySelectorAll('button')).find((b) => b.textContent?.includes('New profile') || b.textContent?.includes('Close new profile form'))!;
+    await act(async () => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })); }); // collapse
+    expect(nameInput.closest('[hidden]')).not.toBeNull(); // stays mounted, just hidden
+    await act(async () => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })); }); // reopen
+
+    const nameInputAfter = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
+    expect(nameInputAfter.closest('[hidden]')).toBeNull();
+    expect(nameInputAfter.value).toBe('Draft profile name');
   });
 
   it('ticket 12 AC1: creates a Profile through the create form', async () => {
@@ -76,6 +126,7 @@ describe('ProfilesPanel', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const host = await mount();
+    await act(async () => { openNewProfileForm(host); });
     const nameInput = host.querySelector('input[aria-label="Profile name"]') as HTMLInputElement;
     await act(async () => { setInputValue(nameInput, 'Standard Codex run'); });
     const createButton = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Create Profile')!;

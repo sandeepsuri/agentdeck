@@ -1,6 +1,6 @@
 // Ticket 11: client side of named collaborator device credentials.
 // Admin actions (invite/list/grant/revoke) go through the desktop-only
-// SettingsModal's Collaborators and Profiles tabs (CollaboratorsPanel.tsx,
+// SettingsWorkspace's Collaborators and Profiles tabs (CollaboratorsPanel.tsx,
 // ProfilesPanel.tsx); exchangeInvitationCode is the one collaborator-facing
 // action, reachable from a not-yet-authenticated remote connection's
 // connection gate (App.tsx) — see collaborator-routes.ts's
@@ -59,7 +59,7 @@ export async function updateGrants(
   return responseJson(response);
 }
 
-/** Ticket 12 AC1: the admin's Profile roster (SettingsModal → ProfilesPanel), never grant-filtered here — that filtering is for a collaborator device's own GET /api/profiles, not the local admin. */
+/** Ticket 12 AC1: the admin's Profile roster (SettingsWorkspace → ProfilesPanel), never grant-filtered here — that filtering is for a collaborator device's own GET /api/profiles, not the local admin. */
 export async function listProfiles(): Promise<Profile[]> {
   return responseJsonArray(await apiFetch('/api/profiles'));
 }

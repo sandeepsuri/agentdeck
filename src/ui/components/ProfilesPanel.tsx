@@ -350,6 +350,15 @@ export function ProfilesPanel({ access }: { access: AccessData }) {
   const [cloningFromId, setCloningFromId] = useState<string | null>(null);
   const [cloneCreated, setCloneCreated] = useState<{ source: Profile; replacement: Profile } | null>(null);
 
+  /**
+   * A14 redesign follow-up: existing Profiles read first, with creation
+   * tucked behind an explicit "New profile" action rather than sitting open
+   * above the roster. `CreateProfileForm` stays mounted the whole time — only
+   * `hidden` toggles — so a draft typed before collapsing survives, exactly
+   * like a tab switch elsewhere in this Settings workspace.
+   */
+  const [creatingOpen, setCreatingOpen] = useState(false);
+
   return (
     <div className="collaborators-panel">
       <p className="field-hint-block">
@@ -357,8 +366,6 @@ export function ProfilesPanel({ access }: { access: AccessData }) {
         and verification. A collaborator can only launch a Run against a Profile granted to them; the Work
         Engine derives the Run entirely from the Profile, never from anything the collaborator submits.
       </p>
-
-      <CreateProfileForm onCreated={(profile) => setProfiles((current) => [...current, profile])} />
 
       {!loading && profiles.length === 0 && <div className="rail-empty">No Profiles yet.</div>}
       {profiles.length > 0 && (
@@ -428,6 +435,15 @@ export function ProfilesPanel({ access }: { access: AccessData }) {
           ))}
         </ul>
       )}
+
+      <div className="collaborators-section-header">
+        <button aria-expanded={creatingOpen} className="button" onClick={() => setCreatingOpen((current) => !current)} type="button">
+          {creatingOpen ? 'Close new profile form' : '+ New profile'}
+        </button>
+      </div>
+      <div hidden={!creatingOpen}>
+        <CreateProfileForm onCreated={(profile) => setProfiles((current) => [...current, profile])} />
+      </div>
     </div>
   );
 }

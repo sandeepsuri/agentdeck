@@ -12,7 +12,7 @@ const initials = (name: string) => (
 /**
  * Ticket 11 AC1/AC2/AC5 / ticket 12 AC1 / A14 (parent #37): the
  * Collaborators tab of the Settings workspace — desktop-only (rendered
- * inside SettingsModal, which only ever mounts on a local connection, see
+ * inside SettingsWorkspace, which only ever mounts on a local connection, see
  * App.tsx). Creates named invitations (granting Repositories and
  * admin-approved Profiles at invite time), shows a freshly issued one-time
  * code exactly once, and lists every collaborator's devices with a

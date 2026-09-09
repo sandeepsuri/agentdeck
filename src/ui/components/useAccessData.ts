@@ -7,7 +7,7 @@ import type { Profile } from '../../work-engine/types.js';
  * CollaboratorsPanel) both read and cross-reference the same two lists —
  * a Profile grant checkbox needs the Profile roster, a Profile's "who's
  * granted this" reassignment needs the Collaborator roster — so this lives
- * one level up in SettingsModal rather than inside either panel. Because
+ * one level up in SettingsWorkspace rather than inside either panel. Because
  * both panels stay mounted (only `hidden`) across a tab switch, lifting the
  * fetch here also means creating a Profile in one tab is visible in the
  * other's grant checkboxes without a second fetch.

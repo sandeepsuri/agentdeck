@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Ticket 11 AC8 / A14 (parent #37): browser UI test for the Settings
 // workspace's Collaborators tab — rendered through a thin harness that calls
-// useAccessData() exactly like SettingsModal does. Exercises invitation
+// useAccessData() exactly like SettingsWorkspace does. Exercises invitation
 // issuance (AC1) and device revocation (AC5) through the real component,
 // not just collaborators.ts's fetch wrappers (already covered directly in
 // collaborators.test.ts). Profile-browsing/creation/replacement moved to
@@ -27,7 +27,7 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/** Mirrors how SettingsModal actually wires CollaboratorsPanel — access lives one level up. */
+/** Mirrors how SettingsWorkspace actually wires CollaboratorsPanel — access lives one level up. */
 function Harness({ repos = [] }: { repos?: Repo[] }) {
   const access = useAccessData();
   return <CollaboratorsPanel access={access} repos={repos} />;
