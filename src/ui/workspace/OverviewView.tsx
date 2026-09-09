@@ -32,6 +32,7 @@ export interface Props {
   requestedNavigationSequence?: number;
   onSelectRun: (run: WorkRun) => void;
   onSelectSession: (session: Session) => void;
+  onRepositoryContextChange?: (name: string | null) => void;
 }
 
 function repoOf(repos: readonly Repo[], id: string | undefined): Repo | undefined {
@@ -165,7 +166,7 @@ function RepositoryPage({ repo, runs, sessions, selectedRunId, selectedId, onSel
   );
 }
 
-export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, requestedRepositoryId = null, requestedNavigationSequence = 0, onSelectRun, onSelectSession }: Props) {
+export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, requestedRepositoryId = null, requestedNavigationSequence = 0, onSelectRun, onSelectSession, onRepositoryContextChange }: Props) {
   // Opens on the Repository behind whatever is already selected (a run/session
   // reached via deep link, the sidebar, or the command palette) rather than
   // an arbitrary first entry — but only as a starting point: once a person
@@ -181,13 +182,17 @@ export function OverviewView({ repos, runs, sessions, selectedRunId = null, sele
   });
 
   useEffect(() => {
-    if (requestedRepositoryId) setActiveRepoId(requestedRepositoryId);
+    if (requestedNavigationSequence > 0) setActiveRepoId(requestedRepositoryId);
   }, [requestedRepositoryId, requestedNavigationSequence]);
 
   // Re-resolved every render (never trusted from state directly) so a
   // Repository that stops being discoverable — an unwatched path, a revoked
   // scope — falls back to the list instead of rendering stale content.
   const activeRepo = activeRepoId ? repoOf(repos, activeRepoId) : undefined;
+
+  useEffect(() => {
+    onRepositoryContextChange?.(activeRepo?.name ?? null);
+  }, [activeRepo?.name, onRepositoryContextChange]);
 
   if (activeRepo) {
     return (

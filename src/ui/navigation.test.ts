@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseInitialNavigation } from './navigation.js';
+import { isInspectorRelevant, parseInitialNavigation } from './navigation.js';
 
 describe('parseInitialNavigation', () => {
   it('accepts a session and known workspace view', () => {
@@ -18,5 +18,17 @@ describe('parseInitialNavigation', () => {
       runId: 'run-1',
       view: 'operations',
     });
+  });
+});
+
+describe('isInspectorRelevant', () => {
+  it('only shows a selected Session inspector in contextual workspaces', () => {
+    expect(isInspectorRelevant('operations', true)).toBe(true);
+    expect(isInspectorRelevant('terminal', true)).toBe(true);
+    expect(isInspectorRelevant('changes', true)).toBe(true);
+    for (const view of ['overview', 'tasks', 'grid', 'signals', 'history'] as const) {
+      expect(isInspectorRelevant(view, true)).toBe(false);
+    }
+    expect(isInspectorRelevant('terminal', false)).toBe(false);
   });
 });

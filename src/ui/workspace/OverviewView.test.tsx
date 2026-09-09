@@ -218,6 +218,24 @@ describe('OverviewView restoring selection', () => {
     expect(host.querySelector('.view-heading h1')?.textContent).toBe('web-client');
   });
 
+  it('returns to the global Overview when navigation explicitly requests its root', async () => {
+    const host = await mount({ repos: [agentdeck, webClient], requestedRepositoryId: 'repo-2', requestedNavigationSequence: 1 });
+    expect(host.querySelector('h1')?.textContent).toBe('web-client');
+    await act(async () => root!.render(
+      <OverviewView
+        onSelectRun={() => undefined}
+        onSelectSession={() => undefined}
+        repos={[agentdeck, webClient]}
+        requestedRepositoryId={null}
+        requestedNavigationSequence={2}
+        runs={[]}
+        sessions={[]}
+      />,
+    ));
+    expect(host.querySelector('h1')?.textContent).toBe('Overview');
+    expect(host.querySelectorAll('[data-repo-id]')).toHaveLength(2);
+  });
+
   it('opens on the Repository behind an already-selected Run, e.g. from a deep link', async () => {
     const host = await mount({
       repos: [agentdeck, webClient],

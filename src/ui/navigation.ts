@@ -21,3 +21,8 @@ export function parseInitialNavigation(search: string): InitialNavigation {
     ...(view ? { view } : {}),
   };
 }
+
+/** A Session inspector belongs only beside views where that selected Session is active context. */
+export function isInspectorRelevant(view: WorkspaceView, hasSelectedSession: boolean): boolean {
+  return hasSelectedSession && (view === 'operations' || view === 'terminal' || view === 'changes');
+}

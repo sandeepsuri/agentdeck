@@ -19,6 +19,7 @@ import { SettingsModal } from './components/SettingsModal.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
 import { THEME_OPTIONS, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
+import { AdminSidebar } from './workspace/AdminSidebar.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
 import { GridView } from './workspace/GridView.js';
 import { HistoryView } from './workspace/HistoryView.js';
@@ -28,12 +29,11 @@ import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
 import { OverviewView } from './workspace/OverviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
-import { SessionSidebar } from './workspace/SessionSidebar.js';
 import { SignalsView } from './workspace/SignalsView.js';
 import { TasksView } from './workspace/TasksView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
-import { parseInitialNavigation } from './navigation.js';
+import { isInspectorRelevant, parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
 // Owns its own 1 Hz interval so the footer clock ticks without re-rendering
@@ -89,6 +89,7 @@ export function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [repositoryNavigationRequest, setRepositoryNavigationRequest] = useState<{ repositoryId: string | null; sequence: number }>({ repositoryId: null, sequence: 0 });
+  const [overviewRepositoryName, setOverviewRepositoryName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
@@ -145,6 +146,14 @@ export function App() {
     ? selectedRun.preparation.worktreePath ?? selectedRepoPath
     : selectedRepoPath;
   const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
+  const inspectorRelevant = isInspectorRelevant(view, Boolean(selected) && !selectedRun);
+  const pageTitle = view === 'overview' && overviewRepositoryName
+    ? overviewRepositoryName
+    : selectedRun && view === 'operations'
+      ? selectedRun.spec.objective
+      : selected && view === 'terminal'
+        ? sessionLabel(selected)
+        : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
 
   // Ticket 10: an ended managed session stays in the rail ~1h, then moves to
   // History. `historyWitnessRef` is advanced synchronously during render
@@ -355,6 +364,8 @@ export function App() {
         if (session) {
           setSelectedRunId(null);
           setSelectedId(session.id);
+          setView('terminal');
+          setTerminalVisited(true);
         }
       }
       if (event.key === 'Escape') setPaletteOpen(false);
@@ -471,6 +482,17 @@ export function App() {
   // view change the way CommandPalette's onSelectSession already does.
   const selectSessionFromOverview = (session: Session) => { selectSession(session); setView('operations'); };
   const openTerminal = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  const navigateToView = (nextView: WorkspaceView) => {
+    if (nextView === 'overview') {
+      setRepositoryNavigationRequest((current) => ({ repositoryId: null, sequence: current.sequence + 1 }));
+    }
+    if (nextView === 'terminal') {
+      setSelectedRunId(null);
+      setSelectedId((current) => current && sessions.some((session) => session.id === current) ? current : railSessions[0]?.id ?? null);
+      setTerminalVisited(true);
+    }
+    setView(nextView);
+  };
 
   const prepareRun = async (run: WorkRun) => {
     const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/prepare`, { method: 'POST' });
@@ -700,37 +722,36 @@ export function App() {
 
   return (
     <div className="agentdeck-shell">
+      <div className="admin-shell-main">
+        <AdminSidebar activeView={view} changeCount={changeCount} historyCount={historySessions.length} onLaunch={() => setShowLaunch(true)} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} onSubmitRun={() => setShowRunSubmission(true)} onView={navigateToView} runs={runs} sessions={railSessions} />
+        <div className="admin-shell-content">
       <header className="app-topbar">
-        <div className="app-brand"><span className="brand-mark"><i /></span><strong>AgentDeck</strong></div>
-        <nav className="workspace-tabs" aria-label="Workspace views">
-          {WORKSPACE_VIEWS.map((item) => <button className={view === item.id ? 'is-active' : ''} key={item.id} onClick={() => setView(item.id)} type="button">{item.label}{item.id === 'changes' && changeCount > 0 && <span>{changeCount}</span>}{item.id === 'history' && historySessions.length > 0 && <span>{historySessions.length}</span>}</button>)}
-        </nav>
+        <div className="topbar-context"><span>Workspace</span><strong title={pageTitle}>{pageTitle}</strong></div>
         <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Search repositories, runs, sessions, or actions…</strong><kbd>⌘K</kbd></button>
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
           <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — summary model default and API key" type="button">⚙</button>
-          <button className="button compact-button" onClick={() => void installHooks()} type="button">Install hooks</button>
-          <button className="button compact-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
-          <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button">Launch agent <kbd>⌘L</kbd></button>
+          <button aria-label="Install hooks" className="button compact-button hooks-button" onClick={() => void installHooks()} title="Install hooks" type="button"><span aria-hidden="true">⌁</span><strong>Install hooks</strong></button>
+          <button className="button compact-button top-new-run-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
+          <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button"><span>Launch agent</span> <kbd>⌘L</kbd></button>
         </div>
       </header>
 
       {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
 
       <div className="app-body">
-        <SessionSidebar discoveryStatus={discoveryStatus} onDeleteRun={(run) => void deleteRun(run)} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} onSelectRun={selectRun} onSubmitRun={() => setShowRunSubmission(true)} repos={repos} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
-          {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
           <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
           <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
         </main>
-        <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`}>
+        <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button
             aria-controls="agentdeck-inspector-panel"
             aria-expanded={!inspectorCollapsed}
@@ -741,7 +762,7 @@ export function App() {
             type="button"
           >{inspectorCollapsed ? '‹' : '›'}</button>
           <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
-            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selectedRun ? null : selected} view={view} />
+            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={navigateToView} selected={selectedRun ? null : selected} view={view} />
           </div>
         </div>
       </div>
@@ -751,10 +772,12 @@ export function App() {
         <span>AgentDeck v0.1.0</span>
         <span>▣ {selectedRun ? selectedRun.spec.repository.name : selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
         {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
-        <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>
+        {(['operations', 'terminal', 'signals'] as WorkspaceView[]).includes(view) && <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>}
         <Clock />
         <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
+        </div>
+      </div>
 
       <CommandPalette
         onClose={() => setPaletteOpen(false)}
@@ -767,7 +790,7 @@ export function App() {
         }}
         onSelectRun={selectRun}
         onSelectSession={(session) => { selectSession(session); setView('operations'); }}
-        onView={setView}
+        onView={navigateToView}
         open={paletteOpen}
         repos={repos}
         runs={runs}

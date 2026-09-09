@@ -7,9 +7,10 @@ export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'operations', label: 'Operations' },
-  { id: 'terminal', label: 'Session' },
+  { id: 'terminal', label: 'Sessions' },
   { id: 'changes', label: 'Changes' },
   { id: 'grid', label: 'Grid' },
+  { id: 'signals', label: 'Signals' },
   { id: 'history', label: 'History' },
 ];
 

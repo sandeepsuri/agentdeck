@@ -105,4 +105,19 @@ describe('admin shared session chat', () => {
     expect(host.textContent).not.toContain('Private to session one');
     expect(host.querySelector('textarea')?.value).toBe('');
   });
+
+  it('keeps the Session inventory selectable inside the Session workspace', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => json(String(url).includes('/capabilities') ? { send: 'managed' } : [])));
+    const other = { ...session, id: 'session-2', name: 'Second session' };
+    const onSelect = vi.fn();
+    host = document.createElement('div'); document.body.append(host);
+    root = createRoot(host);
+    await act(async () => root.render(<TerminalWorkspace session={session} sessions={[session, other]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} onSelect={onSelect} />));
+    const picker = host.querySelector('[aria-label="Selected Session"]') as HTMLSelectElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(picker, other.id);
+      picker.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'session-2' }));
+  });
 });

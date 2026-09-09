@@ -12,9 +12,10 @@ interface Props {
   wsReady: boolean;
   onError: (message: string) => void;
   onFocusExternal: (session: Session) => void;
+  onSelect?: (session: Session) => void;
 }
 
-export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal }: Props) {
+export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect }: Props) {
   const [view, setView] = useState<'chat' | 'terminal'>('chat');
   const [mountedIds, setMountedIds] = useState<string[]>([]);
   useEffect(() => { setView('chat'); }, [session?.id]);
@@ -35,6 +36,15 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
   return (
     <section className="terminal-workspace session-workspace">
       <div className="session-view-tabs" role="group" aria-label="Session view">
+        <label className="session-picker">
+          <span>Session</span>
+          <select aria-label="Selected Session" onChange={(event) => {
+            const next = sessions.find((item) => item.id === event.target.value);
+            if (next) onSelect?.(next);
+          }} value={session.id}>
+            {sessions.map((item) => <option key={item.id} value={item.id}>{sessionLabel(item)}</option>)}
+          </select>
+        </label>
         <button className="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')} type="button">Chat</button>
         <button className="button" aria-pressed={view === 'terminal'} onClick={() => setView('terminal')} type="button">Terminal</button>
       </div>
