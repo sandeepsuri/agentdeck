@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { derivePreviewCandidates } from '../../work-engine/run-preview.js';
 import { deriveRunResult } from '../../work-engine/run-result.js';
 import { defaultPublicationTarget } from '../../work-engine/publication.js';
 import type { RunCompanionSessionRef } from '../../work-engine/run-companion-session.js';
@@ -204,14 +205,17 @@ function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: 
  * it). Renders once the Attempt has settled, whatever the outcome —
  * AC7's honest non-success result gets the same treatment as a verified one.
  */
-function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
+function RunResultPanel({ run, onApply, onReverify, onViewChanges, onPreview }: {
   run: WorkRun;
   onApply?: (run: WorkRun) => void;
   onReverify?: (run: WorkRun) => void;
   onViewChanges?: (run: WorkRun) => void;
+  /** Ticket 70 (B10): requests a preview session for one candidate file (App.tsx's previewRun → POST /api/runs/:id/preview, then opens the returned URL in a new tab — never an iframe). Absent hides every preview control entirely. */
+  onPreview?: (run: WorkRun, path: string) => void;
 }) {
   const result = deriveRunResult(run);
   if (!result) return null;
+  const previewCandidates = derivePreviewCandidates(result);
   // A finished Run that asked to land in the Repository but did not is the
   // single most important thing on this screen: the work exists, it is safe on
   // its own branch, and it is waiting on the operator. Buried in a definition
@@ -296,6 +300,11 @@ function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
         {result.changedFiles.length > 0 && onViewChanges && <button className="button" onClick={() => onViewChanges(run)} type="button">View changes</button>}
         {run.status === 'failed_verification' && onReverify && <button className="button button-primary" onClick={() => onReverify(run)} type="button">{run.verificationPolicy.state === 'missing' ? 'Recover result' : 'Retry verification'}</button>}
         {result.commit && result.delivery?.outcome !== 'applied' && onApply && <button className="button button-primary" onClick={() => onApply(run)} type="button">Apply to repository</button>}
+        {onPreview && previewCandidates.map((candidate) => (
+          <button className="button" key={candidate.path} onClick={() => onPreview(run, candidate.path)} type="button">
+            Preview {candidate.path}
+          </button>
+        ))}
       </div>
     </section>
   );
@@ -357,6 +366,8 @@ interface Props {
   onApply?: (run: WorkRun) => void;
   onReverify?: (run: WorkRun) => void;
   onViewChanges?: (run: WorkRun) => void;
+  /** Ticket 70 (B10): requests a preview session for one candidate file (App.tsx's previewRun → POST /api/runs/:id/preview, then opens the returned URL in a new tab). Absent hides every preview control entirely. */
+  onPreview?: (run: WorkRun, path: string) => void;
   /** Ticket 07: routes an operator decision for run.pendingAttention through the one Work Engine policy path (App.tsx's resolveRunAttention → POST /api/runs/:id/attention/:attentionId/{approve,deny,input}). */
   onResolveAttention?: (run: WorkRun, attentionId: string, decision: AttentionDecisionInput) => void;
   /** Ticket 13: the admin's explicit publish authorization (App.tsx's publishRun → POST /api/runs/:id/publish). Absent means the action is not offered at all. */
@@ -372,7 +383,7 @@ interface Props {
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onRetryAttempt, onPause, onResume, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
+  run, onPrepare, onStart, onRetryAttempt, onPause, onResume, onApply, onReverify, onViewChanges, onPreview, onResolveAttention, onPublish, onDelete,
   structuredAttemptsEnabled = false, companionSessions = [], onOpenCompanionSession,
 }: Props) {
   const { preparation, envelope, attempt } = run;
@@ -611,7 +622,7 @@ export function RunWorkspace({
           )}
         </section>
       )}
-      <RunResultPanel onApply={onApply} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />
+      <RunResultPanel onApply={onApply} onPreview={onPreview} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />
       {/*
        * Ticket 13: publication is independent of the structured-attempts
        * experimental panel above — it depends only on run.status and a

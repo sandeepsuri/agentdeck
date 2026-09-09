@@ -9,11 +9,12 @@ import {
 import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
 import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { Store } from '../store/index.js';
+import { buildAttemptEventEnvelope } from '../work-engine/durable-events.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
 import type { Profile, RunActor, WorkSpec } from '../work-engine/types.js';
 import type { VerificationGateRunner } from '../work-engine/verification.js';
-import { registerWorkRoutes, type WorkRoutesDeps } from './work-routes.js';
+import { registerWorkRoutes, type RunPreviewStarter, type WorkRoutesDeps } from './work-routes.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
 const stores: Store[] = [];
@@ -1015,5 +1016,123 @@ describe('Run feedback (B07)', () => {
     apps.push(revokedApp);
     const revokedListed = await revokedApp.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
     expect(revokedListed.statusCode).toBe(404);
+  });
+});
+
+// Ticket 70 (B10, docs/specs/run-result-application-previews.md): the
+// route only ever validates the request and hands it to a RunPreviewStarter
+// — the real listener (a real http.createServer, real files on disk) is
+// exercised on its own in server/run-preview-server.test.ts. Here, a fake
+// is enough to prove the route's own validation and grant-scoping.
+describe('run preview route (ticket 70, B10)', () => {
+  function fakePreviewServer(): RunPreviewStarter & { calls: { runId: string; worktreePath: string; entryPath: string }[] } {
+    const calls: { runId: string; worktreePath: string; entryPath: string }[] = [];
+    return {
+      calls,
+      async start(input) {
+        calls.push(input);
+        return { previewUrl: `http://127.0.0.1:9999/tok/${input.entryPath}`, expiresAt: '2026-01-01T00:00:00.000Z' };
+      },
+    };
+  }
+
+  async function settledRunWithHtml(app: ReturnType<typeof Fastify>, repoPath: string, store: Store) {
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    store.startAttempt({ id: 'attempt-1', runId: run.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: run.id, attemptId: 'attempt-1',
+      event: { kind: 'worktree-changes', sequence: 0, at: new Date().toISOString(), changedFiles: ['dist/index.html', 'src/index.ts'] },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: run.id, attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'unverified', repairAttempts: 0,
+      },
+    }));
+    return (await app.inject({ method: 'GET', url: `/api/runs/${run.id}` })).json();
+  }
+
+  it('starts a preview session for a valid candidate path, scoped to the Run\'s own worktree', async () => {
+    const previewServer = fakePreviewServer();
+    const { app, repoPath, store } = makeApp(undefined, { runPreviewServer: previewServer });
+    const run = await settledRunWithHtml(app, repoPath, store);
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: { path: 'dist/index.html' } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ previewUrl: 'http://127.0.0.1:9999/tok/dist/index.html', expiresAt: '2026-01-01T00:00:00.000Z' });
+    expect(previewServer.calls).toEqual([{ runId: run.id, worktreePath: run.preparation.worktreePath, entryPath: 'dist/index.html' }]);
+  });
+
+  it('404s an unknown Run', async () => {
+    const { app } = makeApp(undefined, { runPreviewServer: fakePreviewServer() });
+    const response = await app.inject({ method: 'POST', url: '/api/runs/does-not-exist/preview', payload: { path: 'dist/index.html' } });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('400s a missing path', async () => {
+    const previewServer = fakePreviewServer();
+    const { app, repoPath, store } = makeApp(undefined, { runPreviewServer: previewServer });
+    const run = await settledRunWithHtml(app, repoPath, store);
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: {} });
+
+    expect(response.statusCode).toBe(400);
+    expect(previewServer.calls).toHaveLength(0);
+  });
+
+  it('400s a path that is not one of this Run\'s own previewable files', async () => {
+    const previewServer = fakePreviewServer();
+    const { app, repoPath, store } = makeApp(undefined, { runPreviewServer: previewServer });
+    const run = await settledRunWithHtml(app, repoPath, store);
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: { path: '../../etc/passwd' } });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'path is not a previewable file for this Run' });
+    expect(previewServer.calls).toHaveLength(0);
+  });
+
+  it('400s before the Attempt has settled — no RunResult, so no candidate list yet', async () => {
+    const previewServer = fakePreviewServer();
+    const { app, repoPath } = makeApp(undefined, { runPreviewServer: previewServer });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: { path: 'dist/index.html' } });
+
+    expect(response.statusCode).toBe(400);
+    expect(previewServer.calls).toHaveLength(0);
+  });
+
+  it('500s honestly when no preview server is configured, rather than silently succeeding', async () => {
+    const { app, repoPath, store } = makeApp();
+    const run = await settledRunWithHtml(app, repoPath, store);
+
+    const response = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: { path: 'dist/index.html' } });
+
+    expect(response.statusCode).toBe(500);
+  });
+
+  it('404s (never 403) a collaborator actor outside the Run\'s grant, never starting a preview session', async () => {
+    const previewServer = fakePreviewServer();
+    const { app, repoPath, store, engine } = makeApp(undefined, { runPreviewServer: previewServer });
+    const run = await settledRunWithHtml(app, repoPath, store);
+
+    const outsideApp = Fastify();
+    registerWorkRoutes(outsideApp, engine, {
+      runFeedbackStore: store,
+      runPreviewServer: previewServer,
+      resolveGrantedRepositoryIds: () => [],
+      resolveActor: () => ({ principal: { id: 'collab-2', displayName: 'Bob' }, grants: { repositoryIds: [], profileIds: [] } }),
+    });
+    apps.push(outsideApp);
+
+    const response = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/preview`, payload: { path: 'dist/index.html' } });
+
+    expect(response.statusCode).toBe(404);
+    expect(previewServer.calls).toHaveLength(0);
   });
 });

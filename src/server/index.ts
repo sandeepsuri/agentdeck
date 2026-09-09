@@ -26,6 +26,7 @@ import { registerWorkRoutes } from './work-routes.js';
 import { CollaboratorService } from '../collaborators/service.js';
 import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
 import { resolveSenderIdentity } from './session-conversation.js';
+import { RunPreviewServer } from './run-preview-server.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -33,7 +34,13 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
+  // Ticket 70 (B10): loopback-only, ephemeral, never persisted — dies with
+  // this process (see close() in the shutdown path below).
+  const runPreviewServer = new RunPreviewServer();
   const workEngine = new DurableWorkEngine(store, path.join(config.dataDir, 'runs'));
+  // Wired as a plain field assignment, not a constructor argument — see
+  // DurableWorkEngine.onWorktreeReset's own doc comment for why.
+  workEngine.onWorktreeReset = (runId) => runPreviewServer.invalidate(runId);
   // Ticket 11: named collaborators and their device credentials, backed by
   // the same durable store as everything else — survives a restart exactly
   // like a queued Run does.
@@ -130,6 +137,7 @@ export async function startServer(): Promise<RunningServer> {
     // parallel "who sent this" decision.
     resolveAuthor: (req) => resolveSenderIdentity(requestTrust(req)),
     runFeedbackStore: store,
+    runPreviewServer,
   });
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;
@@ -146,6 +154,7 @@ export async function startServer(): Promise<RunningServer> {
     await manager.shutdown();
     if (wss) await closeWs(wss);
     if (tailnetServer) await new Promise<void>((resolve) => tailnetServer!.close(() => resolve()));
+    await runPreviewServer.close();
     await app.close();
     store.close();
   };

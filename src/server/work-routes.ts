@@ -7,8 +7,10 @@ import {
 } from '../work-engine/engine.js';
 import { resolveLocalPrincipal } from '../work-engine/principal.js';
 import { isPublicationTarget } from '../work-engine/publication.js';
+import { derivePreviewCandidates } from '../work-engine/run-preview.js';
+import { deriveRunResult } from '../work-engine/run-result.js';
 import type {
-  AttentionDecisionInput, PublicationTarget, RunActor, WorkEngine, WorkSpec,
+  AttentionDecisionInput, PublicationTarget, RunActor, WorkEngine, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { listRunFeedback, postRunFeedback, type RunFeedbackStore } from './run-feedback.js';
 import { nonEmptyString } from './validate.js';
@@ -50,6 +52,13 @@ export interface WorkRoutesDeps {
   resolveAuthor?: (request: FastifyRequest) => { principalId?: string; displayName: string };
   /** B07: the durable-storage seam POST/GET .../feedback read and write through — Store (store/index.ts) already implements this. */
   runFeedbackStore?: RunFeedbackStore;
+  /** Ticket 70 (B10): the ephemeral preview listener POST .../preview starts sessions on — RunPreviewServer (server/run-preview-server.ts) already implements this. */
+  runPreviewServer?: RunPreviewStarter;
+}
+
+/** The minimal seam POST .../preview needs — satisfied by the real RunPreviewServer, and by a fake in this module's own tests. */
+export interface RunPreviewStarter {
+  start(input: { runId: string; worktreePath: string; entryPath: string }): Promise<{ previewUrl: string; expiresAt: string }>;
 }
 
 function defaultAuthor(): { principalId?: string; displayName: string } {
@@ -89,6 +98,25 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     return { granted, principalId, runs: granted ? runs.filter((run) => granted.includes(run.spec.repository.id)) : runs };
   };
   const scopeRuns = (request: FastifyRequest) => resolveScope(request).runs;
+
+  /**
+   * The shared 404-never-403 grant check GET /api/runs/:id itself
+   * establishes: a Run outside a collaborator device's grants doesn't
+   * exist as far as it's concerned. Returns undefined for both "no such
+   * run" and "ungranted," so every route below that only needs "does this
+   * caller get to see this Run at all" (feedback, preview) has one shared
+   * place for it, rather than re-deriving the same two-line check each
+   * time. GET /api/runs/:id itself still does this inline, since it also
+   * needs `principalId` for collaboratorRunDetail — not a fit for this
+   * narrower helper.
+   */
+  const resolveGrantedRun = (request: FastifyRequest, id: string): WorkRun | undefined => {
+    const run = workEngine.get(id);
+    if (!run) return undefined;
+    const { granted } = resolveCollaboratorReadContext(request);
+    if (granted && !granted.includes(run.spec.repository.id)) return undefined;
+    return run;
+  };
 
   // A collaborator device gets collaborator-run-view.ts's projection rather
   // than the raw WorkRun -- see that module's header for what it drops and
@@ -149,20 +177,16 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
    */
   app.get('/api/runs/:id/feedback', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const run = workEngine.get(id);
+    const run = resolveGrantedRun(request, id);
     if (!run) return reply.code(404).send({ error: 'no such run' });
-    const { granted } = resolveCollaboratorReadContext(request);
-    if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
     if (!deps.runFeedbackStore) return [];
     return listRunFeedback(deps.runFeedbackStore, run.taskId);
   });
 
   app.post('/api/runs/:id/feedback', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const run = workEngine.get(id);
+    const run = resolveGrantedRun(request, id);
     if (!run) return reply.code(404).send({ error: 'no such run' });
-    const { granted } = resolveCollaboratorReadContext(request);
-    if (granted && !granted.includes(run.spec.repository.id)) return reply.code(404).send({ error: 'no such run' });
     if (!deps.runFeedbackStore) return reply.code(500).send({ error: 'feedback storage is not configured' });
     const body = request.body as { text?: unknown } | null;
     const author = deps.resolveAuthor?.(request) ?? defaultAuthor();
@@ -171,6 +195,38 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     });
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return reply.code(201).send(result.entry);
+  });
+
+  /**
+   * Ticket 70 (B10, docs/specs/run-result-application-previews.md): mints a
+   * fresh, ephemeral, loopback-only preview session for one already-
+   * produced static HTML file (plus same-directory assets) from a settled
+   * Run's own result. Deliberately a read-shaped grant check
+   * (`resolveCollaboratorReadContext`, byte-identical to GET .../feedback
+   * above), not a `decidePolicy`/'guide' call — previewing is "can you see
+   * this Run's result," not "can you guide its execution," and
+   * `policy.ts`'s own header comment is explicit that `engine.ts` is meant
+   * to stay `decidePolicy`'s only caller, so a second, route-level policy
+   * path is deliberately not introduced here. In this first slice this
+   * makes no practical difference either way: the preview listener never
+   * binds the tailnet interface, so a remote collaborator cannot reach it
+   * regardless of the grant check's outcome.
+   */
+  app.post('/api/runs/:id/preview', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const run = resolveGrantedRun(request, id);
+    if (!run) return reply.code(404).send({ error: 'no such run' });
+    if (!deps.runPreviewServer) return reply.code(500).send({ error: 'preview server is not configured' });
+    const body = request.body as { path?: unknown } | null;
+    if (typeof body?.path !== 'string' || !body.path) return reply.code(400).send({ error: 'path is required' });
+    const candidates = derivePreviewCandidates(deriveRunResult(run));
+    if (!candidates.some((candidate) => candidate.path === body.path)) {
+      return reply.code(400).send({ error: 'path is not a previewable file for this Run' });
+    }
+    if (run.preparation.state !== 'ready' || !run.preparation.worktreePath) {
+      return reply.code(400).send({ error: 'this Run has no prepared worktree to preview' });
+    }
+    return deps.runPreviewServer.start({ runId: run.id, worktreePath: run.preparation.worktreePath, entryPath: body.path });
   });
 
   app.post('/api/runs', async (request, reply) => {

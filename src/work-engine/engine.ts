@@ -287,6 +287,23 @@ export class DurableWorkEngine implements WorkEngine {
   private readonly publisher: RunPublisher;
 
   /**
+   * Ticket 70 (B10): notified with a Run's id immediately before
+   * retryAttempt() resets that Run's worktree — a preview server may be
+   * actively serving files out of it. A public, post-construction-settable
+   * field (not a 9th constructor parameter) deliberately: the constructor
+   * already has eight positional, defaulted dependencies, and every one of
+   * them already goes unspecified at most existing call sites — adding a
+   * ninth would mean passing `undefined` six times just to reach it there.
+   * A plain callback, never an import of server code: work-engine has no
+   * dependency on server/ anywhere else in this codebase, and this
+   * preserves that — server/index.ts assigns this directly to its own
+   * RunPreviewServer.invalidate(runId). The no-op default means every
+   * existing engine construction site (including the whole test suite)
+   * needs no change.
+   */
+  onWorktreeReset: (runId: string) => void = () => {};
+
+  /**
    * Ticket 13 AC3: the one in-flight execution per Run, if any. A second
    * publish() for the same Run while one is executing joins this promise
    * instead of starting another — the durable intent already carries the
@@ -645,6 +662,10 @@ export class DurableWorkEngine implements WorkEngine {
     // with a precise reason rather than starting the adapter against an
     // unknown worktree state or leaving the Attempt hanging forever.
     void (async () => {
+      // Ticket 70 (B10): a preview server may be actively serving files out
+      // of this exact worktree — invalidate it before the reset runs, never
+      // after, so a stale/wrong-content window can never open.
+      this.onWorktreeReset(existing.id);
       try {
         await git(worktreePath!, ['reset', '--hard', baseCommit!]);
         await git(worktreePath!, ['clean', '-fd']);

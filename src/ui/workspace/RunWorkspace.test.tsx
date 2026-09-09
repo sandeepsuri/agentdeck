@@ -886,3 +886,60 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
     expect(html).not.toContain('Attempt 1 of 1');
   });
 });
+
+// Ticket 70 (B10, docs/specs/run-result-application-previews.md): the
+// preview control inside RunResultPanel — never gated by
+// structuredAttemptsEnabled, since it depends only on a settled RunResult,
+// exactly like "Retry verification"/"Apply to repository" beside it.
+describe('RunWorkspace preview control (ticket 70, B10)', () => {
+  function settledRunWithHtml(changedFiles: string[]): WorkRun {
+    return {
+      ...eligibleRun(),
+      status: 'completed_unverified',
+      attempt: {
+        state: 'completed',
+        runtime: 'codex',
+        startedAt: '2026-09-01T00:05:00.000Z',
+        completedAt: '2026-09-01T00:06:00.000Z',
+        events: [
+          { kind: 'worktree-changes', sequence: 0, at: '2026-09-01T00:05:30.000Z', changedFiles },
+          { kind: 'verification-outcome', sequence: 1, at: '2026-09-01T00:06:00.000Z', outcome: 'unverified', repairAttempts: 0 },
+        ],
+      },
+    };
+  }
+
+  it('offers a Preview control for a settled Run with an .html changed file', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: settledRunWithHtml(['src/index.ts', 'dist/index.html']), onPreview: () => undefined,
+    }));
+    expect(html).toContain('Preview dist/index.html');
+  });
+
+  it('offers one control per .html candidate, never merging them into one', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: settledRunWithHtml(['dist/index.html', 'dist/about.html']), onPreview: () => undefined,
+    }));
+    expect(html).toContain('Preview dist/index.html');
+    expect(html).toContain('Preview dist/about.html');
+  });
+
+  it('offers no Preview control when changedFiles has no .html entry — the ordinary case', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: settledRunWithHtml(['src/index.ts', 'README.md']), onPreview: () => undefined,
+    }));
+    expect(html).not.toContain('Preview ');
+  });
+
+  it('offers no Preview control without a handler, even for an otherwise-previewable Run', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: settledRunWithHtml(['dist/index.html']),
+    }));
+    expect(html).not.toContain('Preview dist/index.html');
+  });
+
+  it('offers no Preview control before the Attempt has settled — no RunResult yet', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), onPreview: () => undefined }));
+    expect(html).not.toContain('Preview ');
+  });
+});

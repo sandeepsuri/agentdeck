@@ -790,6 +790,27 @@ describe('DurableWorkEngine.retryAttempt', () => {
     store.close();
   });
 
+  it('notifies onWorktreeReset with this Run\'s id before resetting — ticket 70 (B10)\'s own hook for invalidating an active preview', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+    const onWorktreeReset = vi.fn();
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), adapters);
+    engine.onWorktreeReset = onWorktreeReset;
+    const settled = await failedRun(engine, repository);
+
+    await engine.retryAttempt(settled.id);
+
+    expect(onWorktreeReset).toHaveBeenCalledWith(settled.id);
+    await waitForSettled(engine, settled.id);
+    store.close();
+  });
+
   it('refuses a cancelled Run whose Attempt is still durably "running" — cancel() records intent, but the live task may not have actually stopped yet', async () => {
     // deriveRunStatus checks a terminal attempt state (failed/completed)
     // before its own rawStatus === 'cancelled' branch, so 'cancelled' is
