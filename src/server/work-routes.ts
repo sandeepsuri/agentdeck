@@ -214,6 +214,23 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     }
   });
 
+  // Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a genuinely
+  // new Attempt — a separate resource under the Run, never overloading
+  // /start (which keeps its own precise meaning: the Run's first Attempt).
+  app.post('/api/runs/:id/attempts', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await workEngine.retryAttempt(id, deps.resolveActor?.(request));
+    } catch (error) {
+      if (handlePolicyDenied(error, reply)) return;
+      if (error instanceof RunNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof InvalidRunStateError || error instanceof UnsupportedRuntimeError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
   app.post('/api/runs/:id/reverify', async (request, reply) => {
     const { id } = request.params as { id: string };
     try {

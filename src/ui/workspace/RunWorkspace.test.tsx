@@ -778,3 +778,111 @@ describe('RunWorkspace companion Sessions (ticket 68, B13)', () => {
     expect(html).toContain('Sessions in this worktree (2)');
   });
 });
+
+// Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): the attempt-
+// history list and the "Start a new attempt" control — both live inside
+// the same structuredAttemptsEnabled-gated section the single-attempt view
+// already used, per RunWorkspace's own existing convention.
+describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
+  function readyRun(overrides: Partial<WorkRun> = {}): WorkRun {
+    return {
+      ...baseRun(),
+      preparation: { state: 'ready', baseCommit: 'abc123', worktreePath: '/repos/example-runs/run-durable-123', branch: 'agentdeck/run/run-durable-123' },
+      envelope: {
+        state: 'ready',
+        capabilityEnvelope: {
+          runtime: 'codex',
+          profile: {
+            writableWorktree: '/repos/example-runs/run-durable-123', readableRoots: [], allowedNetworkDomains: [],
+            environmentAllowlist: [], processCeiling: 1, childRunCeiling: 0,
+          },
+          secretGrants: [],
+        },
+      },
+      ...overrides,
+    };
+  }
+
+  const firstAttemptEvents = [
+    { kind: 'lifecycle' as const, sequence: 0, at: '2026-09-01T00:00:00.000Z', phase: 'attempt-started' as const },
+    { kind: 'failure' as const, sequence: 1, at: '2026-09-01T00:01:00.000Z', reason: 'process crashed' },
+  ];
+  const failedAttempt = {
+    attemptId: 'attempt-1', ordinal: 1,
+    state: { state: 'failed' as const, runtime: 'codex' as const, startedAt: '2026-09-01T00:00:00.000Z', failedAt: '2026-09-01T00:01:00.000Z', reason: 'process crashed', events: firstAttemptEvents },
+  };
+  const runningAttempt = {
+    attemptId: 'attempt-2', ordinal: 2,
+    state: { state: 'running' as const, runtime: 'codex' as const, startedAt: '2026-09-01T00:05:00.000Z', events: [] },
+  };
+
+  it('renders every attempt\'s evidence after a retry, oldest first, never hiding the earlier one', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({ status: 'running', attempt: runningAttempt.state, attempts: [failedAttempt, runningAttempt] }),
+      structuredAttemptsEnabled: true,
+    }));
+    expect(html).toContain('Attempt 1 of 2');
+    expect(html).toContain('Attempt 2 of 2');
+    expect(html).toContain('process crashed');
+  });
+
+  it('offers "Start a new attempt" for a failed Run, and it is absent for a completed one', () => {
+    const failedHtml = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({ status: 'failed', attempt: failedAttempt.state, attempts: [failedAttempt] }),
+      structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
+    }));
+    expect(failedHtml).toContain('Start a new attempt');
+
+    const completedAttempt = {
+      ...failedAttempt,
+      state: { state: 'completed' as const, runtime: 'codex' as const, startedAt: '2026-09-01T00:00:00.000Z', completedAt: '2026-09-01T00:01:00.000Z', events: firstAttemptEvents },
+    };
+    const completedHtml = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({ status: 'completed', attempt: completedAttempt.state, attempts: [completedAttempt] }),
+      structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
+    }));
+    expect(completedHtml).not.toContain('Start a new attempt');
+  });
+
+  it('is absent while the current attempt is still live', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({ status: 'running', attempt: runningAttempt.state, attempts: [failedAttempt, runningAttempt] }),
+      structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
+    }));
+    expect(html).not.toContain('Start a new attempt');
+  });
+
+  it('offers "Start a new attempt" alongside "Retry verification" for failed_verification — never merged into one control', () => {
+    const gate = { gate: 'tests', required: true, passed: false, exitCode: 1, evidence: 'FAIL' };
+    const verificationOutcome = {
+      kind: 'verification-outcome' as const, sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'failed_verification' as const, repairAttempts: 0,
+    };
+    const attemptState = {
+      state: 'completed' as const, runtime: 'codex' as const, startedAt: '2026-09-01T00:00:00.000Z', completedAt: '2026-09-01T00:01:00.000Z',
+      events: [
+        { kind: 'completion' as const, sequence: 0, at: '2026-09-01T00:00:30.000Z', outcome: 'success' as const },
+        { kind: 'verification-check' as const, sequence: 0, at: '2026-09-01T00:00:45.000Z', gate: gate.gate, command: 'npm test', required: true, passed: false, exitCode: 1, evidence: 'FAIL' },
+        verificationOutcome,
+      ],
+    };
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({
+        status: 'failed_verification', attempt: attemptState,
+        attempts: [{ attemptId: 'attempt-1', ordinal: 1, state: attemptState }],
+        verificationPolicy: { state: 'ready', requiredGates: [{ name: 'tests', command: 'npm test' }] },
+      }),
+      structuredAttemptsEnabled: true, onRetryAttempt: () => undefined, onReverify: () => undefined,
+    }));
+    expect(html).toContain('Retry verification');
+    expect(html).toContain('Start a new attempt');
+  });
+
+  it('renders nothing new when structuredAttemptsEnabled is off — the multi-attempt UI stays behind the same experimental gate as the rest of the Attempt panel', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: readyRun({ status: 'failed', attempt: failedAttempt.state, attempts: [failedAttempt] }),
+      onRetryAttempt: () => undefined,
+    }));
+    expect(html).not.toContain('Start a new attempt');
+    expect(html).not.toContain('Attempt 1 of 1');
+  });
+});

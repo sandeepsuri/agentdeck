@@ -635,6 +635,247 @@ describe('DurableWorkEngine.start', () => {
   });
 });
 
+// Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a genuinely new
+// Attempt — distinct from reverify()/apply(), which never touch a runtime.
+describe('DurableWorkEngine.retryAttempt', () => {
+  function setUp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters);
+    return {
+      root, repoPath, store, repository, runsRoot, engine,
+    };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  async function failedRun(engine: DurableWorkEngine, repository: RunRepository) {
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+    return waitForSettled(engine, prepared.id);
+  }
+
+  it('rejects retrying an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.retryAttempt('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('rejects retrying a Run in a non-retryable status (still preparing, no Attempt yet)', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    store.close();
+  });
+
+  it('rejects retrying a completed Run — nothing to recover, publish() already covers that case', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success' },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'verified', repairAttempts: 0,
+      },
+    }));
+    expect(engine.get(prepared.id)?.status).toBe('completed');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    store.close();
+  });
+
+  it('rejects retrying while the current Attempt is still running (idempotent-retry guard)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    // 'running' is not itself a retryable status, so the status check
+    // refuses first — proving the same double-click can never reach a live
+    // Attempt via this path either way.
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await waitForSettled(engine, prepared.id);
+    store.close();
+  });
+
+  it('rejects retrying a Run that was cancelled before ever starting an Attempt, with an honest message', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    const cancelled = await engine.cancel(prepared.id);
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.attempt.state).toBe('idle');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(/no Attempt to retry/);
+    store.close();
+  });
+
+  it('starts a second Attempt for a failed Run, resetting the worktree and preserving the first attempt\'s evidence', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const settled = await failedRun(engine, repository);
+    expect(settled.status).toBe('failed');
+    const firstAttemptEvents = settled.attempt.state === 'failed' ? settled.attempt.events : [];
+    expect(firstAttemptEvents.length).toBeGreaterThan(0);
+
+    // A real, uncommitted stray file the first Attempt "left behind" — the
+    // worktree-reuse hazard the reset must actually discard, not a mock.
+    const strayPath = path.join(settled.preparation.worktreePath!, 'stray.txt');
+    fs.writeFileSync(strayPath, 'leftover from attempt 1\n');
+    expect(fs.existsSync(strayPath)).toBe(true);
+
+    const retried = await engine.retryAttempt(settled.id);
+
+    expect(retried.status).toBe('running');
+    expect(retried.attempts).toHaveLength(2);
+    expect(retried.attempts?.[0]).toMatchObject({ ordinal: 1, state: { state: 'failed' } });
+    expect(retried.attempts?.[0]?.state).toMatchObject({ events: firstAttemptEvents });
+    expect(retried.attempts?.[1]).toMatchObject({ ordinal: 2, state: { state: 'running' } });
+    expect(engine.listActivity(settled.id).at(-1)).toMatchObject({ kind: 'attempt-retried' });
+
+    // The worktree reset (and the adapter it gates) run in the background,
+    // exactly like start()'s own Attempt — never blocking retryAttempt()'s
+    // own return the way an HTTP caller must not be blocked on it either.
+    const settledAgain = await waitForSettled(engine, settled.id);
+    expect(fs.existsSync(strayPath)).toBe(false);
+    // Attempt 1's own durable log is byte-for-byte unchanged after attempt 2 settles too.
+    expect(settledAgain.attempts?.[0]?.state).toMatchObject({ events: firstAttemptEvents });
+    store.close();
+  });
+
+  it('ends the new Attempt with a precise reason, never starting the adapter, when the worktree reset itself fails', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const settled = await failedRun(engine, repository);
+    // Corrupt the frozen worktree path so `git reset --hard` fails cleanly —
+    // a real git-level failure, not a mock.
+    const brokenPath = path.join(settled.preparation.worktreePath!, 'does-not-exist');
+    store.updateRun({ ...settled, preparation: { ...settled.preparation, worktreePath: brokenPath } });
+
+    const retried = await engine.retryAttempt(settled.id);
+    expect(retried.attempts).toHaveLength(2);
+
+    const settledAgain = await waitForSettled(engine, settled.id);
+    expect(settledAgain.attempts?.[1]?.state.state).toBe('failed');
+    if (settledAgain.attempts?.[1]?.state.state === 'failed') {
+      expect(settledAgain.attempts[1].state.reason).toMatch(/Could not reset the worktree/);
+    }
+    store.close();
+  });
+
+  it('refuses a cancelled Run whose Attempt is still durably "running" — cancel() records intent, but the live task may not have actually stopped yet', async () => {
+    // deriveRunStatus checks a terminal attempt state (failed/completed)
+    // before its own rawStatus === 'cancelled' branch, so 'cancelled' is
+    // only ever the *derived* status while the attempt itself is idle or
+    // running — never while it already carries a real terminal outcome
+    // (see attempt-projection.ts). The idempotent-retry guard must still
+    // hold across that combination: cancel() alone never proves the prior
+    // live task has actually stopped.
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    await engine.cancel(prepared.id);
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(/already been started/);
+    store.close();
+  });
+
+  it('allows retrying a Run that failed verification — the named escape hatch from reverify()', async () => {
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success' },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'failed_verification', repairAttempts: 0,
+      },
+    }));
+    expect(engine.get(prepared.id)?.status).toBe('failed_verification');
+
+    // No adapter wired in this setUp — proves eligibility is reached (the
+    // rejection is UnsupportedRuntimeError, past every precondition check).
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(UnsupportedRuntimeError);
+    store.close();
+  });
+
+  it('rejects retrying before the worktree is prepared, even for an otherwise-retryable status', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+    const cancelled = await engine.cancel(submitted.id);
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.preparation.state).toBe('pending');
+
+    await expect(engine.retryAttempt(submitted.id)).rejects.toThrow(/prepared/);
+    store.close();
+  });
+
+  it('recovers a restart mid-attempt-2 with a synthetic failure event scoped to attempt 2 only, leaving attempt 1 untouched', async () => {
+    // Mirrors engine.recovery.test.ts's own "crash mid-Attempt" pattern:
+    // the crashed state is constructed directly on the store (no real
+    // adapter/process ever runs), then a fresh engine on the same store
+    // instance recovers it — no restart-vs-in-flight-process race to avoid.
+    const { store, repository, engine, runsRoot } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:00:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:00:01.000Z', reason: 'process crashed' },
+    }));
+    store.startAttempt({ id: 'attempt-2', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-2',
+      event: { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:01.000Z', phase: 'attempt-started' },
+    }));
+    expect(engine.get(prepared.id)?.attempts).toHaveLength(2);
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), {});
+    await restarted.recover();
+
+    const recovered = restarted.get(prepared.id)!;
+    expect(recovered.attempts).toHaveLength(2);
+    expect(recovered.attempts?.[0]?.state).toMatchObject({ state: 'failed', reason: 'process crashed' });
+    expect(recovered.attempts?.[1]?.state.state).toBe('failed');
+    if (recovered.attempts?.[1]?.state.state === 'failed') {
+      expect(recovered.attempts[1].state.reason).toMatch(/restart/i);
+    }
+    store.close();
+  });
+});
+
 describe('DurableWorkEngine.resolveAttention', () => {
   function setUp(spawn: ReturnType<typeof createFakeCodexAppServer>['spawn']) {
     const root = tempDir();

@@ -21,6 +21,15 @@ export function isTerminalRunStatus(status: string): boolean {
   return TERMINAL_RUN_STATUSES.has(status);
 }
 
+/** Ticket 68 (B12): mirrors work-engine/engine.ts's RETRYABLE_STATUSES — the statuses "Start a new attempt" is ever offered for. 'completed' is deliberately excluded: nothing to recover, publish() already covers that case. */
+const RETRY_ATTEMPT_ELIGIBLE_STATUSES = new Set([
+  'failed', 'failed_budget', 'cancelled', 'failed_verification', 'completed_unverified',
+]);
+
+export function isRetryAttemptEligibleStatus(status: string): boolean {
+  return RETRY_ATTEMPT_ELIGIBLE_STATUSES.has(status);
+}
+
 /**
  * Runs needing a decision first, then the rest still in flight, then
  * finished work — newest first within each band. Shared by every view that

@@ -426,6 +426,72 @@ describe('run Attempt start route', () => {
   });
 });
 
+// Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a genuinely
+// new Attempt — a separate resource from /start, never overloading it.
+describe('run Attempt retry route (ticket 68, B12)', () => {
+  it('reports an unknown run and a not-yet-eligible run precisely', async () => {
+    const { app, repoPath } = makeApp();
+
+    const missing = await app.inject({ method: 'POST', url: '/api/runs/unknown/attempts' });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: 'no such run: unknown' });
+
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    const tooSoon = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/attempts` });
+    expect(tooSoon.statusCode).toBe(400);
+    expect(tooSoon.json().error).toMatch(/status: queued/);
+  });
+
+  it('starts a second Attempt for a failed Run, and the Run\'s history shows both', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    await vi.waitUntil(async () => {
+      const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'failed';
+    });
+
+    const retried = await app.inject({ method: 'POST', url: `/api/runs/${run.id}/attempts` });
+
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toMatchObject({ status: 'running' });
+    expect(retried.json().attempts).toHaveLength(2);
+    expect(retried.json().attempts[0]).toMatchObject({ ordinal: 1, state: { state: 'failed' } });
+    expect(retried.json().attempts[1]).toMatchObject({ ordinal: 2, state: { state: 'running' } });
+
+    const activity = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/activity` });
+    expect(activity.json().at(-1)).toMatchObject({ kind: 'attempt-retried' });
+
+    await vi.waitUntil(async () => {
+      const polled = await app.inject({ method: 'GET', url: `/api/runs/${run.id}` });
+      return polled.json().status === 'failed' && polled.json().attempts.length === 2;
+    });
+  });
+
+  it('403s a collaborator actor retrying a Run outside their grants, leaving it untouched', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { app, repoPath, store, engine } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${run.id}` })).json()).status === 'failed');
+
+    const outsideApp = Fastify();
+    const outsideActor: RunActor = { principal: { id: 'collab-2', displayName: 'Bob' }, grants: { repositoryIds: [], profileIds: [] } };
+    registerWorkRoutes(outsideApp, engine, { runFeedbackStore: store, resolveActor: () => outsideActor });
+    apps.push(outsideApp);
+
+    const response = await outsideApp.inject({ method: 'POST', url: `/api/runs/${run.id}/attempts` });
+    expect(response.statusCode).toBe(403);
+    expect(engine.get(run.id)?.attempts).toHaveLength(1);
+  });
+});
+
 describe('run pause/resume routes (ticket 54, B11)', () => {
   /**
    * An engine wired to a caller-controlled VerificationGateRunner, so a test

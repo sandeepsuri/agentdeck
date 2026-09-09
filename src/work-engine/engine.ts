@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { defaultDataDir } from '../config.js';
+import { git } from '../git/scan.js';
 import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import type { AgentType, Task } from '../types.js';
@@ -179,6 +180,26 @@ function frozenCopy<T>(value: T): T {
 const TERMINAL_STATUSES: ReadonlySet<WorkRun['status']> = new Set([
   'completed', 'completed_unverified', 'failed_verification', 'failed_budget', 'failed', 'cancelled',
 ]);
+
+/**
+ * Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): the statuses
+ * eligible for a genuinely new Attempt. Deliberately not TERMINAL_STATUSES
+ * itself — 'completed' is excluded (nothing to recover; publish() already
+ * covers "do more with a successful result"), and every non-terminal status
+ * is excluded by retryAttempt()'s own attempt.state check below, which is
+ * already the correct, more specific guard for "an Attempt is still live."
+ */
+const RETRYABLE_STATUSES: ReadonlySet<WorkRun['status']> = new Set([
+  'failed', 'failed_budget', 'cancelled', 'failed_verification', 'completed_unverified',
+]);
+// 'cancelled' here is deliberate but structurally narrow: deriveRunStatus
+// (attempt-projection.ts) checks a terminal attempt state (failed/
+// completed) before its own rawStatus === 'cancelled' branch, so a Run only
+// ever *shows* as 'cancelled' while its attempt is idle or running — never
+// once the attempt already carries a real terminal outcome. retryAttempt()'s
+// own idempotent-retry guard below (attempt.state === 'running' /
+// 'idle') is what actually decides a cancelled Run's eligibility in
+// practice: cancel() alone never proves the prior live task has stopped.
 
 /**
  * Ticket 09 AC4: the in-process half of pause/resume — a one-shot "should I
@@ -374,6 +395,7 @@ export class DurableWorkEngine implements WorkEngine {
       envelope: { state: 'pending' },
       verificationPolicy: { state: 'pending' },
       attempt: { state: 'idle' },
+      attempts: [],
     });
     const task: Task = {
       id: taskId,
@@ -554,6 +576,87 @@ export class DurableWorkEngine implements WorkEngine {
     // request should block for. Progress is observed by rereading the Run
     // (get/list), never by awaiting this call.
     void this.runAttempt(existing, attemptId, adapter, capabilityEnvelope);
+    return this.get(existing.id)!;
+  }
+
+  /**
+   * Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): starts a
+   * genuinely new Attempt — see WorkEngine.retryAttempt's own doc comment
+   * for the full contract. Distinguishing this from reverify()/apply()
+   * (which never touch a runtime, and only ever append to the existing
+   * Attempt's own event log) is the entire point of this ticket, so this
+   * method is deliberately its own thing rather than a branch inside
+   * start() or reverify().
+   */
+  async retryAttempt(runId: string, actor?: RunActor): Promise<WorkRun> {
+    const existing = this.store.getRun(runId);
+    if (!existing) throw new RunNotFoundError(runId);
+    const resolvedActor = this.resolveActor(actor);
+    this.enforcePolicy(resolvedActor, { kind: 'guide', repositoryId: existing.spec.repository.id });
+    if (!RETRYABLE_STATUSES.has(existing.status)) {
+      throw new InvalidRunStateError(`cannot start a new Attempt for a Run in status: ${existing.status}`);
+    }
+    // A Run can reach a retryable status (e.g. 'cancelled') before either of
+    // these ever became ready — nothing to reset or restart from in that
+    // case, so this is a real precondition, not defensive dead code.
+    if (existing.preparation.state !== 'ready' || !existing.preparation.worktreePath || !existing.preparation.baseCommit) {
+      throw new InvalidRunStateError('cannot start a new Attempt before the Run worktree is prepared');
+    }
+    if (existing.envelope.state !== 'ready') {
+      throw new InvalidRunStateError('cannot start a new Attempt without a ready capability envelope');
+    }
+    // Idempotent-retry guard: only the latest attempt can ever be live, and
+    // a double-click must never create two concurrent attempts for one Run.
+    if (existing.attempt.state === 'running') {
+      throw new InvalidRunStateError('an Attempt has already been started for this Run (running)');
+    }
+    // Distinct from the guard above and worded honestly rather than reusing
+    // start()'s "already started" message: a Run can reach a retryable
+    // status (a prepared-but-never-started Run that was then cancelled)
+    // with no Attempt of its own to retry at all. start() itself already
+    // refuses this Run (its own TERMINAL_STATUSES check), so it has no path
+    // forward today — a real, narrow, pre-existing gap this ticket does not
+    // additionally claim to close.
+    if (existing.attempt.state === 'idle') {
+      throw new InvalidRunStateError('this Run has no Attempt to retry');
+    }
+    const { capabilityEnvelope } = existing.envelope;
+    const adapter = this.runtimeAdapters[capabilityEnvelope.runtime];
+    if (!adapter) throw new UnsupportedRuntimeError(capabilityEnvelope.runtime);
+    const { worktreePath, baseCommit } = existing.preparation;
+
+    const attemptId = randomUUID();
+    const startedAt = new Date().toISOString();
+    this.store.startAttempt({
+      id: attemptId, runId: existing.id, runtime: capabilityEnvelope.runtime, startedAt,
+    });
+    this.recordActivity(runId, 'attempt-retried', resolvedActor);
+
+    // Fire-and-forget, exactly like start() — an HTTP caller should no more
+    // block on this than on the Attempt itself. The worktree-reuse hazard
+    // (a second Attempt in the same directory the first one already left
+    // dirty would silently inherit whatever partial edits, or even a real
+    // local commit, it produced) is resolved here, before the adapter is
+    // ever invoked: reset back to the exact base commit prepare() already
+    // resolved once — never re-resolving requestedBaseReference again — so
+    // only *working-tree* state is discarded; every prior attempt's durable
+    // attempt_events rows are untouched by this and remain fully intact. A
+    // reset failure (a locked file, a corrupt worktree) ends this Attempt
+    // with a precise reason rather than starting the adapter against an
+    // unknown worktree state or leaving the Attempt hanging forever.
+    void (async () => {
+      try {
+        await git(worktreePath!, ['reset', '--hard', baseCommit!]);
+        await git(worktreePath!, ['clean', '-fd']);
+      } catch (error) {
+        const reason = `Could not reset the worktree before retrying: ${error instanceof Error ? error.message : String(error)}`;
+        this.store.appendAttemptEvent(buildAttemptEventEnvelope({
+          runId: existing.id, attemptId, event: { kind: 'failure', sequence: 0, at: new Date().toISOString(), reason },
+        }));
+        return;
+      }
+      await this.runAttempt(existing, attemptId, adapter, capabilityEnvelope);
+    })();
     return this.get(existing.id)!;
   }
 
@@ -995,7 +1098,7 @@ export class DurableWorkEngine implements WorkEngine {
 
   /** Appends recovery/delivery evidence after an Attempt has already settled. */
   private settledEventAppender(run: WorkRun, scope: string): (event: AttemptEvent) => AttemptEvent {
-    const attemptId = this.store.getAttemptId(run.id);
+    const attemptId = this.store.getLatestAttemptId(run.id);
     if (!attemptId || run.attempt.state === 'idle') throw new InvalidRunStateError('this Run has no Attempt event log');
     let sequence = run.attempt.events.at(-1)?.sequence ?? -1;
     return (event) => {
@@ -1152,7 +1255,7 @@ export class DurableWorkEngine implements WorkEngine {
     const readiness = await this.runtimeReadiness.get();
     for (const run of this.store.listRuns()) {
       if (run.attempt.state !== 'running') continue;
-      const attemptId = this.store.getAttemptId(run.id);
+      const attemptId = this.store.getLatestAttemptId(run.id);
       // Cannot happen given attempt.state === 'running' (Store derives it
       // from this same attempts row) — guarded rather than asserted so a
       // future storage bug fails safe instead of throwing mid-boot.

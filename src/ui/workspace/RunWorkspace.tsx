@@ -10,7 +10,7 @@ import {
 } from './attemptActivity.js';
 import { HistoryScrollback } from './HistoryView.js';
 import { RunFeedbackPanel } from './RunFeedbackPanel.js';
-import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
+import { formatRunLabel, isRetryAttemptEligibleStatus, isTerminalRunStatus } from './runModel.js';
 
 /** The heading + status pill shared by most collapsible run-section-detail summaries below — a section with one Run-level state, not a list of independently-stated rows (see CompanionSessionsPanel, which has no single state to show a pill for). */
 function SectionSummary({ heading, state }: { heading: string; state: string }) {
@@ -348,6 +348,8 @@ interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
   onStart?: (run: WorkRun) => void;
+  /** Ticket 68 (B12): starts a genuinely new Attempt (App.tsx's retryAttempt → POST /api/runs/:id/attempts) — distinct from onReverify/onApply below, which never rerun the agent. Offered only once the current attempt has settled and the Run's own status says there's something to recover; never for a completed Run. */
+  onRetryAttempt?: (run: WorkRun) => void;
   /** Ticket 54 (B11): requests a pause at the engine's next safe boundary (App.tsx's guideRun → POST /api/runs/:id/pause). Offered only while a live Attempt is actually running, never merely "queued" or "verifying between rounds is possible in principle." */
   onPause?: (run: WorkRun) => void;
   /** Ticket 54 (B11): lets a paused or pause-requested Attempt proceed (App.tsx's guideRun → POST /api/runs/:id/resume). Offered for both pause_requested and paused — the engine allows resuming before the request has even taken effect. */
@@ -370,7 +372,7 @@ interface Props {
 }
 
 export function RunWorkspace({
-  run, onPrepare, onStart, onPause, onResume, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
+  run, onPrepare, onStart, onRetryAttempt, onPause, onResume, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
   structuredAttemptsEnabled = false, companionSessions = [], onOpenCompanionSession,
 }: Props) {
   const { preparation, envelope, attempt } = run;
@@ -398,6 +400,15 @@ export function RunWorkspace({
   const canPause = structuredAttemptsEnabled && live && Boolean(onPause);
   const canResume = structuredAttemptsEnabled && attempt.state === 'running'
     && (run.status === 'pause_requested' || run.status === 'paused') && Boolean(onResume);
+  // Ticket 68 (B12): offered once the current (latest) attempt has settled
+  // and the Run's own status says there's something to recover — never
+  // while an attempt is idle/running (the same live check `canPause`/
+  // `canResume` already use), and never for 'completed' (publish() already
+  // covers "do more with a successful result"). Named and rendered as its
+  // own, separate control from "Retry verification" (RunResultPanel) —
+  // never merged into one, since only this one actually reruns the agent.
+  const canRetryAttempt = structuredAttemptsEnabled && isRetryAttemptEligibleStatus(run.status)
+    && (attempt.state === 'failed' || attempt.state === 'completed') && Boolean(onRetryAttempt);
   return (
     <article className="run-workspace">
       <header>
@@ -536,6 +547,11 @@ export function RunWorkspace({
               Start Attempt
             </button>
           )}
+          {canRetryAttempt && (
+            <button className="button" onClick={() => onRetryAttempt?.(run)} type="button">
+              Start a new attempt
+            </button>
+          )}
           {(canPause || canResume) && (
             <div className="run-attention-actions" role="group" aria-label="Pause and resume">
               {canPause && (
@@ -571,7 +587,28 @@ export function RunWorkspace({
               </section>
             );
           })()}
-          {attempt.state !== 'idle' && <AttemptReport events={attempt.events} />}
+          {/*
+           * Ticket 68 (B12): `run.attempts` (present on every real, store-
+           * backed Run) renders the full history — a retried Run's first
+           * attempt stays fully visible, never overwritten or hidden, once
+           * a second one exists. Falls back to the single current attempt
+           * for any caller/fixture that hasn't adopted `attempts` yet.
+           */}
+          {run.attempts && run.attempts.length > 0 ? (
+            <div className="run-attempt-history">
+              {run.attempts.map((record) => (
+                <details className="run-section-detail" key={record.attemptId} open={record.ordinal === run.attempts!.length}>
+                  <summary>
+                    Attempt {record.ordinal} of {run.attempts!.length}
+                    {' '}<span className={`work-run-status status-${record.state.state}`}>{formatRunLabel(record.state.state)}</span>
+                  </summary>
+                  {record.state.state !== 'idle' && <AttemptReport events={record.state.events} />}
+                </details>
+              ))}
+            </div>
+          ) : (
+            attempt.state !== 'idle' && <AttemptReport events={attempt.events} />
+          )}
         </section>
       )}
       <RunResultPanel onApply={onApply} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />

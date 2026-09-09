@@ -10,8 +10,9 @@ import type {
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
 import type {
-  AttemptEvent, Profile, RepositoryVerificationPolicy, RunActivity, RunActivityKind, RunActorDevice, RunEnvelopeState,
-  RunPreparation, RunPrincipal, RunPublication, RunPublicationResult, RunVerificationPolicyState, WorkRun, WorkSpec,
+  AttemptEvent, Profile, RepositoryVerificationPolicy, RunActivity, RunActivityKind, RunActorDevice, RunAttemptRecord,
+  RunEnvelopeState, RunPreparation, RunPrincipal, RunPublication, RunPublicationResult, RunVerificationPolicyState,
+  WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
 import type {
@@ -531,35 +532,49 @@ export class Store implements CollaboratorStore {
     });
   }
 
-  /** The attemptId for a Run's one Attempt, or undefined if none has started — recovery's only use of Attempt identity outside the projected AttemptState. */
-  getAttemptId(runId: string): string | undefined {
-    const row = this.db.prepare('SELECT id FROM attempts WHERE run_id = ?').get(runId) as { id: string } | undefined;
+  /**
+   * The attemptId for a Run's most recent Attempt, or undefined if none has
+   * started — recovery's, reverify's, and apply's only use of Attempt
+   * identity outside the projected AttemptState. Only the latest attempt
+   * can ever be 'running' or need a settled-event append (ticket 68 (B12)):
+   * retryAttempt() only ever starts a new one once the previous is
+   * terminal, so "latest" and "current" are always the same attempt.
+   */
+  getLatestAttemptId(runId: string): string | undefined {
+    const row = this.db.prepare('SELECT id FROM attempts WHERE run_id = ? ORDER BY started_at DESC LIMIT 1')
+      .get(runId) as { id: string } | undefined;
     return row?.id;
   }
 
-  private loadAttempt(runId: string): { record: AttemptRow | undefined; events: AttemptEvent[] } {
-    const record = this.db.prepare('SELECT id, runtime, started_at FROM attempts WHERE run_id = ?')
-      .get(runId) as AttemptRow | undefined;
-    if (!record) return { record: undefined, events: [] };
-    const events = (
+  private loadAttemptEvents(attemptId: string): AttemptEvent[] {
+    return (
       this.db.prepare('SELECT payload FROM attempt_events WHERE attempt_id = ? ORDER BY sequence ASC')
-        .all(record.id) as { payload: string }[]
+        .all(attemptId) as { payload: string }[]
     ).map((r) => JSON.parse(r.payload) as AttemptEvent);
-    return { record, events };
   }
 
-  /** Folds the durable event log into AttemptState and derives `status` from it (ticket 06 AC4) — see attempt-projection.ts for both reducers. Ticket 13: the Run's publication intent, if any, rides along the same way. */
+  /** Every Attempt row for a Run, oldest first (ticket 68 (B12)) — a Run with no Attempt yet returns []. */
+  private loadAttempts(runId: string): AttemptRow[] {
+    return this.db.prepare('SELECT id, runtime, started_at FROM attempts WHERE run_id = ? ORDER BY started_at ASC')
+      .all(runId) as AttemptRow[];
+  }
+
+  /** Folds every durable Attempt event log into an ordered attempts list and derives `status` from the current (last) one (ticket 06 AC4, extended by ticket 68 (B12) to more than one attempt) — see attempt-projection.ts for both reducers. Ticket 13: the Run's publication intent, if any, rides along the same way. */
   private attachAttempt(run: RawRun): WorkRun {
-    const { record, events } = this.loadAttempt(run.id);
-    const attempt = projectAttemptState(
-      record ? { runtime: record.runtime as AgentType, startedAt: record.started_at } : undefined,
-      events,
-    );
+    const attempts: RunAttemptRecord[] = this.loadAttempts(run.id).map((record, index) => ({
+      attemptId: record.id,
+      ordinal: index + 1,
+      state: projectAttemptState(
+        { runtime: record.runtime as AgentType, startedAt: record.started_at },
+        this.loadAttemptEvents(record.id),
+      ),
+    }));
+    const attempt = attempts.at(-1)?.state ?? { state: 'idle' as const };
     const pendingAttention = deriveOpenAttentionRequest(attempt);
     const status = deriveRunStatus(run.status as WorkRun['status'], attempt, pendingAttention);
     const publication = this.getRunPublication(run.id);
     return {
-      ...run, status, attempt, pendingAttention, ...(publication ? { publication } : {}),
+      ...run, status, attempt, attempts, pendingAttention, ...(publication ? { publication } : {}),
     };
   }
 

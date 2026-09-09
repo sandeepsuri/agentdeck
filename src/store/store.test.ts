@@ -201,6 +201,70 @@ describe('durable Attempt events (ticket 06)', () => {
     createRun('run-1');
     expect(store.getRun('run-1')?.attempt).toEqual({ state: 'idle' });
     expect(store.getRun('run-1')?.status).toBe('queued');
+    expect(store.getRun('run-1')?.attempts).toEqual([]);
+  });
+
+  // Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a Run may
+  // have more than one attempts row. `attempt` must keep meaning "the
+  // current (latest) one" for every existing reader, while `attempts`
+  // exposes the full ordered history without ever losing an earlier
+  // attempt's own durable evidence.
+  describe('multiple Attempts (ticket 68, B12)', () => {
+    it('folds every attempts row into an ordered attempts list, oldest first', () => {
+      createRun('run-multi');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-multi', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-multi', attemptId: 'attempt-1',
+        event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' },
+      }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-multi', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      const run = store.getRun('run-multi')!;
+      expect(run.attempts).toHaveLength(2);
+      expect(run.attempts?.[0]).toMatchObject({ attemptId: 'attempt-1', ordinal: 1, state: { state: 'failed', reason: 'process crashed' } });
+      expect(run.attempts?.[1]).toMatchObject({ attemptId: 'attempt-2', ordinal: 2, state: { state: 'running' } });
+    });
+
+    it('keeps `attempt` meaning "the current (latest) one" — unchanged for every existing reader', () => {
+      createRun('run-latest');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-latest', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-latest', attemptId: 'attempt-1',
+        event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' },
+      }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-latest', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-latest', attemptId: 'attempt-2',
+        event: { kind: 'message', sequence: 0, at: '2026-09-01T00:10:01.000Z', role: 'assistant', text: 'Trying again.' },
+      }));
+
+      const run = store.getRun('run-latest')!;
+      expect(run.attempt).toEqual({
+        state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z',
+        events: [{ kind: 'message', sequence: 0, at: '2026-09-01T00:10:01.000Z', role: 'assistant', text: 'Trying again.' }],
+      });
+    });
+
+    it('never loses or mixes an earlier attempt\'s own event log once a later one exists', () => {
+      createRun('run-preserved');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-preserved', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      const firstEvent: AttemptEvent = { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' };
+      store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-preserved', attemptId: 'attempt-1', event: firstEvent }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-preserved', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      const run = store.getRun('run-preserved')!;
+      expect(run.attempts?.[0]?.state).toEqual({
+        state: 'failed', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', failedAt: firstEvent.at, reason: 'process crashed', events: [firstEvent],
+      });
+    });
+
+    it('getLatestAttemptId always resolves to the most recently started attempt', () => {
+      createRun('run-order');
+      store.startAttempt({ id: 'attempt-old', runId: 'run-order', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.startAttempt({ id: 'attempt-new', runId: 'run-order', runtime: 'claude', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      expect(store.getLatestAttemptId('run-order')).toBe('attempt-new');
+    });
   });
 
   it('folds a durable event log into a running Attempt, and derives status from it', () => {
@@ -714,7 +778,7 @@ describe('Store.deleteRun', () => {
 
     expect(store.getRun('run-1')).toBeUndefined();
     expect(store.listRuns()).toEqual([]);
-    expect(store.getAttemptId('run-1')).toBeUndefined();
+    expect(store.getLatestAttemptId('run-1')).toBeUndefined();
     expect(store.listRunActivity('run-1')).toEqual([]);
     expect(store.getRunPublication('run-1')).toBeUndefined();
     // The Task a Run points to is left alone — runs.task_id references

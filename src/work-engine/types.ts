@@ -67,9 +67,15 @@ export interface Profile {
   readonly createdAt: string;
 }
 
-/** One row of the durable Run activity trail (ticket 12 AC2) — never mutated, only appended. Ticket 13 adds 'publish-authorized': the admin authorized an external effect for a verified result. */
+/**
+ * One row of the durable Run activity trail (ticket 12 AC2) — never mutated,
+ * only appended. Ticket 13 adds 'publish-authorized': the admin authorized
+ * an external effect for a verified result. Ticket 68 (B12) adds
+ * 'attempt-retried': a genuinely new runtime Attempt was started — never
+ * conflated with 'verification-retried', which never reruns the agent.
+ */
 export type RunActivityKind = 'submitted' | 'input' | 'approved' | 'denied' | 'paused' | 'resumed' | 'cancelled'
-  | 'verification-retried' | 'delivery-requested' | 'publish-authorized';
+  | 'verification-retried' | 'delivery-requested' | 'publish-authorized' | 'attempt-retried';
 
 export interface RunActivity {
   readonly id: string;
@@ -487,16 +493,31 @@ interface AttemptRunBase {
 }
 
 /**
- * The state of the one Attempt a Run has started (ticket 05 starts exactly
- * one; retries/continuation are later tickets). idle until start(); running
+ * The state of one Attempt. idle until start()/retryAttempt(); running
  * accumulates events as the adapter reports them; completed/failed freeze
  * the final ordered event history alongside the terminal event's own detail.
+ * A Run may carry more than one of these over its lifetime (ticket 68 (B12),
+ * see RunAttemptRecord/WorkRun.attempts below) — this type itself never
+ * changed shape to support that; only how many a Run can have did.
  */
 export type AttemptState =
   | { readonly state: 'idle' }
   | (AttemptRunBase & { readonly state: 'running' })
   | (AttemptRunBase & { readonly state: 'completed'; readonly completedAt: string })
   | (AttemptRunBase & { readonly state: 'failed'; readonly failedAt: string; readonly reason: string });
+
+/**
+ * Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): one Attempt's
+ * identity alongside its already-existing projected state — never a new
+ * shape for AttemptState itself, only a wrapper naming which attempt (in
+ * start order) it is.
+ */
+export interface RunAttemptRecord {
+  readonly attemptId: string;
+  /** 1-based, in start order — display-only; never used as a lookup key. */
+  readonly ordinal: number;
+  readonly state: AttemptState;
+}
 
 /** Folded live from the durable event log (see attempt-projection.ts's deriveOpenAttentionRequest) — never its own stored record. */
 export interface RunAttentionRequest {
@@ -591,7 +612,17 @@ export interface WorkRun {
   readonly envelope: RunEnvelopeState;
   /** Ticket 08: the Repository's admin-approved verification policy, resolved and frozen once preparation completes. */
   readonly verificationPolicy: RunVerificationPolicyState;
+  /** `attempts?.at(-1)?.state`, or `{ state: 'idle' }` — the current Attempt, exactly as this field always meant before ticket 68 (B12). Every reader that only cares about "the current attempt" (pause/resume, resolveAttention, the collaborator narrative, this UI's default view) keeps reading this field unchanged. */
   readonly attempt: AttemptState;
+  /**
+   * Ticket 68 (B12): every Attempt this Run has ever had, oldest first —
+   * optional (like pendingAttention/publication below) so existing WorkRun
+   * literals across the test suite need no update; Store.attachAttempt
+   * always populates it on the real read path. Absent is never
+   * distinguished from empty by any reader — both mean "treat as if only
+   * `attempt` were known."
+   */
+  readonly attempts?: readonly RunAttemptRecord[];
   /**
    * Optional rather than always-present so existing WorkRun literals across
    * the test suite need no update — absent means "nothing pending" exactly
@@ -775,6 +806,19 @@ export interface WorkEngine {
    * background and is observed by rereading the Run (get/list).
    */
   start(runId: string, actor?: RunActor): Promise<WorkRun>;
+  /**
+   * Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): starts a
+   * genuinely new Attempt for a Run whose current one has already ended —
+   * distinct from reverify()/apply(), which never rerun the agent and only
+   * ever append to the existing (single) Attempt's own event log. Eligible
+   * only for `failed | failed_budget | cancelled | failed_verification |
+   * completed_unverified`; refused (same message as start()'s own guard)
+   * while the current attempt is not itself terminal. Resets the prepared
+   * worktree back to its frozen base commit before starting, so the new
+   * Attempt never inherits whatever the previous one left behind — every
+   * prior Attempt's durable event log is preserved unchanged regardless.
+   */
+  retryAttempt(runId: string, actor?: RunActor): Promise<WorkRun>;
   /**
    * Called once at boot (ticket 06), before any caller can reach this
    * engine: every Run left 'running' when the previous process stopped has
