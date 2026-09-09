@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { derivePreviewCandidates } from '../../work-engine/run-preview.js';
 import { deriveRunResult } from '../../work-engine/run-result.js';
 import { defaultPublicationTarget } from '../../work-engine/publication.js';
@@ -137,6 +137,11 @@ const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
   ambiguous: 'Publication outcome is unknown. Check origin before publishing again.',
 };
 
+/** Ticket 13: the one gate for "publication is even relevant here" — a delivery commit on a `completed` Run — shared by PublicationPanel and PublicationHint so the two surfaces of the same decision can't drift apart. */
+function isPublishableRun(run: WorkRun): boolean {
+  return Boolean(deriveRunResult(run)?.commit) && run.status === 'completed';
+}
+
 /**
  * Ticket 13: publication is a separate, explicit step after a verified
  * result — never implied by the result itself. Shows what the admin
@@ -147,8 +152,7 @@ const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
  * render it, and the engine refuses them regardless (AC2).
  */
 function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: WorkRun, target: PublicationTarget) => void }) {
-  const result = deriveRunResult(run);
-  if (!result?.commit || run.status !== 'completed') return null;
+  if (!isPublishableRun(run)) return null;
   const { publication } = run;
   const requestedTarget: PublicationTarget = defaultPublicationTarget(run.spec.requestedDeliveryResult);
   const canPublish = Boolean(onPublish) && (!publication || publication.state === 'failed' || publication.state === 'ambiguous');
@@ -353,6 +357,101 @@ function CompanionSessionsPanel({ companionSessions, onOpenCompanionSession }: {
   );
 }
 
+/**
+ * Presentation-only redesign slice (parent issue #37,
+ * docs/prototypes/agentdeck-redesign.html): a calmer default view for a
+ * completed page's worth of always-open
+ * `<details>`. Every panel below stays mounted regardless of which tab is
+ * active — only the `hidden` attribute changes — so nothing in any panel
+ * (a feedback draft, a pending-input field, whatever a caller was doing)
+ * ever unmounts and loses state on a tab switch. Only opening a *different*
+ * Run resets the selection, via the run.id effect below.
+ */
+type RunDetailTab = 'overview' | 'activity' | 'execution';
+const RUN_DETAIL_TABS: { id: RunDetailTab; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'activity', label: 'Activity' },
+  { id: 'execution', label: 'Execution' },
+];
+
+/** WAI-ARIA "Tabs" pattern: roving tabindex, Left/Right/Home/End move both selection and focus. */
+function RunDetailTabList({ active, onChange }: { active: RunDetailTab; onChange: (tab: RunDetailTab) => void }) {
+  const buttonRefs = useRef<Partial<Record<RunDetailTab, HTMLButtonElement | null>>>({});
+  const select = (id: RunDetailTab) => {
+    onChange(id);
+    buttonRefs.current[id]?.focus();
+  };
+  return (
+    <div
+      aria-label="Run detail sections"
+      className="run-detail-tabs"
+      onKeyDown={(event) => {
+        const index = RUN_DETAIL_TABS.findIndex((tab) => tab.id === active);
+        if (event.key === 'ArrowRight') { event.preventDefault(); select(RUN_DETAIL_TABS[(index + 1) % RUN_DETAIL_TABS.length]!.id); }
+        else if (event.key === 'ArrowLeft') { event.preventDefault(); select(RUN_DETAIL_TABS[(index - 1 + RUN_DETAIL_TABS.length) % RUN_DETAIL_TABS.length]!.id); }
+        else if (event.key === 'Home') { event.preventDefault(); select(RUN_DETAIL_TABS[0]!.id); }
+        else if (event.key === 'End') { event.preventDefault(); select(RUN_DETAIL_TABS.at(-1)!.id); }
+      }}
+      role="tablist"
+    >
+      {RUN_DETAIL_TABS.map((tab) => (
+        <button
+          aria-controls={`run-tabpanel-${tab.id}`}
+          aria-selected={active === tab.id}
+          className={active === tab.id ? 'is-active' : ''}
+          id={`run-tab-${tab.id}`}
+          key={tab.id}
+          onClick={() => onChange(tab.id)}
+          ref={(el) => { buttonRefs.current[tab.id] = el; }}
+          role="tab"
+          tabIndex={active === tab.id ? 0 : -1}
+          type="button"
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A blocker with no RunResult yet to carry it (worktree preparation failed,
+ * or no runtime could satisfy the envelope) — both happen before an Attempt
+ * ever starts, so RunResultPanel (which needs a settled Attempt) never
+ * shows them. Kept above the tabs so it stays visible from any tab, never
+ * duplicating the actual recovery control (still the sole "Retry worktree
+ * preparation" button inside Execution) — this is discovery only, a jump to
+ * where that control lives.
+ */
+function RunBlockedNotice({ heading, detail, onOpenExecution }: { heading: string; detail?: string; onOpenExecution: () => void }) {
+  return (
+    <div className="run-blocked-notice" role="alert">
+      <strong>{heading}</strong>
+      {detail && <p>{detail}</p>}
+      <button className="button" onClick={onOpenExecution} type="button">Open Execution</button>
+    </div>
+  );
+}
+
+/**
+ * A one-line pointer to Publication's actual state, shown in Overview so a
+ * verified result's publish step is never buried a tab away — but the
+ * publish control itself stays singular, inside Execution's PublicationPanel
+ * (ticket 13's admin-only, explicit step). This never calls onPublish; it
+ * only switches tabs.
+ */
+function PublicationHint({ run, onOpenExecution }: { run: WorkRun; onOpenExecution: () => void }) {
+  if (!isPublishableRun(run)) return null;
+  const { publication } = run;
+  return (
+    <p className="run-publication-hint">
+      <span className={`work-run-status status-${publication?.state ?? 'none'}`}>Publication</span>
+      {' '}{publication ? PUBLICATION_STATE_COPY[publication.state] : 'This result stays local until you publish it.'}
+      {' '}<button className="button" onClick={onOpenExecution} type="button">Open Execution</button>
+    </p>
+  );
+}
+
 interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
@@ -387,6 +486,18 @@ export function RunWorkspace({
   structuredAttemptsEnabled = false, companionSessions = [], onOpenCompanionSession,
 }: Props) {
   const { preparation, envelope, attempt } = run;
+  const [activeTab, setActiveTab] = useState<RunDetailTab>('overview');
+  const openExecution = () => setActiveTab('execution');
+  // Reset to Overview whenever a *different* Run is opened — never on a
+  // same-Run re-render (a poll refresh, a new event), which would otherwise
+  // yank the admin back out of whatever tab they were reading.
+  const runIdRef = useRef(run.id);
+  useEffect(() => {
+    if (runIdRef.current !== run.id) {
+      runIdRef.current = run.id;
+      setActiveTab('overview');
+    }
+  }, [run.id]);
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
   const canDelete = isTerminalRunStatus(run.status) && Boolean(onDelete);
   // Both Codex and Claude have a real runtimes/*.ts Attempt adapter wired
@@ -441,199 +552,252 @@ export function RunWorkspace({
           )}
         </span>
       </header>
-      <section><h2>Acceptance criteria</h2><ol>{run.spec.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ol></section>
-      <dl className="run-intent-grid">
-        <div><dt>Repository</dt><dd>{run.spec.repository.name}<small>{run.spec.repository.path}</small></dd></div>
-        <div><dt>Requested base</dt><dd>{run.spec.requestedBaseReference}</dd></div>
-        <div><dt>Runtime preference</dt><dd>{run.spec.runtimePreference.join(' → ')}</dd></div>
-        <div><dt>Requested result</dt><dd>{formatRunLabel(run.spec.requestedDeliveryResult)}</dd></div>
-        <div><dt>Budget</dt><dd>{Object.entries(run.spec.budget).map(([name, value]) => <span key={name}>{formatRunLabel(name)}: {value}</span>)}</dd></div>
-        <div><dt>Verification intent</dt><dd><strong>{run.spec.verificationIntent.required ? 'Required' : 'Optional'}</strong>{run.spec.verificationIntent.commands.map((command) => <code key={command}>{command}</code>)}</dd></div>
-      </dl>
-      <section className="run-preparation">
-        {/* Open while there is something to do or explain (pending/in
-            progress/failed); once the worktree is ready, the facts stay in
-            the DOM but collapse behind the status pill in the summary —
-            they were the point while setup was underway, not afterward. */}
-        <details className="run-section-detail" open={preparation.state !== 'ready'}>
-          <SectionSummary heading="Worktree preparation" state={preparation.state} />
-          <dl className="run-intent-grid">
-            <div><dt>Resolved base commit</dt><dd>{preparation.baseCommit ? <code>{preparation.baseCommit}</code> : 'Not yet resolved'}</dd></div>
-            <div>
-              <dt>Worktree</dt>
-              <dd>
-                {preparation.worktreePath ? <code>{preparation.worktreePath}</code> : 'Not yet created'}
-                {/* The path lives under AgentDeck's data directory in $HOME, but the
-                    worktree belongs to the selected Repository — say so, because the
-                    bare path reads as though the Run ran in the wrong repository. */}
-                <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
-              </dd>
-            </div>
-            {preparation.error && <div><dt>Last error</dt><dd>{preparation.error}</dd></div>}
-          </dl>
-          {canPrepare && (
-            <button className="button button-primary" onClick={() => onPrepare(run)} type="button">
-              {preparation.state === 'failed' ? 'Retry worktree preparation' : 'Prepare worktree'}
-            </button>
-          )}
-        </details>
-      </section>
-      <section className="run-envelope">
-        <details className="run-section-detail" open={envelope.state !== 'ready'}>
-          <SectionSummary heading="Capability envelope" state={envelope.state} />
-          {envelope.state !== 'pending' && (
+      {/*
+       * Above the tabs, on every tab: the objective (in the header above),
+       * the actual status (the pill in the header), pending Attention, and
+       * any blocker an Attempt never got far enough to turn into a
+       * RunResult. Everything else — narrative, result, execution detail,
+       * history — is one click into whichever tab groups it below.
+       */}
+      {structuredAttemptsEnabled && eligibleForStructuredAttempt && run.pendingAttention && (() => {
+        const pending = run.pendingAttention;
+        return (
+          <section aria-labelledby="run-attention-title" className="run-attention-request" data-attention-kind={pending.kind}>
+            <strong id="run-attention-title">{pending.kind === 'approval' ? 'Approval requested' : 'Input requested'}</strong>
+            <p>{pending.reason}</p>
+            {pending.kind === 'approval' ? (
+              <div className="run-attention-actions" role="group" aria-label="Approval response">
+                <button className="button" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'deny' })} type="button">
+                  Deny
+                </button>
+                <button className="button button-primary" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'approve' })} type="button">
+                  Approve
+                </button>
+              </div>
+            ) : (
+              <AttentionInputForm onSubmit={(value) => onResolveAttention?.(run, pending.id, { kind: 'input', value })} />
+            )}
+          </section>
+        );
+      })()}
+      {preparation.state === 'failed' && (
+        <RunBlockedNotice detail={preparation.error} heading="Worktree preparation failed" onOpenExecution={openExecution} />
+      )}
+      {envelope.state === 'refused' && (
+        <RunBlockedNotice detail={envelope.reason} heading="No runtime could run this Run" onOpenExecution={openExecution} />
+      )}
+
+      <RunDetailTabList active={activeTab} onChange={setActiveTab} />
+
+      <div aria-labelledby="run-tab-overview" className="run-detail-panel" hidden={activeTab !== 'overview'} id="run-tabpanel-overview" role="tabpanel">
+        <section><h2>Acceptance criteria</h2><ol>{run.spec.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}</ol></section>
+        {/*
+         * The readable narrative — answer, what it did, verdict — stays
+         * behind the same experimental gate the whole Attempt concept
+         * always has (ticket 05). Activity's own copy of this Attempt's
+         * report (below) is the full multi-attempt history; this one is
+         * just the latest attempt's story, for a quick read.
+         */}
+        {structuredAttemptsEnabled && eligibleForStructuredAttempt && attempt.state !== 'idle' && (
+          <section className="run-narrative">
+            <h2>What happened</h2>
+            <AttemptReport events={attempt.events} />
+          </section>
+        )}
+        <RunResultPanel onApply={onApply} onPreview={onPreview} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />
+        {/*
+         * Ticket 13: publication is independent of the structured-attempts
+         * experimental panel — it depends only on run.status and a delivery
+         * commit (findDeliveryCommit, inside PublicationPanel itself),
+         * never on structuredAttemptsEnabled, so the admin's only way to
+         * authorize a publish isn't hidden behind an unrelated, default-off
+         * feature flag. The actual control lives in Execution; this is a
+         * one-line pointer to it so a verified result's next step is never
+         * buried a tab away.
+         */}
+        <PublicationHint onOpenExecution={openExecution} run={run} />
+        <RunFeedbackPanel runId={run.id} />
+      </div>
+
+      <div aria-labelledby="run-tab-activity" className="run-detail-panel" hidden={activeTab !== 'activity'} id="run-tabpanel-activity" role="tabpanel">
+        {/*
+         * "Existing execution events and Attempt history" — the historical
+         * record, distinct from Execution's live attempt *controls* below.
+         * Ticket 68 (B12): `run.attempts` (present on every real, store-
+         * backed Run) renders the full history — a retried Run's first
+         * attempt stays fully visible, never overwritten or hidden, once a
+         * second one exists. Falls back to the single current attempt for
+         * any caller/fixture that hasn't adopted `attempts` yet.
+         */}
+        {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
+          <section className="run-attempt-history-section">
+            <h2>Attempt history</h2>
+            {run.attempts && run.attempts.length > 0 ? (
+              <div className="run-attempt-history">
+                {run.attempts.map((record) => (
+                  <details className="run-section-detail" key={record.attemptId} open={record.ordinal === run.attempts!.length}>
+                    <summary>
+                      Attempt {record.ordinal} of {run.attempts!.length}
+                      {' '}<span className={`work-run-status status-${record.state.state}`}>{formatRunLabel(record.state.state)}</span>
+                    </summary>
+                    {record.state.state !== 'idle' && <AttemptReport events={record.state.events} />}
+                  </details>
+                ))}
+              </div>
+            ) : (
+              attempt.state !== 'idle' && <AttemptReport events={attempt.events} />
+            )}
+          </section>
+        )}
+      </div>
+
+      <div aria-labelledby="run-tab-execution" className="run-detail-panel" hidden={activeTab !== 'execution'} id="run-tabpanel-execution" role="tabpanel">
+        {/*
+         * "...and existing execution/delivery controls" — Start/Pause/
+         * Resume/retry all act on the current Attempt shown right beside
+         * them, so the controls stay grouped with the state they read,
+         * rather than splitting a button from the status it depends on.
+         */}
+        {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
+          <section className="run-attempt">
+            <h2>Attempt</h2>
             <dl className="run-intent-grid">
-              {envelope.state === 'refused' && <div><dt>Refusal reason</dt><dd>{envelope.reason}</dd></div>}
-              {envelope.state === 'ready' && (() => {
-                const { runtime, profile } = envelope.capabilityEnvelope;
-                return (
-                  <>
-                    <div><dt>Runtime</dt><dd>{formatRunLabel(runtime)}</dd></div>
-                    <div>
-                      <dt>Writable worktree</dt>
-                      <dd>
-                        <code>{profile.writableWorktree}</code>
-                        <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
-                      </dd>
-                    </div>
-                  </>
-                );
-              })()}
-            </dl>
-          )}
-          {envelope.state === 'ready' && (() => {
-            const { profile, secretGrants } = envelope.capabilityEnvelope;
-            return (
-              <details className="run-technical-detail">
-                <summary>Permissions &amp; limits</summary>
-                <dl className="run-intent-grid">
-                  <div><dt>Readable roots</dt><dd>{profile.readableRoots.map((root) => <code key={root}>{root}</code>)}</dd></div>
-                  <div>
-                    <dt>Allowed network domains</dt>
-                    <dd>{profile.allowedNetworkDomains.length > 0
-                      ? profile.allowedNetworkDomains.map((domain) => <code key={domain}>{domain}</code>)
-                      : 'None (denied by default)'}</dd>
-                  </div>
-                  <div>
-                    <dt>Inherited environment variables</dt>
-                    <dd>{profile.environmentAllowlist.map((name) => <code key={name}>{name}</code>)}</dd>
-                  </div>
-                  <div><dt>Process ceiling</dt><dd>{profile.processCeiling}</dd></div>
-                  <div><dt>Child-Run ceiling</dt><dd>{profile.childRunCeiling}</dd></div>
-                  <div>
-                    <dt>Secret grants</dt>
-                    <dd>{secretGrants.length > 0
-                      ? secretGrants.map((grant) => <span key={grant.name}>{grant.name}: <code>{grant.reference}</code></span>)
-                      : 'None'}</dd>
-                  </div>
-                </dl>
-              </details>
-            );
-          })()}
-        </details>
-      </section>
-      <CompanionSessionsPanel companionSessions={companionSessions} onOpenCompanionSession={onOpenCompanionSession} />
-      {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
-        <section className="run-attempt">
-          <h2>Attempt</h2>
-          <dl className="run-intent-grid">
-            <div><dt>Runtime</dt><dd>{formatRunLabel(envelope.state === 'ready' ? envelope.capabilityEnvelope.runtime : '')}</dd></div>
-            <div>
-              <dt>Attempt state</dt>
-              <dd><span className={`work-run-status status-${attempt.state}`}>{formatRunLabel(attempt.state)}</span></dd>
-            </div>
-            {attempt.state === 'failed' && <div><dt>Terminal outcome</dt><dd>Failed — {attempt.reason}</dd></div>}
-            {attempt.state === 'completed' && (
+              <div><dt>Runtime</dt><dd>{formatRunLabel(envelope.state === 'ready' ? envelope.capabilityEnvelope.runtime : '')}</dd></div>
               <div>
-                <dt>Terminal outcome</dt>
-                <dd>{(() => {
-                  const last = attempt.events.at(-1);
-                  return last?.kind === 'completion' ? `Completed — ${formatRunLabel(last.outcome)}` : 'Completed';
-                })()}</dd>
+                <dt>Attempt state</dt>
+                <dd><span className={`work-run-status status-${attempt.state}`}>{formatRunLabel(attempt.state)}</span></dd>
+              </div>
+              {attempt.state === 'failed' && <div><dt>Terminal outcome</dt><dd>Failed — {attempt.reason}</dd></div>}
+              {attempt.state === 'completed' && (
+                <div>
+                  <dt>Terminal outcome</dt>
+                  <dd>{(() => {
+                    const last = attempt.events.at(-1);
+                    return last?.kind === 'completion' ? `Completed — ${formatRunLabel(last.outcome)}` : 'Completed';
+                  })()}</dd>
+                </div>
+              )}
+            </dl>
+            {canStart && (
+              <button className="button button-primary" onClick={() => onStart?.(run)} type="button">
+                Start Attempt
+              </button>
+            )}
+            {canRetryAttempt && (
+              <button className="button" onClick={() => onRetryAttempt?.(run)} type="button">
+                Start a new attempt
+              </button>
+            )}
+            {(canPause || canResume) && (
+              <div className="run-attention-actions" role="group" aria-label="Pause and resume">
+                {canPause && (
+                  <button className="button" onClick={() => onPause?.(run)} type="button">
+                    Pause
+                  </button>
+                )}
+                {canResume && (
+                  <button className="button button-primary" onClick={() => onResume?.(run)} type="button">
+                    Resume
+                  </button>
+                )}
               </div>
             )}
-          </dl>
-          {canStart && (
-            <button className="button button-primary" onClick={() => onStart?.(run)} type="button">
-              Start Attempt
-            </button>
-          )}
-          {canRetryAttempt && (
-            <button className="button" onClick={() => onRetryAttempt?.(run)} type="button">
-              Start a new attempt
-            </button>
-          )}
-          {(canPause || canResume) && (
-            <div className="run-attention-actions" role="group" aria-label="Pause and resume">
-              {canPause && (
-                <button className="button" onClick={() => onPause?.(run)} type="button">
-                  Pause
-                </button>
-              )}
-              {canResume && (
-                <button className="button button-primary" onClick={() => onResume?.(run)} type="button">
-                  Resume
-                </button>
-              )}
-            </div>
-          )}
-          {run.pendingAttention && (() => {
-            const pending = run.pendingAttention;
-            return (
-              <section aria-labelledby="run-attention-title" className="run-attention-request" data-attention-kind={pending.kind}>
-                <strong id="run-attention-title">{pending.kind === 'approval' ? 'Approval requested' : 'Input requested'}</strong>
-                <p>{pending.reason}</p>
-                {pending.kind === 'approval' ? (
-                  <div className="run-attention-actions" role="group" aria-label="Approval response">
-                    <button className="button" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'deny' })} type="button">
-                      Deny
-                    </button>
-                    <button className="button button-primary" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'approve' })} type="button">
-                      Approve
-                    </button>
-                  </div>
-                ) : (
-                  <AttentionInputForm onSubmit={(value) => onResolveAttention?.(run, pending.id, { kind: 'input', value })} />
-                )}
-              </section>
-            );
-          })()}
-          {/*
-           * Ticket 68 (B12): `run.attempts` (present on every real, store-
-           * backed Run) renders the full history — a retried Run's first
-           * attempt stays fully visible, never overwritten or hidden, once
-           * a second one exists. Falls back to the single current attempt
-           * for any caller/fixture that hasn't adopted `attempts` yet.
-           */}
-          {run.attempts && run.attempts.length > 0 ? (
-            <div className="run-attempt-history">
-              {run.attempts.map((record) => (
-                <details className="run-section-detail" key={record.attemptId} open={record.ordinal === run.attempts!.length}>
-                  <summary>
-                    Attempt {record.ordinal} of {run.attempts!.length}
-                    {' '}<span className={`work-run-status status-${record.state.state}`}>{formatRunLabel(record.state.state)}</span>
-                  </summary>
-                  {record.state.state !== 'idle' && <AttemptReport events={record.state.events} />}
-                </details>
-              ))}
-            </div>
-          ) : (
-            attempt.state !== 'idle' && <AttemptReport events={attempt.events} />
-          )}
+          </section>
+        )}
+        <dl className="run-intent-grid">
+          <div><dt>Repository</dt><dd>{run.spec.repository.name}<small>{run.spec.repository.path}</small></dd></div>
+          <div><dt>Requested base</dt><dd>{run.spec.requestedBaseReference}</dd></div>
+          <div><dt>Runtime preference</dt><dd>{run.spec.runtimePreference.join(' → ')}</dd></div>
+          <div><dt>Requested result</dt><dd>{formatRunLabel(run.spec.requestedDeliveryResult)}</dd></div>
+          <div><dt>Budget</dt><dd>{Object.entries(run.spec.budget).map(([name, value]) => <span key={name}>{formatRunLabel(name)}: {value}</span>)}</dd></div>
+          <div><dt>Verification intent</dt><dd><strong>{run.spec.verificationIntent.required ? 'Required' : 'Optional'}</strong>{run.spec.verificationIntent.commands.map((command) => <code key={command}>{command}</code>)}</dd></div>
+        </dl>
+        <section className="run-preparation">
+          {/* Open while there is something to do or explain (pending/in
+              progress/failed); once the worktree is ready, the facts stay in
+              the DOM but collapse behind the status pill in the summary —
+              they were the point while setup was underway, not afterward. */}
+          <details className="run-section-detail" open={preparation.state !== 'ready'}>
+            <SectionSummary heading="Worktree preparation" state={preparation.state} />
+            <dl className="run-intent-grid">
+              <div><dt>Resolved base commit</dt><dd>{preparation.baseCommit ? <code>{preparation.baseCommit}</code> : 'Not yet resolved'}</dd></div>
+              <div>
+                <dt>Worktree</dt>
+                <dd>
+                  {preparation.worktreePath ? <code>{preparation.worktreePath}</code> : 'Not yet created'}
+                  {/* The path lives under AgentDeck's data directory in $HOME, but the
+                      worktree belongs to the selected Repository — say so, because the
+                      bare path reads as though the Run ran in the wrong repository. */}
+                  <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
+                </dd>
+              </div>
+              {preparation.error && <div><dt>Last error</dt><dd>{preparation.error}</dd></div>}
+            </dl>
+            {canPrepare && (
+              <button className="button button-primary" onClick={() => onPrepare(run)} type="button">
+                {preparation.state === 'failed' ? 'Retry worktree preparation' : 'Prepare worktree'}
+              </button>
+            )}
+          </details>
         </section>
-      )}
-      <RunResultPanel onApply={onApply} onPreview={onPreview} onReverify={onReverify} onViewChanges={onViewChanges} run={run} />
-      {/*
-       * Ticket 13: publication is independent of the structured-attempts
-       * experimental panel above — it depends only on run.status and a
-       * delivery commit (findDeliveryCommit, inside PublicationPanel
-       * itself), never on structuredAttemptsEnabled or the
-       * eligibleForStructuredAttempt check above, so the admin's only way to authorize
-       * a publish isn't hidden behind an unrelated, default-off feature
-       * flag.
-       */}
-      <PublicationPanel onPublish={onPublish} run={run} />
-      <RunFeedbackPanel runId={run.id} />
+        <section className="run-envelope">
+          <details className="run-section-detail" open={envelope.state !== 'ready'}>
+            <SectionSummary heading="Capability envelope" state={envelope.state} />
+            {envelope.state !== 'pending' && (
+              <dl className="run-intent-grid">
+                {envelope.state === 'refused' && <div><dt>Refusal reason</dt><dd>{envelope.reason}</dd></div>}
+                {envelope.state === 'ready' && (() => {
+                  const { runtime, profile } = envelope.capabilityEnvelope;
+                  return (
+                    <>
+                      <div><dt>Runtime</dt><dd>{formatRunLabel(runtime)}</dd></div>
+                      <div>
+                        <dt>Writable worktree</dt>
+                        <dd>
+                          <code>{profile.writableWorktree}</code>
+                          <small>Git worktree of {run.spec.repository.name} · {run.spec.repository.path}</small>
+                        </dd>
+                      </div>
+                    </>
+                  );
+                })()}
+              </dl>
+            )}
+            {envelope.state === 'ready' && (() => {
+              const { profile, secretGrants } = envelope.capabilityEnvelope;
+              return (
+                <details className="run-technical-detail">
+                  <summary>Permissions &amp; limits</summary>
+                  <dl className="run-intent-grid">
+                    <div><dt>Readable roots</dt><dd>{profile.readableRoots.map((root) => <code key={root}>{root}</code>)}</dd></div>
+                    <div>
+                      <dt>Allowed network domains</dt>
+                      <dd>{profile.allowedNetworkDomains.length > 0
+                        ? profile.allowedNetworkDomains.map((domain) => <code key={domain}>{domain}</code>)
+                        : 'None (denied by default)'}</dd>
+                    </div>
+                    <div>
+                      <dt>Inherited environment variables</dt>
+                      <dd>{profile.environmentAllowlist.map((name) => <code key={name}>{name}</code>)}</dd>
+                    </div>
+                    <div><dt>Process ceiling</dt><dd>{profile.processCeiling}</dd></div>
+                    <div><dt>Child-Run ceiling</dt><dd>{profile.childRunCeiling}</dd></div>
+                    <div>
+                      <dt>Secret grants</dt>
+                      <dd>{secretGrants.length > 0
+                        ? secretGrants.map((grant) => <span key={grant.name}>{grant.name}: <code>{grant.reference}</code></span>)
+                        : 'None'}</dd>
+                    </div>
+                  </dl>
+                </details>
+              );
+            })()}
+          </details>
+        </section>
+        <CompanionSessionsPanel companionSessions={companionSessions} onOpenCompanionSession={onOpenCompanionSession} />
+        <PublicationPanel onPublish={onPublish} run={run} />
+      </div>
+
       <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
     </article>
   );

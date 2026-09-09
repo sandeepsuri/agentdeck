@@ -1,9 +1,24 @@
-import { createElement } from 'react';
+// @vitest-environment jsdom
+import { act, createElement } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import {
+  afterEach, beforeAll, describe, expect, it, vi,
+} from 'vitest';
 import type { RunCompanionSessionRef } from '../../work-engine/run-companion-session.js';
 import type { WorkRun } from '../../work-engine/types.js';
 import { RunWorkspace } from './RunWorkspace.js';
+
+beforeAll(() => { (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
+let root: Root | undefined;
+let host: HTMLDivElement | undefined;
+afterEach(async () => {
+  await act(async () => { root?.unmount(); });
+  host?.remove();
+  root = undefined;
+  host = undefined;
+  vi.unstubAllGlobals();
+});
 
 function baseRun(): WorkRun {
   return {
@@ -941,5 +956,167 @@ describe('RunWorkspace preview control (ticket 70, B10)', () => {
   it('offers no Preview control before the Attempt has settled — no RunResult yet', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), onPreview: () => undefined }));
     expect(html).not.toContain('Preview ');
+  });
+});
+
+// Presentation-only redesign slice (docs/prototypes/agentdeck-redesign.html):
+// Overview/Activity/Execution tabs. Interactive (createRoot + act, unlike
+// the static-markup tests above) because these exercise real click/keyboard
+// events and DOM `hidden` toggling, not just rendered text.
+describe('RunWorkspace detail tabs (presentation-only redesign slice)', () => {
+  function stubFetch() {
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => new Response(
+      JSON.stringify(String(url).includes('/review') ? { state: 'not_applicable' } : []),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )));
+  }
+
+  async function render(props: { run: WorkRun; structuredAttemptsEnabled?: boolean; onPrepare?: (run: WorkRun) => void }) {
+    stubFetch();
+    host = document.createElement('div');
+    document.body.append(host);
+    root = createRoot(host);
+    await act(async () => { root!.render(createElement(RunWorkspace, props)); });
+  }
+
+  function runningEligibleRun(): WorkRun {
+    return {
+      ...eligibleRun(),
+      status: 'running',
+      attempt: {
+        state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+        events: [{ kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:00.000Z', phase: 'attempt-started' }],
+      },
+    };
+  }
+
+  function tabButton(id: 'overview' | 'activity' | 'execution'): HTMLButtonElement {
+    return host!.querySelector(`#run-tab-${id}`) as HTMLButtonElement;
+  }
+  function tabPanel(id: 'overview' | 'activity' | 'execution'): HTMLElement {
+    return host!.querySelector(`#run-tabpanel-${id}`) as HTMLElement;
+  }
+
+  it('defaults to Overview visible, with Activity and Execution content present in the DOM but hidden', async () => {
+    await render({ run: runningEligibleRun(), structuredAttemptsEnabled: true });
+
+    expect(tabButton('overview').getAttribute('aria-selected')).toBe('true');
+    expect(tabPanel('overview').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel('activity').hasAttribute('hidden')).toBe(true);
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(true);
+    // Content stays mounted (just hidden) — Execution's own facts are already in the DOM.
+    expect(tabPanel('execution').textContent).toContain('Capability envelope');
+  });
+
+  it('switches the visible panel on click, and keyboard ArrowRight/ArrowLeft moves both selection and focus among tabs (Overview, Activity, Execution, in that order)', async () => {
+    await render({ run: runningEligibleRun(), structuredAttemptsEnabled: true });
+
+    await act(async () => { tabButton('execution').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel('overview').hasAttribute('hidden')).toBe(true);
+    expect(tabButton('execution').getAttribute('aria-selected')).toBe('true');
+
+    tabButton('execution').focus();
+    // Execution is the last tab — ArrowRight wraps around to Overview, the first.
+    await act(async () => {
+      tabButton('execution').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    expect(tabButton('overview').getAttribute('aria-selected')).toBe('true');
+    expect(tabPanel('overview').hasAttribute('hidden')).toBe(false);
+    expect(document.activeElement).toBe(tabButton('overview'));
+
+    await act(async () => {
+      tabButton('overview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    expect(tabButton('activity').getAttribute('aria-selected')).toBe('true');
+    expect(tabPanel('activity').hasAttribute('hidden')).toBe(false);
+    expect(document.activeElement).toBe(tabButton('activity'));
+
+    // Overview is the first tab — ArrowLeft from it wraps around to Execution, the last.
+    await act(async () => {
+      tabButton('activity').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    });
+    expect(tabButton('overview').getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tabButton('overview'));
+
+    await act(async () => {
+      tabButton('overview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    });
+    expect(tabButton('execution').getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tabButton('execution'));
+  });
+
+  it('keeps pending Attention visible above the tabs regardless of which tab is active', async () => {
+    const run: WorkRun = {
+      ...runningEligibleRun(),
+      status: 'waiting_approval',
+      pendingAttention: { id: 'attention-1', kind: 'approval', reason: 'Approve command: rm -rf node_modules', requestedAt: '2026-09-01T00:05:01.000Z' },
+    };
+    await render({ run, structuredAttemptsEnabled: true });
+    expect(host!.textContent).toContain('Approval requested');
+
+    await act(async () => { tabButton('execution').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(host!.textContent).toContain('Approval requested');
+    // Above the tabs, not inside a panel: still visible on Execution.
+    const attentionSection = host!.querySelector('.run-attention-request')!;
+    expect(tabPanel('execution').contains(attentionSection)).toBe(false);
+    expect(tabPanel('overview').contains(attentionSection)).toBe(false);
+  });
+
+  it('shows an actionable failure notice above the tabs, with a working jump to Execution, when worktree preparation fails', async () => {
+    const run: WorkRun = { ...baseRun(), preparation: { state: 'failed', error: 'Worktree path already exists: /repos/example-runs/run-durable-123' } };
+    await render({ run, onPrepare: () => undefined });
+
+    expect(host!.textContent).toContain('Worktree preparation failed');
+    expect(host!.textContent).toContain('Worktree path already exists');
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(true);
+
+    const jumpButton = [...host!.querySelectorAll('.run-blocked-notice button')].find((button) => button.textContent === 'Open Execution')!;
+    await act(async () => { jumpButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
+  });
+
+  it('preserves an in-progress feedback draft when switching tabs and back — nothing in a hidden panel unmounts', async () => {
+    await render({ run: runningEligibleRun(), structuredAttemptsEnabled: true });
+
+    const draft = host!.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(draft, 'still drafting this comment');
+      draft.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(draft.value).toBe('still drafting this comment');
+
+    await act(async () => { tabButton('execution').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await act(async () => { tabButton('overview').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const draftAfter = host!.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement;
+    expect(draftAfter.value).toBe('still drafting this comment');
+  });
+
+  it('resets to the Overview tab when a different Run is opened, even if Execution was open', async () => {
+    const runA = runningEligibleRun();
+    const runB: WorkRun = { ...runningEligibleRun(), id: 'run-durable-456', taskId: 'task-durable-456' };
+    await render({ run: runA, structuredAttemptsEnabled: true });
+
+    await act(async () => { tabButton('execution').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
+
+    await act(async () => { root!.render(createElement(RunWorkspace, { run: runB, structuredAttemptsEnabled: true })); });
+
+    expect(tabPanel('overview').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(true);
+  });
+
+  it('does not reset the active tab on a same-Run re-render (a poll refresh)', async () => {
+    const run = runningEligibleRun();
+    await render({ run, structuredAttemptsEnabled: true });
+
+    await act(async () => { tabButton('execution').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
+
+    // Same Run id, a new object reference — as a poll refresh would produce.
+    await act(async () => { root!.render(createElement(RunWorkspace, { run: { ...run }, structuredAttemptsEnabled: true })); });
+
+    expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
   });
 });
