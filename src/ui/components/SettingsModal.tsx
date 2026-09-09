@@ -1,19 +1,79 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import type { Model } from '../../sessions/model-catalog.js';
 import type { Repo } from '../../types.js';
 import { apiFetch } from '../apiFetch.js';
 import { CollaboratorsPanel } from './CollaboratorsPanel.js';
+import { ProfilesPanel } from './ProfilesPanel.js';
+import { useAccessData } from './useAccessData.js';
 
 interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; error?: string }
 
 /**
- * Ticket 12: default summary model + OpenAI API key. Follows the same
- * modal shell as LaunchModal/PublishModal. The API key field is
- * write-only by design — GET /api/settings only ever returns
+ * Presentation-only redesign slice (parent issue #37,
+ * docs/prototypes/agentdeck-redesign.html): three sections previously
+ * crowded into one scrolling modal — model/key/appearance, the Profile
+ * roster, and Collaborator access — get their own tab. Every tab's panel
+ * stays mounted regardless of which is active (only the `hidden` attribute
+ * changes, exactly like RunWorkspace's run-detail tabs), so an unsaved
+ * invite draft, a "Create new from this Profile" form, or a freshly issued
+ * one-time invitation code all survive a tab switch instead of unmounting
+ * and losing state.
+ */
+type SettingsTab = 'general' | 'profiles' | 'collaborators';
+const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
+  { id: 'general', label: 'General' },
+  { id: 'profiles', label: 'Profiles' },
+  { id: 'collaborators', label: 'Collaborators' },
+];
+
+/** WAI-ARIA "Tabs" pattern: roving tabindex, Left/Right/Home/End move both selection and focus. Mirrors RunWorkspace's RunDetailTabList. */
+function SettingsTabList({ active, onChange }: { active: SettingsTab; onChange: (tab: SettingsTab) => void }) {
+  const buttonRefs = useRef<Partial<Record<SettingsTab, HTMLButtonElement | null>>>({});
+  const select = (id: SettingsTab) => {
+    onChange(id);
+    buttonRefs.current[id]?.focus();
+  };
+  return (
+    <div
+      aria-label="Settings sections"
+      className="settings-tabs"
+      onKeyDown={(event) => {
+        const index = SETTINGS_TABS.findIndex((tab) => tab.id === active);
+        if (event.key === 'ArrowRight') { event.preventDefault(); select(SETTINGS_TABS[(index + 1) % SETTINGS_TABS.length]!.id); }
+        else if (event.key === 'ArrowLeft') { event.preventDefault(); select(SETTINGS_TABS[(index - 1 + SETTINGS_TABS.length) % SETTINGS_TABS.length]!.id); }
+        else if (event.key === 'Home') { event.preventDefault(); select(SETTINGS_TABS[0]!.id); }
+        else if (event.key === 'End') { event.preventDefault(); select(SETTINGS_TABS.at(-1)!.id); }
+      }}
+      role="tablist"
+    >
+      {SETTINGS_TABS.map((tab) => (
+        <button
+          aria-controls={`settings-tabpanel-${tab.id}`}
+          aria-selected={active === tab.id}
+          className={active === tab.id ? 'is-active' : ''}
+          id={`settings-tab-${tab.id}`}
+          key={tab.id}
+          onClick={() => onChange(tab.id)}
+          ref={(el) => { buttonRefs.current[tab.id] = el; }}
+          role="tab"
+          tabIndex={active === tab.id ? 0 : -1}
+          type="button"
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Ticket 12: default summary model + OpenAI API key + appearance. The API
+ * key field is write-only by design — GET /api/settings only ever returns
  * openaiKeyConfigured (a boolean), never the key itself, so there is
  * nothing to prefill here even right after saving one.
  */
-export function SettingsModal({ onClose, repos = [] }: { onClose: () => void; repos?: Repo[] }) {
+export function SettingsModal({ onClose, repos = [], appearanceControl }: { onClose: () => void; repos?: Repo[]; appearanceControl?: ReactNode }) {
+  const [tab, setTab] = useState<SettingsTab>('general');
   const [models, setModels] = useState<Model[]>([]);
   const [openaiKeyConfigured, setOpenaiKeyConfigured] = useState(false);
   const [defaultModel, setDefaultModel] = useState('');
@@ -22,6 +82,7 @@ export function SettingsModal({ onClose, repos = [] }: { onClose: () => void; re
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const access = useAccessData();
 
   useEffect(() => {
     let cancelled = false;
@@ -79,69 +140,97 @@ export function SettingsModal({ onClose, repos = [] }: { onClose: () => void; re
       <section aria-label="Settings" aria-modal="true" className="launch-dialog settings-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog">
         <header className="launch-header">
           <span className="launch-mark">⚙</span>
-          <span><strong>Settings</strong><small>Summary model default and API key</small></span>
-          <kbd>ESC</kbd>
-          <button aria-label="Close" onClick={onClose} type="button">×</button>
+          <span><strong>Settings</strong><small>Workspace configuration and access management</small></span>
+          {/* <kbd>ESC</kbd>
+          <button aria-label="Back to workspace" onClick={onClose} title="Back to workspace" type="button">×</button> */}
         </header>
 
         <div className="settings-content">
-          {loading && <div className="rail-empty">Loading settings…</div>}
-          {!loading && (
-            <>
-              <fieldset>
-                <legend>Default summary model</legend>
-                <p className="field-hint-block">Used for wrap-ups that don't pick a model explicitly. Changing this affects later wrap-ups only — it never rewrites a summary you've already generated.</p>
-                <div className="settings-model-list">
-                  {models.length === 0 && <div className="rail-empty">No models available.</div>}
-                  {models.map((model) => (
-                    <label
-                      className={`settings-model-row${defaultModel === model.id ? ' is-selected' : ''}${!model.available ? ' is-disabled' : ''}`}
-                      key={model.id}
-                    >
-                      <input
-                        checked={defaultModel === model.id}
-                        disabled={!model.available}
-                        name="default-model"
-                        onChange={() => setDefaultModel(model.id)}
-                        type="radio"
-                      />
-                      <span>
-                        <strong>{model.displayName}</strong>
-                        <small>{model.billing === 'subscription' ? 'Billed to your Claude subscription' : 'Billed per use to your OpenAI API key'}{model.unavailableReason ? ` · ${model.unavailableReason}` : ''}</small>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+          <SettingsTabList active={tab} onChange={setTab} />
 
-              <fieldset>
-                <legend>OpenAI API key</legend>
-                <p className="field-hint-block">Required to use OpenAI summary models. A ChatGPT subscription does not include this — it's billed separately, per request. Stored locally at owner-only file permissions and never sent back to this UI once saved.</p>
-                <div className="settings-key-row">
-                  <input
-                    autoComplete="off"
-                    onChange={(event) => setApiKey(event.target.value)}
-                    placeholder={openaiKeyConfigured ? 'Configured — enter a new key to replace it' : 'sk-...'}
-                    type="password"
-                    value={apiKey}
-                  />
-                  {openaiKeyConfigured && <button className="button" disabled={saving} onClick={removeKey} type="button">Remove key</button>}
-                </div>
-                <div className="field-hint"><span>{openaiKeyConfigured ? 'An OpenAI API key is configured.' : 'No OpenAI API key configured — OpenAI models are shown disabled until one is added.'}</span></div>
-              </fieldset>
+          <div aria-labelledby="settings-tab-general" className="settings-tab-panel" hidden={tab !== 'general'} id="settings-tabpanel-general" role="tabpanel">
+            {loading && <div className="rail-empty">Loading settings…</div>}
+            {!loading && (
+              <>
+                <fieldset>
+                  <legend>Default summary model</legend>
+                  <p className="field-hint-block">Used for wrap-ups that don't pick a model explicitly. Changing this affects later wrap-ups only — it never rewrites a summary you've already generated.</p>
+                  <div className="settings-model-list">
+                    {models.length === 0 && <div className="rail-empty">No models available.</div>}
+                    {models.map((model) => (
+                      <label
+                        className={`settings-model-row${defaultModel === model.id ? ' is-selected' : ''}${!model.available ? ' is-disabled' : ''}`}
+                        key={model.id}
+                      >
+                        <input
+                          checked={defaultModel === model.id}
+                          disabled={!model.available}
+                          name="default-model"
+                          onChange={() => setDefaultModel(model.id)}
+                          type="radio"
+                        />
+                        <span>
+                          <strong>{model.displayName}</strong>
+                          <small>{model.billing === 'subscription' ? 'Billed to your Claude subscription' : 'Billed per use to your OpenAI API key'}{model.unavailableReason ? ` · ${model.unavailableReason}` : ''}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
 
-              {error && <div className="form-error">{error}</div>}
-              {saved && !error && <div className="settings-saved">Saved.</div>}
+                <fieldset>
+                  <legend>OpenAI API key</legend>
+                  <p className="field-hint-block">Required to use OpenAI summary models. A ChatGPT subscription does not include this — it's billed separately, per request. Stored locally at owner-only file permissions and never sent back to this UI once saved.</p>
+                  <div className="settings-key-row">
+                    <input
+                      autoComplete="off"
+                      onChange={(event) => setApiKey(event.target.value)}
+                      placeholder={openaiKeyConfigured ? 'Configured — enter a new key to replace it' : 'sk-...'}
+                      type="password"
+                      value={apiKey}
+                    />
+                    {openaiKeyConfigured && <button className="button" disabled={saving} onClick={removeKey} type="button">Remove key</button>}
+                  </div>
+                  <div className="field-hint"><span>{openaiKeyConfigured ? 'An OpenAI API key is configured.' : 'No OpenAI API key configured — OpenAI models are shown disabled until one is added.'}</span></div>
+                </fieldset>
 
-              <CollaboratorsPanel repos={repos} />
-            </>
-          )}
+                {appearanceControl && (
+                  <fieldset>
+                    <legend>Appearance</legend>
+                    <p className="field-hint-block">Choose a comfortable workspace theme, or follow your system setting.</p>
+                    {appearanceControl}
+                  </fieldset>
+                )}
+
+                {error && <div className="form-error">{error}</div>}
+                {saved && !error && <div className="settings-saved">Saved.</div>}
+              </>
+            )}
+          </div>
+
+          <div aria-labelledby="settings-tab-profiles" className="settings-tab-panel" hidden={tab !== 'profiles'} id="settings-tabpanel-profiles" role="tabpanel">
+            <ProfilesPanel access={access} />
+          </div>
+
+          <div aria-labelledby="settings-tab-collaborators" className="settings-tab-panel" hidden={tab !== 'collaborators'} id="settings-tabpanel-collaborators" role="tabpanel">
+            <CollaboratorsPanel access={access} repos={repos} />
+          </div>
         </div>
 
         <footer className="launch-footer">
-          <span className={saved && !saving ? 'is-ready' : ''}><i />{saving ? 'Saving…' : 'Changes apply to future wrap-ups'}</span>
-          <button className="button" onClick={onClose} type="button">Close</button>
-          <button className="button button-primary" disabled={saving || loading} onClick={save} type="button">{saving ? 'Saving…' : 'Save'}</button>
+          {tab === 'general' ? (
+            <>
+              <span className={saved && !saving ? 'is-ready' : ''}><i />{saving ? 'Saving…' : 'Changes apply to future wrap-ups'}</span>
+              <button className="button" onClick={onClose} type="button">Close</button>
+              <button className="button button-primary" disabled={saving || loading} onClick={save} type="button">{saving ? 'Saving…' : 'Save'}</button>
+            </>
+          ) : (
+            <>
+              {/* Profiles/Collaborators save through their own inline buttons, not this footer — an empty spacer keeps Close right-aligned like the General tab's footer. */}
+              <span />
+              <button className="button" onClick={onClose} type="button">Close</button>
+            </>
+          )}
         </footer>
       </section>
     </div>

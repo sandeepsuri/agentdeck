@@ -798,7 +798,7 @@ export function App() {
       />
       {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
       {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} repos={repos} />}
+      {showSettings && <SettingsModal appearanceControl={<ThemeControl />} onClose={() => setShowSettings(false)} repos={repos} />}
     </div>
   );
 }
