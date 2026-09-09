@@ -1,6 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import type { RunCompanionSessionRef } from '../../work-engine/run-companion-session.js';
 import type { WorkRun } from '../../work-engine/types.js';
 import { RunWorkspace } from './RunWorkspace.js';
 
@@ -722,5 +723,58 @@ describe('RunWorkspace publication (ticket 13)', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onPublish: () => undefined }));
     expect(html).toContain('not the authorized commit');
     expect(html).toContain('Retry publication');
+  });
+});
+
+// Ticket 68 (B13, docs/specs/run-execution-terminal-capabilities.md): the
+// companion-Sessions panel. RunWorkspace itself only renders whatever
+// `companionSessions` it's handed — the derivation itself is unit-tested
+// separately in work-engine/run-companion-session.test.ts.
+describe('RunWorkspace companion Sessions (ticket 68, B13)', () => {
+  const managed: RunCompanionSessionRef = {
+    sessionId: 'sess-managed', origin: 'managed', agent: 'codex', status: 'working', exactWorktreeMatch: true,
+  };
+  const ended: RunCompanionSessionRef = {
+    sessionId: 'sess-ended', origin: 'managed', agent: 'claude', status: 'exited', exactWorktreeMatch: true,
+  };
+  const sameRepo: RunCompanionSessionRef = {
+    sessionId: 'sess-repo', origin: 'external', agent: 'codex', status: 'idle', exactWorktreeMatch: false,
+  };
+
+  it('renders nothing when no companion Session exists — the ordinary case, never an empty-state message', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: baseRun() }));
+    expect(html).not.toContain('Sessions in this worktree');
+  });
+
+  it('renders nothing when companionSessions is omitted entirely', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: baseRun(), companionSessions: undefined }));
+    expect(html).not.toContain('Sessions in this worktree');
+  });
+
+  it('offers an "Open terminal" control for a live managed match', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: baseRun(), companionSessions: [managed], onOpenCompanionSession: () => undefined,
+    }));
+    expect(html).toContain('Sessions in this worktree (1)');
+    expect(html).toContain('Open terminal');
+    expect(html).not.toContain('Ended');
+  });
+
+  it('offers a scrollback affordance instead of a live attach for an ended match', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, {
+      run: baseRun(), companionSessions: [ended],
+    }));
+    expect(html).toContain('Ended — view scrollback');
+    expect(html).not.toContain('Open terminal');
+  });
+
+  it('flags a same-Repository-only match as distinct from an exact worktree match', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: baseRun(), companionSessions: [sameRepo] }));
+    expect(html).toContain('Same Repository, different worktree');
+  });
+
+  it('lists every matching Session as its own row, never collapsing multiple matches', () => {
+    const html = renderToStaticMarkup(createElement(RunWorkspace, { run: baseRun(), companionSessions: [managed, ended] }));
+    expect(html).toContain('Sessions in this worktree (2)');
   });
 });

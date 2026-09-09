@@ -19,8 +19,16 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-/** Fetches and renders the compacted scrollback for one ended session (ticket 09's endpoint). */
-function HistoryScrollback({ sessionId }: { sessionId: string }) {
+/**
+ * Fetches and renders the compacted scrollback for one ended session
+ * (ticket 09's endpoint). Exported for ticket 68 (B13)'s companion-Sessions
+ * panel (RunWorkspace.tsx) to reuse directly — that panel needs a specific,
+ * already-known sessionId, not this view's own aged-out-of-the-rail list
+ * (see this file's own `sessions` doc comment above), so embedding this
+ * component is simpler and more reliable than routing through the History
+ * tab, whose list wouldn't yet contain a session that only just ended.
+ */
+export function HistoryScrollback({ sessionId }: { sessionId: string }) {
   const [state, setState] = useState<{ loading: boolean; scrollback: string | null; error: string | null }>({
     loading: true, scrollback: null, error: null,
   });

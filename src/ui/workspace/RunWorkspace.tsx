@@ -1,16 +1,18 @@
 import { useState } from 'react';
 import { deriveRunResult } from '../../work-engine/run-result.js';
 import { defaultPublicationTarget } from '../../work-engine/publication.js';
+import type { RunCompanionSessionRef } from '../../work-engine/run-companion-session.js';
 import type {
   AttemptEvent, AttentionDecisionInput, PublicationTarget, RunPublication, WorkRun,
 } from '../../work-engine/types.js';
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
 } from './attemptActivity.js';
+import { HistoryScrollback } from './HistoryView.js';
 import { RunFeedbackPanel } from './RunFeedbackPanel.js';
 import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
-/** The heading + status pill shared by every collapsible run-section-detail summary below. */
+/** The heading + status pill shared by most collapsible run-section-detail summaries below — a section with one Run-level state, not a list of independently-stated rows (see CompanionSessionsPanel, which has no single state to show a pill for). */
 function SectionSummary({ heading, state }: { heading: string; state: string }) {
   return (
     <summary>
@@ -299,6 +301,49 @@ function RunResultPanel({ run, onApply, onReverify, onViewChanges }: {
   );
 }
 
+/**
+ * Ticket 68 (B13, docs/specs/run-execution-terminal-capabilities.md):
+ * advisory, never a claim of process identity — a Session here only means
+ * "currently open in this Run's worktree," never "this Run's own
+ * terminal," since no structured Attempt has ever had an attachable one.
+ * Absent entirely (renders nothing) when no Session matches, the ordinary
+ * case for most Runs — never shown as an empty-state message.
+ */
+function CompanionSessionsPanel({ companionSessions, onOpenCompanionSession }: {
+  companionSessions: readonly RunCompanionSessionRef[];
+  onOpenCompanionSession?: (sessionId: string) => void;
+}) {
+  if (companionSessions.length === 0) return null;
+  return (
+    <section className="run-companion-sessions">
+      <details className="run-section-detail">
+        <summary>Sessions in this worktree ({companionSessions.length})</summary>
+        <ul className="run-companion-session-list">
+          {companionSessions.map((session) => (
+            <li className={session.exactWorktreeMatch ? 'is-exact-match' : 'is-repository-match'} key={session.sessionId}>
+              <span>{formatRunLabel(session.origin)} · {formatRunLabel(session.agent)}</span>
+              {!session.exactWorktreeMatch && <small>Same Repository, different worktree</small>}
+              {session.status === 'exited' ? (
+                // Never a live attach for an ended process. HistoryScrollback
+                // is embedded directly (its own known sessionId) rather than
+                // routing through the History tab, whose own list only shows
+                // Sessions aged out of the rail's grace period — a Session
+                // that only just ended wouldn't be there yet.
+                <details className="run-technical-detail">
+                  <summary>Ended — view scrollback</summary>
+                  <HistoryScrollback sessionId={session.sessionId} />
+                </details>
+              ) : (
+                onOpenCompanionSession && <button className="button button-primary" onClick={() => onOpenCompanionSession(session.sessionId)} type="button">Open terminal</button>
+              )}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </section>
+  );
+}
+
 interface Props {
   run: WorkRun;
   onPrepare?: (run: WorkRun) => void;
@@ -318,11 +363,15 @@ interface Props {
   onDelete?: (run: WorkRun) => void;
   /** Ticket 05: the structured Attempt panel is experimental and stays hidden until this feature gate is on. */
   structuredAttemptsEnabled?: boolean;
+  /** Ticket 68 (B13): Sessions sharing this Run's prepared worktree, derived live by App.tsx's deriveRunCompanionSessions — never stored, never a claim of process identity. Empty (never undefined) while nothing has loaded, so the panel renders nothing rather than a false empty-state. */
+  companionSessions?: readonly RunCompanionSessionRef[];
+  /** Ticket 68 (B13): opens the existing terminal view for a live companion Session (App.tsx's openTerminal), reusing that path verbatim — never a new attach mechanism. */
+  onOpenCompanionSession?: (sessionId: string) => void;
 }
 
 export function RunWorkspace({
   run, onPrepare, onStart, onPause, onResume, onApply, onReverify, onViewChanges, onResolveAttention, onPublish, onDelete,
-  structuredAttemptsEnabled = false,
+  structuredAttemptsEnabled = false, companionSessions = [], onOpenCompanionSession,
 }: Props) {
   const { preparation, envelope, attempt } = run;
   const canPrepare = (preparation.state === 'pending' || preparation.state === 'failed') && onPrepare;
@@ -461,6 +510,7 @@ export function RunWorkspace({
           })()}
         </details>
       </section>
+      <CompanionSessionsPanel companionSessions={companionSessions} onOpenCompanionSession={onOpenCompanionSession} />
       {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
         <section className="run-attempt">
           <h2>Attempt</h2>

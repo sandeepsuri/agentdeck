@@ -5,6 +5,7 @@ import type {
 import type {
   AttentionDecisionInput, CollaboratorRunSummary, Profile, PublicationTarget, WorkRun,
 } from '../work-engine/types.js';
+import { deriveRunCompanionSessions } from '../work-engine/run-companion-session.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
 import { adminRepos, adminRuns, adminSessions } from './adminProjection.js';
@@ -133,6 +134,12 @@ export function App() {
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  // Ticket 68 (B13): live, derived, admin-only — never stored, never a
+  // claim that a companion Session is this Run's own terminal.
+  const companionSessions = useMemo(
+    () => selectedRun ? deriveRunCompanionSessions(selectedRun, sessions) : [],
+    [selectedRun, sessions],
+  );
   const selectedRepoPath = selectedRun?.spec.repository.path ?? (selected ? repoPathOf(selected) : repos[0]?.path ?? null);
   const changesRepoPath = selectedRun?.preparation.state === 'ready'
     ? selectedRun.preparation.worktreePath ?? selectedRepoPath
@@ -695,7 +702,7 @@ export function App() {
         <main className="workspace-stage">
           <div className={view === 'overview' ? 'workspace-layer is-active' : 'workspace-layer'}><OverviewView onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={view === 'tasks' ? 'workspace-layer is-active' : 'workspace-layer'}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
           <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
