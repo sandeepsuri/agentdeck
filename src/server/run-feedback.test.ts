@@ -17,6 +17,7 @@ function fakeStore(): RunFeedbackStore & { entries: RunFeedbackEntry[] } {
         ...(input.principalId !== undefined ? { principalId: input.principalId } : {}),
         displayName: input.displayName,
         text: input.text,
+        ...(input.reviewDecision !== undefined ? { reviewDecision: input.reviewDecision } : {}),
       };
       entries.push(entry);
       return entry;
@@ -85,6 +86,45 @@ describe('postRunFeedback', () => {
     });
 
     expect(result.ok && result.entry.principalId).toBeUndefined();
+  });
+
+  // Ticket 71 (B09): a review decision is the same durable row, one more
+  // validated field — never a second write path.
+  describe('reviewDecision (ticket 71, B09)', () => {
+    it('accepts and stores a valid reviewDecision', () => {
+      const store = fakeStore();
+      const result = postRunFeedback(store, {
+        taskId: 'task-1', runId: 'run-1', displayName: 'Alice', text: 'Please add a test', reviewDecision: 'changes_requested',
+      });
+
+      expect(result.ok && result.entry.reviewDecision).toBe('changes_requested');
+    });
+
+    it('rejects an invalid reviewDecision value, without touching the store', () => {
+      const store = fakeStore();
+      const result = postRunFeedback(store, {
+        taskId: 'task-1', runId: 'run-1', displayName: 'Alice', text: 'hi', reviewDecision: 'approved' as never,
+      });
+
+      expect(result).toEqual({ ok: false, error: 'reviewDecision must be "changes_requested" or "reviewed"' });
+      expect(store.entries).toHaveLength(0);
+    });
+
+    it('still requires non-empty text for a review decision — the same rule as an ordinary comment', () => {
+      const store = fakeStore();
+      const result = postRunFeedback(store, {
+        taskId: 'task-1', runId: 'run-1', displayName: 'Alice', text: '   ', reviewDecision: 'reviewed',
+      });
+
+      expect(result).toEqual({ ok: false, error: 'text is required' });
+    });
+
+    it('omits reviewDecision for an ordinary comment', () => {
+      const store = fakeStore();
+      const result = postRunFeedback(store, { taskId: 'task-1', runId: 'run-1', displayName: 'Alice', text: 'just a note' });
+
+      expect(result.ok && result.entry.reviewDecision).toBeUndefined();
+    });
   });
 });
 

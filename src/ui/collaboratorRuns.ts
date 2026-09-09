@@ -6,8 +6,9 @@
 // what a Collaborator may see. It only knows the shapes.
 import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
 import { submitWorkRun } from './components/RunSubmissionModal.js';
-import type { RunFeedbackEntry } from '../types.js';
+import type { ReviewDecision, RunFeedbackEntry } from '../types.js';
 import type { CollaboratorRunDetail, CollaboratorRunSummary, WorkSpec } from '../work-engine/types.js';
+import type { RunReviewState } from '../work-engine/run-review.js';
 
 type RunFetcher = (path: string, init?: RequestInit) => Promise<Response>;
 
@@ -43,16 +44,39 @@ export function listRunFeedback(runId: string, fetcher: RunFetcher = apiFetch): 
   });
 }
 
-/** Posts one comment, attributed server-side to this collaborator's own Principal — never a caller-supplied name. */
-export async function postRunFeedback(runId: string, text: string, fetcher: RunFetcher = apiFetch): Promise<RunFeedbackEntry> {
+/**
+ * Posts one comment, attributed server-side to this collaborator's own
+ * Principal — never a caller-supplied name. Ticket 71 (B09): an optional
+ * `reviewDecision` tags this same post as a review decision rather than an
+ * ordinary comment — omitted entirely when not given, matching the route's
+ * own optional-field contract. Takes `reviewDecision` and the `fetcher`
+ * test seam as one options object, rather than two trailing positional
+ * optionals, so a caller can supply either independently of the other.
+ */
+export async function postRunFeedback(
+  runId: string, text: string, options: { reviewDecision?: ReviewDecision; fetcher?: RunFetcher } = {},
+): Promise<RunFeedbackEntry> {
+  const { reviewDecision, fetcher = apiFetch } = options;
   const response = await fetcher(`/api/runs/${encodeURIComponent(runId)}/feedback`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(reviewDecision !== undefined ? { text, reviewDecision } : { text }),
   });
   const body = await response.json().catch(() => ({})) as Partial<RunFeedbackEntry> & { error?: string };
   if (!response.ok) throw new Error(body.error ?? 'Unable to post this comment.');
   return body as RunFeedbackEntry;
+}
+
+/**
+ * Ticket 71 (B09, docs/specs/run-feedback-review.md): the current review
+ * state for this Run's Task — derived server-side (deriveRunReviewState,
+ * work-engine/run-review.ts), same grant-scoped 404-never-403 read as
+ * listRunFeedback above.
+ */
+export async function getRunReviewState(runId: string, fetcher: RunFetcher = apiFetch): Promise<RunReviewState> {
+  const response = await fetcher(`/api/runs/${encodeURIComponent(runId)}/review`);
+  if (!response.ok) throw new CollaboratorRunReadError(response.status);
+  return responseJson<RunReviewState>(response);
 }
 
 /** Where the request chain stopped short of a running Attempt, if it did. */

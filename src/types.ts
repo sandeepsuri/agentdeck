@@ -141,8 +141,9 @@ export interface SessionChatMessage {
  * docs/specs/run-feedback-review.md, B07) — deliberately parallel to
  * SessionChatMessage above but independent of it: keyed by Task rather than
  * Session, and with no runtime delivery, mention parsing, or agent-turn
- * half at all. Never routed to a runtime and never a review/approval
- * decision on its own.
+ * half at all. Never routed to a runtime. Ticket 71 (B09): a review
+ * decision IS built on this same row (via `reviewDecision` below),
+ * deliberately — see work-engine/run-review.ts's own header for why.
  */
 export interface RunFeedbackEntry {
   id: string;
@@ -154,7 +155,12 @@ export interface RunFeedbackEntry {
   principalId?: string;
   displayName: string;
   text: string;
+  /** Ticket 71 (B09): present only when this entry is a review decision, not an ordinary comment — the same durable row, one more field. Never a second table. */
+  reviewDecision?: ReviewDecision;
 }
+
+/** Ticket 71 (B09): the two decisions a reviewer can tag onto a RunFeedbackEntry — one canonical alias, reused by the store, server, and UI layers rather than each retyping this same literal union. */
+export type ReviewDecision = 'changes_requested' | 'reviewed';
 
 /** Whether a Collaborator's composer can reach this Session, and why not when it cannot. */
 export interface CollaboratorSessionCapabilities {

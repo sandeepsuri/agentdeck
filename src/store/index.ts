@@ -5,7 +5,7 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
-  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, Session, Task,
+  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, ReviewDecision, Session, Task,
 } from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
@@ -277,10 +277,10 @@ function rowToSessionChatMessage(r: SessionChatMessageRow): StoredSessionChatMes
 
 interface RunFeedbackRow {
   id: string; task_id: string; run_id: string; sequence: number; posted_at: string;
-  principal_id: string | null; display_name: string; text: string;
+  principal_id: string | null; display_name: string; text: string; review_decision: string | null;
 }
 
-/** One durably stored, plain-commentary Task/Run post (docs/specs/run-feedback-review.md, B07) — independent of StoredSessionChatMessage above; never routed to a runtime. */
+/** One durably stored, plain-commentary Task/Run post (docs/specs/run-feedback-review.md, B07) — independent of StoredSessionChatMessage above; never routed to a runtime. Ticket 71 (B09): `reviewDecision`, when present, is the exact same row — never a second table. */
 export interface StoredRunFeedback {
   id: string;
   taskId: string;
@@ -290,6 +290,7 @@ export interface StoredRunFeedback {
   principalId?: string;
   displayName: string;
   text: string;
+  reviewDecision?: ReviewDecision;
 }
 
 function rowToRunFeedback(r: RunFeedbackRow): StoredRunFeedback {
@@ -298,6 +299,7 @@ function rowToRunFeedback(r: RunFeedbackRow): StoredRunFeedback {
     displayName: r.display_name, text: r.text,
   };
   if (r.principal_id !== null) entry.principalId = r.principal_id;
+  if (r.review_decision === 'changes_requested' || r.review_decision === 'reviewed') entry.reviewDecision = r.review_decision;
   return entry;
 }
 
@@ -766,16 +768,25 @@ export class Store implements CollaboratorStore {
 
   // -- run feedback (docs/specs/run-feedback-review.md, B07) --
 
-  /** `input.sequence` is never accepted from the caller — assigned as this Task's next value, mirroring appendSessionChatMessage's per-key monotonic ordering. Keyed by taskId (not runId): see migrations/020_run_feedback.sql's own header for why. */
+  /**
+   * `input.sequence` is never accepted from the caller — assigned as this
+   * Task's next value, mirroring appendSessionChatMessage's per-key
+   * monotonic ordering. Keyed by taskId (not runId): see
+   * migrations/020_run_feedback.sql's own header for why. Ticket 71 (B09):
+   * `reviewDecision` writes into the column that migration already
+   * reserved for exactly this — an ordinary comment (the overwhelming
+   * majority of calls) simply omits it.
+   */
   appendRunFeedback(input: {
     id: string; taskId: string; runId: string; postedAt: string; principalId?: string; displayName: string; text: string;
+    reviewDecision?: ReviewDecision;
   }): StoredRunFeedback {
     const { sequence } = this.db
       .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_feedback WHERE task_id = ?')
       .get(input.taskId) as { sequence: number };
     this.db.prepare(
-      `INSERT INTO run_feedback (id, task_id, run_id, sequence, posted_at, principal_id, display_name, text)
-       VALUES (@id, @taskId, @runId, @sequence, @postedAt, @principalId, @displayName, @text)`,
+      `INSERT INTO run_feedback (id, task_id, run_id, sequence, posted_at, principal_id, display_name, text, review_decision)
+       VALUES (@id, @taskId, @runId, @sequence, @postedAt, @principalId, @displayName, @text, @reviewDecision)`,
     ).run({
       id: input.id,
       taskId: input.taskId,
@@ -785,12 +796,14 @@ export class Store implements CollaboratorStore {
       principalId: input.principalId ?? null,
       displayName: input.displayName,
       text: input.text,
+      reviewDecision: input.reviewDecision ?? null,
     });
     const entry: StoredRunFeedback = {
       id: input.id, taskId: input.taskId, runId: input.runId, sequence, postedAt: input.postedAt,
       displayName: input.displayName, text: input.text,
     };
     if (input.principalId !== undefined) entry.principalId = input.principalId;
+    if (input.reviewDecision !== undefined) entry.reviewDecision = input.reviewDecision;
     return entry;
   }
 

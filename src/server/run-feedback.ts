@@ -3,11 +3,14 @@
 // session-conversation.ts but independent of it — a Run has no reliably
 // attachable Session (see B13's own finding), and feedback must stay
 // readable for a completed/failed/cancelled Run with no live process at
-// all. Never routed to a runtime, never a review/approval decision, and
-// never a client-only "resumed"/"reviewed" signal — see the design doc's
-// own "Scope and constraints carried over from #37".
+// all. Never routed to a runtime, and never a client-only "resumed" signal
+// — see the design doc's own "Scope and constraints carried over from
+// #37". Ticket 71 (B09): a review decision (reviewDecision below) IS built
+// on this same module, deliberately — see run-review.ts's own header for
+// why it is never RunActivity, the 'approval' attention kind, or a new
+// RunStatus transition.
 import { randomUUID } from 'node:crypto';
-import type { RunFeedbackEntry } from '../types.js';
+import type { ReviewDecision, RunFeedbackEntry } from '../types.js';
 
 export type { RunFeedbackEntry };
 
@@ -16,6 +19,7 @@ export interface RunFeedbackStore {
   appendRunFeedback(input: {
     id: string; taskId: string; runId: string; postedAt: string;
     principalId?: string; displayName: string; text: string;
+    reviewDecision?: ReviewDecision;
   }): RunFeedbackEntry;
   listRunFeedback(taskId: string): RunFeedbackEntry[];
 }
@@ -37,11 +41,23 @@ export type PostRunFeedbackResult =
  * the authenticated connection — see server/index.ts's resolveAuthor dep)
  * and trusted as given; this function never reads a caller-supplied name
  * out of `text` or any other request field.
+ *
+ * Ticket 71 (B09): `reviewDecision`, when given, must be exactly
+ * `'changes_requested'` or `'reviewed'` — validated here, the one place
+ * this rule exists, same as every other validation in this function. A
+ * review decision still needs its own non-empty `text`, unchanged from an
+ * ordinary comment's own rule.
  */
 export function postRunFeedback(
   store: RunFeedbackStore,
-  input: { taskId: string; runId: string; principalId?: string; displayName: string; text: unknown },
+  input: {
+    taskId: string; runId: string; principalId?: string; displayName: string; text: unknown;
+    reviewDecision?: unknown;
+  },
 ): PostRunFeedbackResult {
+  if (input.reviewDecision !== undefined && input.reviewDecision !== 'changes_requested' && input.reviewDecision !== 'reviewed') {
+    return { ok: false, error: 'reviewDecision must be "changes_requested" or "reviewed"' };
+  }
   const text = typeof input.text === 'string' ? input.text.trim() : '';
   if (!text) return { ok: false, error: 'text is required' };
   if (text.length > MAX_FEEDBACK_TEXT_LENGTH) return { ok: false, error: 'text is too long' };
@@ -53,6 +69,7 @@ export function postRunFeedback(
     ...(input.principalId !== undefined ? { principalId: input.principalId } : {}),
     displayName: input.displayName,
     text,
+    ...(input.reviewDecision !== undefined ? { reviewDecision: input.reviewDecision } : {}),
   });
   return { ok: true, entry };
 }

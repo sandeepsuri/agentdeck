@@ -1019,6 +1019,123 @@ describe('Run feedback (B07)', () => {
   });
 });
 
+// Ticket 71 (B09, docs/specs/run-feedback-review.md): the review state is
+// derived (deriveRunReviewState, work-engine/run-review.ts) — its own
+// coverage lives in run-review.test.ts. Here, only the HTTP wiring: the new
+// GET .../review route, the reviewDecision passthrough on the existing POST
+// .../feedback route, and both routes' shared grant check.
+describe('Run review state (ticket 71, B09)', () => {
+  function feedbackCollaboratorDeps(
+    repositoryIds: readonly string[],
+    principal: { id: string; displayName: string } = { id: 'collab-reader', displayName: 'Alice' },
+  ): WorkRoutesDeps {
+    return {
+      resolveGrantedRepositoryIds: () => repositoryIds,
+      resolveActor: () => ({ principal, grants: { repositoryIds, profileIds: [] } }),
+      resolveAuthor: () => ({ principalId: principal.id, displayName: principal.displayName }),
+    };
+  }
+
+  it('is not_applicable for a freshly submitted Run with no result and no decision', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const review = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+
+    expect(review.statusCode).toBe(200);
+    expect(review.json()).toEqual({ state: 'not_applicable' });
+  });
+
+  it('is ready_to_review once a Run settles with a result, before any decision is posted', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { app, repoPath } = makeApp({ codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) });
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath, 'main') });
+    const run = created.json();
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/prepare` });
+    await app.inject({ method: 'POST', url: `/api/runs/${run.id}/start` });
+    await vi.waitUntil(async () => (await (await app.inject({ method: 'GET', url: `/api/runs/${run.id}` })).json()).status === 'completed_unverified');
+
+    const review = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+
+    expect(review.statusCode).toBe(200);
+    expect(review.json()).toEqual({ state: 'ready_to_review' });
+  });
+
+  it('posting feedback with a reviewDecision durably moves the review state, and wins even before any result exists', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const posted = await app.inject({
+      method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'Please add a test', reviewDecision: 'changes_requested' },
+    });
+    expect(posted.statusCode).toBe(201);
+    expect(posted.json()).toMatchObject({ reviewDecision: 'changes_requested' });
+
+    const review = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+    expect(review.json()).toMatchObject({ state: 'changes_requested' });
+    expect(review.json().reviewedBy).toEqual(expect.any(String));
+  });
+
+  it('400s an invalid reviewDecision without posting an entry or moving the review state', async () => {
+    const { app, repoPath } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const posted = await app.inject({
+      method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'hi', reviewDecision: 'approved' },
+    });
+
+    expect(posted.statusCode).toBe(400);
+    expect(posted.json()).toEqual({ error: 'reviewDecision must be "changes_requested" or "reviewed"' });
+    const listed = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/feedback` });
+    expect(listed.json()).toEqual([]);
+    const review = await app.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+    expect(review.json()).toEqual({ state: 'not_applicable' });
+  });
+
+  it('404s GET .../review for an unknown Run', async () => {
+    const { app } = makeApp();
+
+    const review = await app.inject({ method: 'GET', url: '/api/runs/does-not-exist/review' });
+
+    expect(review.statusCode).toBe(404);
+  });
+
+  it('a granted collaborator can post a reviewDecision and read the resulting review state', async () => {
+    const { app, repoPath, engine, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const collaboratorApp = Fastify();
+    registerWorkRoutes(collaboratorApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([repoPath]) });
+    apps.push(collaboratorApp);
+
+    const posted = await collaboratorApp.inject({
+      method: 'POST', url: `/api/runs/${run.id}/feedback`, payload: { text: 'looks good to me', reviewDecision: 'reviewed' },
+    });
+    expect(posted.statusCode).toBe(201);
+
+    const review = await collaboratorApp.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+    expect(review.json()).toMatchObject({ state: 'reviewed', reviewedBy: 'Alice' });
+  });
+
+  it('404s (never 403) GET .../review for a collaborator outside the Run\'s grant, never leaking existence', async () => {
+    const { app, repoPath, engine, store } = makeApp();
+    const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    const run = created.json();
+
+    const outsideApp = Fastify();
+    registerWorkRoutes(outsideApp, engine, { runFeedbackStore: store, ...feedbackCollaboratorDeps([]) });
+    apps.push(outsideApp);
+
+    const review = await outsideApp.inject({ method: 'GET', url: `/api/runs/${run.id}/review` });
+    expect(review.statusCode).toBe(404);
+    expect(review.json()).toEqual({ error: 'no such run' });
+  });
+});
+
 // Ticket 70 (B10, docs/specs/run-result-application-previews.md): the
 // route only ever validates the request and hands it to a RunPreviewStarter
 // — the real listener (a real http.createServer, real files on disk) is

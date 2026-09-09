@@ -190,12 +190,14 @@ describe('CollaboratorWorkspace navigation', () => {
   it('clears already-rendered Run detail when a later poll says it is out of scope', async () => {
     vi.useFakeTimers();
     const sensitive = detail({ narrative: { answer: 'Previously authorized result', steps: [], stepsTruncated: false } });
-    // Ticket 67 (B07): routed by URL rather than call order/count, so the
-    // Run detail poll's own sequencing stays independent of the separate
-    // feedback poll this workspace now also issues.
+    // Ticket 67 (B07) and ticket 71 (B09): routed by URL rather than call
+    // order/count, so the Run detail poll's own sequencing stays
+    // independent of the separate feedback/review polls this workspace
+    // now also issues.
     let detailCalls = 0;
     const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
       if (String(url).includes('/feedback')) return jsonResponse([]);
+      if (String(url).includes('/review')) return jsonResponse({ state: 'not_applicable' });
       detailCalls += 1;
       return detailCalls === 1 ? jsonResponse(sensitive) : jsonResponse({ error: 'no such run' }, 404);
     });

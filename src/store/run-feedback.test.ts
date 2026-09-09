@@ -99,4 +99,42 @@ describe('appendRunFeedback / listRunFeedback', () => {
 
     expect(store.listRunFeedback('task-1').map((entry) => entry.text)).toEqual(['hello']);
   });
+
+  // Ticket 71 (B09, docs/specs/run-feedback-review.md): a review decision
+  // is the exact same durable row, carrying one more column the migration
+  // already reserved for it (ticket 67/020_run_feedback.sql) — no second
+  // table, no second write path.
+  describe('reviewDecision (ticket 71, B09)', () => {
+    it('omits reviewDecision for an ordinary comment', () => {
+      const entry = store.appendRunFeedback({
+        id: 'fb-1', taskId: 'task-1', runId: 'run-1', postedAt: '2026-09-08T00:00:00.000Z', displayName: 'Alice', text: 'plain comment',
+      });
+
+      expect(entry.reviewDecision).toBeUndefined();
+      expect(store.listRunFeedback('task-1')[0]!.reviewDecision).toBeUndefined();
+    });
+
+    it('persists and reads back a reviewDecision-tagged entry', () => {
+      const entry = store.appendRunFeedback({
+        id: 'fb-1', taskId: 'task-1', runId: 'run-1', postedAt: '2026-09-08T00:00:00.000Z', displayName: 'Alice',
+        text: 'Please add a test for the empty-input case', reviewDecision: 'changes_requested',
+      });
+
+      expect(entry.reviewDecision).toBe('changes_requested');
+      expect(store.listRunFeedback('task-1')[0]!.reviewDecision).toBe('changes_requested');
+    });
+
+    it('keeps a reviewDecision entry\'s own sequence exactly like an ordinary comment — same table, same ordering', () => {
+      store.appendRunFeedback({
+        id: 'fb-1', taskId: 'task-1', runId: 'run-1', postedAt: '2026-09-08T00:00:00.000Z', displayName: 'Alice', text: 'a question',
+      });
+      const decision = store.appendRunFeedback({
+        id: 'fb-2', taskId: 'task-1', runId: 'run-1', postedAt: '2026-09-08T00:00:01.000Z', displayName: 'Bob',
+        text: 'Looks good', reviewDecision: 'reviewed',
+      });
+
+      expect(decision.sequence).toBe(2);
+      expect(store.listRunFeedback('task-1').map((e) => e.reviewDecision)).toEqual([undefined, 'reviewed']);
+    });
+  });
 });

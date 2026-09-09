@@ -9,6 +9,7 @@ import { resolveLocalPrincipal } from '../work-engine/principal.js';
 import { isPublicationTarget } from '../work-engine/publication.js';
 import { derivePreviewCandidates } from '../work-engine/run-preview.js';
 import { deriveRunResult } from '../work-engine/run-result.js';
+import { deriveRunReviewState } from '../work-engine/run-review.js';
 import type {
   AttentionDecisionInput, PublicationTarget, RunActor, WorkEngine, WorkRun, WorkSpec,
 } from '../work-engine/types.js';
@@ -188,13 +189,29 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
     const run = resolveGrantedRun(request, id);
     if (!run) return reply.code(404).send({ error: 'no such run' });
     if (!deps.runFeedbackStore) return reply.code(500).send({ error: 'feedback storage is not configured' });
-    const body = request.body as { text?: unknown } | null;
+    const body = request.body as { text?: unknown; reviewDecision?: unknown } | null;
     const author = deps.resolveAuthor?.(request) ?? defaultAuthor();
     const result = postRunFeedback(deps.runFeedbackStore, {
-      taskId: run.taskId, runId: run.id, principalId: author.principalId, displayName: author.displayName, text: body?.text,
+      taskId: run.taskId, runId: run.id, principalId: author.principalId, displayName: author.displayName,
+      text: body?.text, reviewDecision: body?.reviewDecision,
     });
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return reply.code(201).send(result.entry);
+  });
+
+  /**
+   * Ticket 71 (B09, docs/specs/run-feedback-review.md): the current review
+   * state for this Run's Task — derived live from its already-fetched
+   * feedback (deriveRunReviewState, work-engine/run-review.ts), never
+   * stored. Same grant check as .../feedback: "who can act" is anyone who
+   * can currently read the Run, no new permission axis.
+   */
+  app.get('/api/runs/:id/review', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const run = resolveGrantedRun(request, id);
+    if (!run) return reply.code(404).send({ error: 'no such run' });
+    if (!deps.runFeedbackStore) return deriveRunReviewState(run, []);
+    return deriveRunReviewState(run, listRunFeedback(deps.runFeedbackStore, run.taskId));
   });
 
   /**
