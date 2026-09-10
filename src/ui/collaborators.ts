@@ -32,7 +32,7 @@ export interface Collaborator {
 export const toggleId = (ids: string[], id: string) => (ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]);
 
 export async function listCollaborators(): Promise<Collaborator[]> {
-  return responseJson(await apiFetch('/api/collaborators'));
+  return responseJsonArray<Collaborator>(await apiFetch('/api/collaborators'));
 }
 
 export async function inviteCollaborator(

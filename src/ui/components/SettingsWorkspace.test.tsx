@@ -242,3 +242,12 @@ describe('SettingsWorkspace', () => {
     expect(container!.textContent).toContain('Appearance control');
   });
 });
+
+for (const [label, body, status] of [['denied', { error: 'Forbidden' }, 403], ['malformed', { models: [] }, 200]] as const) {
+  it(`reports ${label} model responses without rendering an object as a list`, async () => {
+    vi.stubGlobal('fetch', baseFetchMock((url) => url === '/api/models' ? jsonResponse(body, status) : undefined));
+    const host = await mount();
+    expect(host.textContent).toContain('Unable to load settings.');
+    expect(host.textContent).toContain('Profiles');
+  });
+}

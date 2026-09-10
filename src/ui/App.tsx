@@ -87,6 +87,8 @@ export function App() {
   const [showLaunch, setShowLaunch] = useState(false);
   const [showRunSubmission, setShowRunSubmission] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsVisited, setSettingsVisited] = useState(false);
+  useEffect(() => { if (showSettings) setSettingsVisited(true); }, [showSettings]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [repositoryNavigationRequest, setRepositoryNavigationRequest] = useState<{ repositoryId: string | null; sequence: number }>({ repositoryId: null, sequence: 0 });
   const [overviewRepositoryName, setOverviewRepositoryName] = useState<string | null>(null);
@@ -766,7 +768,7 @@ export function App() {
           <div className={layerClass('grid')}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
           <div className={layerClass('signals')}><SignalsView events={events} /></div>
           <div className={layerClass('history')}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
-          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}><SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} /></div>
+          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} />}</div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button

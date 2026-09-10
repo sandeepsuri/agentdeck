@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import type { Model } from '../../sessions/model-catalog.js';
 import type { Repo } from '../../types.js';
-import { apiFetch } from '../apiFetch.js';
+import { apiFetch, responseJson, responseJsonArray } from '../apiFetch.js';
 import { CollaboratorsPanel } from './CollaboratorsPanel.js';
 import { ProfilesPanel } from './ProfilesPanel.js';
 import { useAccessData } from './useAccessData.js';
@@ -89,8 +89,8 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl }: { o
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      apiFetch('/api/models').then((response) => response.json() as Promise<Model[]>),
-      apiFetch('/api/settings').then((response) => response.json() as Promise<SettingsBody>),
+      apiFetch('/api/models').then((response) => responseJsonArray<Model>(response)),
+      apiFetch('/api/settings').then((response) => responseJson<SettingsBody>(response)),
     ]).then(([modelList, settings]) => {
       if (cancelled) return;
       setModels(modelList);
