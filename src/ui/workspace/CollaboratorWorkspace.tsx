@@ -412,68 +412,131 @@ function RunResultPanel({ result }: { result: NonNullable<CollaboratorRunDetail[
   );
 }
 
+/**
+ * Presentation-only redesign slice (parent issue #37,
+ * docs/prototypes/agentdeck-redesign.html): a calmer default view for a
+ * Run that used to be one long scroll of narrative, result and feedback.
+ * Every panel below stays mounted regardless of which tab is active — only
+ * the `hidden` attribute changes — so a feedback draft or the objective/
+ * status/Attention/failure banner above never unmounts or loses state on a
+ * tab switch. Only opening a *different* Run resets the selection, via the
+ * detail.id effect below. Same WAI-ARIA "Tabs" pattern, and deliberately a
+ * separate implementation, as the admin desktop's RunDetailTabList
+ * (RunWorkspace.tsx) — that component's own comment already explains why
+ * the two surfaces' tabs are kept independent rather than shared.
+ */
+type RunDetailTab = 'overview' | 'updates';
+const RUN_DETAIL_TABS: { id: RunDetailTab; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'updates', label: 'Updates' },
+];
+
+/** WAI-ARIA "Tabs" pattern: roving tabindex, Left/Right/Home/End move both selection and focus. */
+function RunDetailTabList({ active, onChange }: { active: RunDetailTab; onChange: (tab: RunDetailTab) => void }) {
+  const buttonRefs = useRef<Partial<Record<RunDetailTab, HTMLButtonElement | null>>>({});
+  const select = (id: RunDetailTab) => {
+    onChange(id);
+    buttonRefs.current[id]?.focus();
+  };
+  return (
+    <div
+      aria-label="Run detail sections"
+      className="run-detail-tabs"
+      onKeyDown={(event) => {
+        const index = RUN_DETAIL_TABS.findIndex((tab) => tab.id === active);
+        if (event.key === 'ArrowRight') { event.preventDefault(); select(RUN_DETAIL_TABS[(index + 1) % RUN_DETAIL_TABS.length]!.id); }
+        else if (event.key === 'ArrowLeft') { event.preventDefault(); select(RUN_DETAIL_TABS[(index - 1 + RUN_DETAIL_TABS.length) % RUN_DETAIL_TABS.length]!.id); }
+        else if (event.key === 'Home') { event.preventDefault(); select(RUN_DETAIL_TABS[0]!.id); }
+        else if (event.key === 'End') { event.preventDefault(); select(RUN_DETAIL_TABS.at(-1)!.id); }
+      }}
+      role="tablist"
+    >
+      {RUN_DETAIL_TABS.map((tab) => (
+        <button
+          aria-controls={`mobile-run-tabpanel-${tab.id}`}
+          aria-selected={active === tab.id}
+          className={active === tab.id ? 'is-active' : ''}
+          id={`mobile-run-tab-${tab.id}`}
+          key={tab.id}
+          onClick={() => onChange(tab.id)}
+          ref={(el) => { buttonRefs.current[tab.id] = el; }}
+          role="tab"
+          tabIndex={active === tab.id ? 0 : -1}
+          type="button"
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A plain-language headline for every RunStatus a Collaborator can actually do nothing about but read — never for 'cancelled', which was an intentional stop, not a failure. */
+const FAILURE_HEADLINES: Partial<Record<RunStatus, string>> = {
+  failed: 'This Run did not finish',
+  failed_verification: 'Verification did not pass',
+  failed_budget: 'This Run stopped at its budget limit',
+};
+
+/**
+ * An actionable failure explanation, kept visible above the tabs — never
+ * gated behind the "Updates" tab a reader would otherwise have to find
+ * first. `result.recoveryNotes` (the same precise reason RunResultPanel's
+ * own "Result" section shows in Overview) is preferred over the
+ * narrative's generic verdict text, since it also covers verification and
+ * budget failures the narrative log never turns into a `failure` event
+ * (attempt-narrative.ts's summarizeAttempt only recognizes an explicit
+ * `failure` event, never `verification-outcome`).
+ */
+function RunFailureNotice({ detail }: { detail: CollaboratorRunDetail }) {
+  const headline = FAILURE_HEADLINES[detail.status];
+  if (!headline) return null;
+  const reason = detail.result?.recoveryNotes ?? describeOutcome(detail.narrative.outcome);
+  return (
+    <div className="run-blocked-notice" role="alert">
+      <strong>{headline}</strong>
+      {reason && <p>{reason}</p>}
+    </div>
+  );
+}
+
 function RunConversation({ detail, onResolveRunAttention }: {
   detail: CollaboratorRunDetail;
   onResolveRunAttention: (runId: string, attentionId: string, decision: AttentionDecisionInput) => void;
 }) {
   const { narrative, pendingAttention } = detail;
   const verdict = describeOutcome(narrative.outcome);
+  const [activeTab, setActiveTab] = useState<RunDetailTab>('overview');
+  // Default to Overview whenever a *different* Run is opened — never on a
+  // same-Run re-render (a poll refresh), which would otherwise yank the
+  // reader back out of whatever tab they were reading. Same guard shape as
+  // the admin desktop's RunWorkspace.
+  const runIdRef = useRef(detail.id);
+  useEffect(() => {
+    if (runIdRef.current !== detail.id) {
+      runIdRef.current = detail.id;
+      setActiveTab('overview');
+    }
+  }, [detail.id]);
+
+  // Ticket 70 (B10)'s own design doc
+  // (docs/specs/run-result-application-previews.md) is explicit that a live
+  // preview control is not authorized for this surface: the preview
+  // listener binds 127.0.0.1 only, which on a remote collaborator's own
+  // device names their own machine, never the admin's — a control here
+  // could never actually open. This is eligibility only (which file, if
+  // any, would qualify), never a broken "Open preview" action.
+  const previewCandidates = (detail.result?.changedFiles ?? []).filter((path) => path.endsWith('.html'));
+
   return (
     <main className="mobile-conversation">
       <section className="mobile-run-intent">
         <h2>{detail.objective}</h2>
-        <ul className="mobile-run-criteria">
-          {detail.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}
-        </ul>
         <small>Requested by {detail.requestedBy} · {relativeTime(detail.submittedAt)} · base {detail.requestedBaseReference}</small>
       </section>
 
       {detail.preparation.note && <p className="mobile-run-blocked-banner" role="status">{detail.preparation.note}</p>}
-
-      {narrative.answer && (
-        <section aria-label="What the Run reported" className="mobile-run-answer">
-          <h3>What it found</h3>
-          <p>{narrative.answer}</p>
-        </section>
-      )}
-
-      {narrative.steps.length > 0 && (
-        <section aria-label="What the Run did" className="mobile-run-steps">
-          <h3>What it did</h3>
-          {narrative.stepsTruncated && <small className="mobile-run-truncated">Showing the most recent steps.</small>}
-          <ol>
-            {narrative.steps.map((step) => {
-              const time = narrativeStepTime(step.at);
-              return (
-                <li className={`mobile-run-step status-${step.status}`} key={step.sequence}>
-                  <span aria-hidden="true" className="mobile-run-step-icon">{STATUS_MARK[step.status]}</span>
-                  <span className="mobile-run-step-label">
-                    {step.label}
-                    {time && (
-                      <time className="mobile-run-step-time" dateTime={time.iso} title={time.title}> · {time.label}</time>
-                    )}
-                  </span>
-                </li>
-              );
-            })}
-          </ol>
-        </section>
-      )}
-
-      {verdict && (
-        <p className={`mobile-run-verdict${narrative.outcome?.kind === 'failure' ? ' is-failure' : ' is-success'}`}>
-          {verdict}
-          {narrative.usage && (narrative.usage.inputTokens !== 'unknown' || narrative.usage.outputTokens !== 'unknown') && (
-            <span className="mobile-run-verdict-meta"> · {formatTokenCount(narrative.usage.inputTokens)} in / {formatTokenCount(narrative.usage.outputTokens)} out</span>
-          )}
-        </p>
-      )}
-
-      {narrative.steps.length === 0 && !narrative.answer && !detail.preparation.note && (
-        <p className="mobile-run-waiting">
-          {detail.attemptState === 'idle' ? 'Getting a workspace ready…' : 'Working…'}
-        </p>
-      )}
+      <RunFailureNotice detail={detail} />
 
       {pendingAttention && (
         <section aria-labelledby="mobile-run-attention-title" className="mobile-approval-card mobile-run-attention-card">
@@ -503,9 +566,73 @@ function RunConversation({ detail, onResolveRunAttention }: {
         </section>
       )}
 
-      {detail.result && <RunResultPanel result={detail.result} />}
+      <RunDetailTabList active={activeTab} onChange={setActiveTab} />
 
-      <RunFeedbackPanel headingLevel="h3" runId={detail.id} />
+      <div aria-labelledby="mobile-run-tab-overview" className="run-detail-panel" hidden={activeTab !== 'overview'} id="mobile-run-tabpanel-overview" role="tabpanel">
+        <section className="mobile-run-criteria-section">
+          <h3>Acceptance criteria</h3>
+          <ul className="mobile-run-criteria">
+            {detail.acceptanceCriteria.map((criterion) => <li key={criterion}>{criterion}</li>)}
+          </ul>
+        </section>
+
+        {detail.result && <RunResultPanel result={detail.result} />}
+
+        {previewCandidates.length > 0 && (
+          <p className="mobile-run-preview-note">
+            This result includes an application preview file — <code>{previewCandidates.join(', ')}</code>. Opening a live preview isn’t available on this device yet.
+          </p>
+        )}
+
+        <RunFeedbackPanel headingLevel="h3" runId={detail.id} />
+      </div>
+
+      <div aria-labelledby="mobile-run-tab-updates" className="run-detail-panel" hidden={activeTab !== 'updates'} id="mobile-run-tabpanel-updates" role="tabpanel">
+        {narrative.answer && (
+          <section aria-label="What the Run reported" className="mobile-run-answer">
+            <h3>What it found</h3>
+            <p>{narrative.answer}</p>
+          </section>
+        )}
+
+        {narrative.steps.length > 0 && (
+          <section aria-label="What the Run did" className="mobile-run-steps">
+            <h3>What it did</h3>
+            {narrative.stepsTruncated && <small className="mobile-run-truncated">Showing the most recent steps.</small>}
+            <ol>
+              {narrative.steps.map((step) => {
+                const time = narrativeStepTime(step.at);
+                return (
+                  <li className={`mobile-run-step status-${step.status}`} key={step.sequence}>
+                    <span aria-hidden="true" className="mobile-run-step-icon">{STATUS_MARK[step.status]}</span>
+                    <span className="mobile-run-step-label">
+                      {step.label}
+                      {time && (
+                        <time className="mobile-run-step-time" dateTime={time.iso} title={time.title}> · {time.label}</time>
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        )}
+
+        {verdict && (
+          <p className={`mobile-run-verdict${narrative.outcome?.kind === 'failure' ? ' is-failure' : ' is-success'}`}>
+            {verdict}
+            {narrative.usage && (narrative.usage.inputTokens !== 'unknown' || narrative.usage.outputTokens !== 'unknown') && (
+              <span className="mobile-run-verdict-meta"> · {formatTokenCount(narrative.usage.inputTokens)} in / {formatTokenCount(narrative.usage.outputTokens)} out</span>
+            )}
+          </p>
+        )}
+
+        {narrative.steps.length === 0 && !narrative.answer && !detail.preparation.note && (
+          <p className="mobile-run-waiting">
+            {detail.attemptState === 'idle' ? 'Getting a workspace ready…' : 'Working…'}
+          </p>
+        )}
+      </div>
     </main>
   );
 }

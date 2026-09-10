@@ -682,6 +682,10 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-run-intent h2 { margin: 0 0 9px; font-size: 16px; line-height: 1.35; }
 .mobile-run-intent small { display: block; margin-top: 9px; color: var(--text-muted); font-size: 11.5px; }
 .mobile-run-criteria { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.mobile-run-criteria-section { margin-bottom: 18px; }
+.mobile-run-criteria-section h3 { margin: 0 0 9px; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+/* Ticket 70 (B10) is explicitly not authorized for this surface — eligibility text only, never a broken "Open preview" action (see RunFailureNotice's neighbor, RunConversation's previewCandidates comment). */
+.mobile-run-preview-note { margin: 0 0 18px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
 .mobile-run-answer,.mobile-run-steps,.mobile-run-result { margin-bottom: 18px; padding: 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); }
 .mobile-run-answer h3,.mobile-run-steps h3,.mobile-run-result h3 { margin: 0 0 9px; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
 .mobile-run-result h4 { margin: 13px 0 6px; color: var(--text-muted); font-size: 10.5px; font-weight: 600; letter-spacing: .02em; }

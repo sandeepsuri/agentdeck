@@ -455,6 +455,195 @@ describe('CollaboratorWorkspace Run conversation', () => {
   });
 });
 
+// Presentation-only redesign slice (parent issue #37,
+// docs/prototypes/agentdeck-redesign.html): calmer Collaborator Run
+// details — Overview/Updates tabs, with the objective, real status,
+// pending Attention and any actionable failure explanation staying visible
+// above them regardless of which tab is active. Same interaction-level
+// shape as RunWorkspace.test.tsx's own "RunWorkspace detail tabs" block.
+describe('CollaboratorWorkspace Run detail tabs (presentation-only redesign slice, parent issue #37)', () => {
+  function stubRunFetch(getDetail: (runId: string) => CollaboratorRunDetail) {
+    return vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes('/feedback')) return jsonResponse([]);
+      if (target.includes('/review')) return jsonResponse({ state: 'not_applicable' });
+      const runId = target.match(/\/api\/runs\/([^/]+)$/)?.[1] ?? 'run-1';
+      return jsonResponse(getDetail(runId));
+    });
+  }
+
+  function tabButton(host: HTMLElement, id: 'overview' | 'updates'): HTMLButtonElement {
+    return host.querySelector(`#mobile-run-tab-${id}`) as HTMLButtonElement;
+  }
+  function tabPanel(host: HTMLElement, id: 'overview' | 'updates'): HTMLElement {
+    return host.querySelector(`#mobile-run-tabpanel-${id}`) as HTMLElement;
+  }
+
+  function narratedDetail(overrides: Partial<CollaboratorRunDetail> = {}): CollaboratorRunDetail {
+    return detail({
+      status: 'running',
+      narrative: {
+        answer: 'The test was racing on a shared clock.',
+        steps: [{ label: 'Read src/auth/session.ts', status: 'completed', sequence: 1 }],
+        stepsTruncated: false,
+      },
+      ...overrides,
+    });
+  }
+
+  it('defaults to Overview visible, with acceptance criteria there and Updates content present in the DOM but hidden', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => narratedDetail()));
+    const host = await mount({ runs: [summary()] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    expect(tabButton(host, 'overview').getAttribute('aria-selected')).toBe('true');
+    expect(tabPanel(host, 'overview').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(true);
+    // Acceptance criteria moved into Overview, not the always-visible header.
+    expect(tabPanel(host, 'overview').textContent).toContain('It passes');
+    // Content stays mounted (just hidden) — Updates' own facts are already in the DOM.
+    expect(tabPanel(host, 'updates').textContent).toContain('Read src/auth/session.ts');
+  });
+
+  it('switches the visible panel on click, and keyboard ArrowRight/ArrowLeft moves both selection and focus between Overview and Updates', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => narratedDetail()));
+    const host = await mount({ runs: [summary()] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    await act(async () => { tabButton(host, 'updates').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel(host, 'overview').hasAttribute('hidden')).toBe(true);
+    expect(tabButton(host, 'updates').getAttribute('aria-selected')).toBe('true');
+
+    tabButton(host, 'updates').focus();
+    // Updates is the last (and only other) tab — ArrowRight wraps around to Overview.
+    await act(async () => {
+      tabButton(host, 'updates').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    expect(tabButton(host, 'overview').getAttribute('aria-selected')).toBe('true');
+    expect(tabPanel(host, 'overview').hasAttribute('hidden')).toBe(false);
+    expect(document.activeElement).toBe(tabButton(host, 'overview'));
+
+    // ArrowLeft from Overview (the first tab) wraps around to Updates (the last).
+    await act(async () => {
+      tabButton(host, 'overview').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    });
+    expect(tabButton(host, 'updates').getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tabButton(host, 'updates'));
+  });
+
+  it('keeps pending Attention visible above the tabs regardless of which tab is active', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => detail({
+      status: 'waiting_approval',
+      pendingAttention: { id: 'attn-1', kind: 'approval', reason: 'May I write to migrations/?', requestedAt: '2026-09-01T00:02:00.000Z' },
+    })));
+    const host = await mount({ runs: [summary({ status: 'waiting_approval', pendingAttentionKind: 'approval' })] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    expect(host.textContent).toContain('Approval needed');
+    await act(async () => { tabButton(host, 'updates').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // Still visible after switching tabs, and structurally outside both panels.
+    expect(host.textContent).toContain('Approval needed');
+    const attentionSection = host.querySelector('.mobile-run-attention-card')!;
+    expect(tabPanel(host, 'overview').contains(attentionSection)).toBe(false);
+    expect(tabPanel(host, 'updates').contains(attentionSection)).toBe(false);
+  });
+
+  it('shows an actionable failure explanation above the tabs — readable without switching to Updates', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => detail({
+      status: 'failed',
+      narrative: { steps: [], stepsTruncated: false, outcome: { kind: 'failure', detail: 'the sandbox ran out of disk space' } },
+      result: {
+        outcome: 'failed', changedFiles: [], verification: [], approvals: [],
+        recoveryNotes: 'the sandbox ran out of disk space',
+      },
+    })));
+    const host = await mount({ runs: [summary({ status: 'failed' })] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    expect(tabButton(host, 'overview').getAttribute('aria-selected')).toBe('true');
+    expect(host.textContent).toContain('This Run did not finish');
+    expect(host.textContent).toContain('the sandbox ran out of disk space');
+    const notice = host.querySelector('.run-blocked-notice')!;
+    expect(tabPanel(host, 'overview').contains(notice)).toBe(false);
+    expect(tabPanel(host, 'updates').contains(notice)).toBe(false);
+  });
+
+  it('shows an eligible preview file as information only in Overview, never a broken "open" action', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => detail({
+      status: 'completed',
+      narrative: { steps: [], stepsTruncated: false, outcome: { kind: 'success' } },
+      result: {
+        outcome: 'completed', changedFiles: ['dist/index.html', 'dist/app.js'], verification: [], approvals: [],
+      },
+    })));
+    const host = await mount({ runs: [summary({ status: 'completed' })] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    const note = tabPanel(host, 'overview').querySelector('.mobile-run-preview-note');
+    expect(note?.textContent).toContain('dist/index.html');
+    expect(note?.textContent).not.toContain('dist/app.js');
+    expect([...host.querySelectorAll('button')].some((button) => /open preview/i.test(button.textContent ?? ''))).toBe(false);
+  });
+
+  it('preserves an in-progress feedback draft when switching tabs and back — nothing in a hidden panel unmounts', async () => {
+    vi.stubGlobal('fetch', stubRunFetch(() => narratedDetail()));
+    const host = await mount({ runs: [summary()] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+
+    const draft = host.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement;
+    await act(async () => { setInputValue(draft, 'still drafting this comment'); });
+    expect(draft.value).toBe('still drafting this comment');
+
+    await act(async () => { tabButton(host, 'updates').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await act(async () => { tabButton(host, 'overview').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const draftAfter = host.querySelector('textarea[aria-label="Add feedback"]') as HTMLTextAreaElement;
+    expect(draftAfter.value).toBe('still drafting this comment');
+  });
+
+  it('resets to the Overview tab when a different Run is opened, even if Updates was open — and preserves back navigation to the Repository', async () => {
+    vi.stubGlobal('fetch', stubRunFetch((runId) => narratedDetail({ id: runId })));
+    const host = await mount({ runs: [summary(), summary({ id: 'run-2', objective: 'Second run' })] });
+
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+    await act(async () => { tabButton(host, 'updates').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(false);
+
+    const back = host.querySelector('[aria-label="Back to repository"]') as HTMLButtonElement;
+    expect(back).not.toBeNull();
+    await act(async () => { back.click(); });
+    expect(host.querySelector('[data-run-id="run-2"]')).not.toBeNull();
+
+    await act(async () => { (host.querySelector('[data-run-id="run-2"]') as HTMLButtonElement).click(); });
+
+    expect(tabPanel(host, 'overview').hasAttribute('hidden')).toBe(false);
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(true);
+  });
+
+  it('does not reset the active tab on a same-Run re-render (a poll refresh)', async () => {
+    vi.useFakeTimers();
+    let polls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes('/feedback')) return jsonResponse([]);
+      if (target.includes('/review')) return jsonResponse({ state: 'not_applicable' });
+      polls += 1;
+      return jsonResponse(narratedDetail());
+    }));
+    const host = await mount({ runs: [summary({ status: 'running' })] });
+    await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
+    await act(async () => { tabButton(host, 'updates').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+
+    expect(polls).toBeGreaterThan(1);
+    expect(tabPanel(host, 'updates').hasAttribute('hidden')).toBe(false);
+  });
+});
+
 // Ticket 67 (B07, docs/specs/run-feedback-review.md): the shared
 // RunFeedbackPanel (RunFeedbackPanel.tsx) is exercised directly, at the
 // composer/list behavior level, in RunFeedbackPanel.test.tsx — the same
