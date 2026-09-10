@@ -40,6 +40,12 @@ describe('loadConfig', () => {
     expect(cfg.pollIntervalMs).toBe(5000);
   });
 
+  it('leaves the structured-Attempt feature gate off by default, and reads it when set (ticket 05)', () => {
+    expect(loadConfig('/nonexistent/config.json').structuredAttemptsEnabled).toBeUndefined();
+    const file = tmpFile(JSON.stringify({ structuredAttemptsEnabled: true }));
+    expect(loadConfig(file).structuredAttemptsEnabled).toBe(true);
+  });
+
   it('survives unparseable JSON', () => {
     const file = tmpFile('{nope');
     expect(loadConfig(file)).toEqual(defaultConfig());

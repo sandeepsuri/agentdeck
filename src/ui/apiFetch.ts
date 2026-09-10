@@ -27,7 +27,14 @@ export async function responseJsonArray<T>(response: Response): Promise<T[]> {
   return body as T[];
 }
 
-export async function fetchConnection(): Promise<{ kind: 'local' | 'remote' | 'denied'; capabilities: string[] }> {
+export interface ConnectionInfo {
+  kind: 'local' | 'remote' | 'denied';
+  capabilities: string[];
+  /** Ticket 12 AC6: present only when this connection resolved to a named collaborator's device credential (never the legacy shared tailnet token) — see server/routes.ts's GET /api/connection. */
+  principal?: { id: string; displayName: string };
+}
+
+export async function fetchConnection(): Promise<ConnectionInfo> {
   const response = await apiFetch('/api/connection');
   return responseJson(response);
 }

@@ -1,0 +1,187 @@
+.modal-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--overlay); }
+.sidebar-runs-label { color: var(--status-waiting); }
+.work-run-row { width: 100%; min-height: 70px; display: flex; align-items: center; gap: 2px; padding: 10px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--text-primary); }
+.work-run-row:hover { background: var(--surface-hover); }
+.work-run-row.is-selected { border-color: var(--status-waiting); background: var(--status-waiting-bg); }
+.work-run-select { flex: 1; min-width: 0; display: grid; grid-template-columns: 34px minmax(0,1fr); grid-template-areas: "glyph content" "glyph status"; align-items: center; column-gap: 10px; row-gap: 7px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.row-delete-button { flex: none; width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: 14px; line-height: 1; cursor: pointer; opacity: 0; }
+.work-run-row:hover .row-delete-button, .history-row:hover .row-delete-button { opacity: 1; }
+.row-delete-button:hover { background: var(--status-error-bg); color: var(--status-error); }
+.work-run-glyph { grid-area: glyph; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--status-waiting); border-radius: var(--radius-sm); color: var(--status-waiting); font: 700 8px var(--font-mono); letter-spacing: .08em; }
+.work-run-content { grid-area: content; min-width: 0; }
+.work-run-content strong,.work-run-content small { display: block; overflow: hidden; text-overflow: ellipsis; }
+.work-run-content strong { display: -webkit-box; font-size: 12px; font-weight: 500; line-height: 1.4; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.work-run-content small { margin-top: 5px; color: var(--text-muted); font-size: 10.5px; white-space: nowrap; }
+.work-run-select > .work-run-status { grid-area: status; justify-self: start; }
+.work-run-status { --run-status-color: var(--text-secondary); --run-status-bg: var(--status-neutral-bg); display: inline-flex; width: fit-content; align-items: center; padding: 4px 9px; border: 1px solid color-mix(in srgb, var(--run-status-color) 55%, transparent); border-radius: 999px; background: var(--run-status-bg); color: var(--run-status-color); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.work-run-status.status-queued,.work-run-status.status-pending,.work-run-status.status-idle { --run-status-color: var(--status-idle); --run-status-bg: var(--status-neutral-bg); }
+.work-run-status.status-preparing,.work-run-status.status-in_progress { --run-status-color: var(--status-starting); --run-status-bg: var(--status-starting-bg); }
+.work-run-status.status-starting,.work-run-status.status-running,.work-run-status.status-working,.work-run-status.status-executing { --run-status-color: var(--status-running); --run-status-bg: var(--status-running-bg); }
+.work-run-status.status-waiting_approval,.work-run-status.status-waiting_input,.work-run-status.status-waiting_dependency,.work-run-status.status-pause_requested,.work-run-status.status-blocked,.work-run-status.status-ambiguous { --run-status-color: var(--status-waiting); --run-status-bg: var(--status-waiting-bg); }
+.work-run-status.status-verifying { --run-status-color: var(--status-reviewing); --run-status-bg: var(--status-reviewing-bg); }
+.work-run-status.status-reviewing { --run-status-color: var(--status-unverified); --run-status-bg: var(--status-unverified-bg); }
+.work-run-status.status-ready,.work-run-status.status-completed,.work-run-status.status-verified,.work-run-status.status-success,.work-run-status.status-no-changes,.work-run-status.status-succeeded,.work-run-status.status-authorized,.work-run-status.status-applied { --run-status-color: var(--status-working); --run-status-bg: var(--status-working-bg); }
+.work-run-status.status-completed_unverified,.work-run-status.status-unverified { --run-status-color: var(--status-unverified); --run-status-bg: var(--status-unverified-bg); }
+.work-run-status.status-failed_verification,.work-run-status.status-failed,.work-run-status.status-refused { --run-status-color: var(--status-error); --run-status-bg: var(--status-error-bg); }
+.work-run-status.status-failed_budget { --run-status-color: var(--status-budget); --run-status-bg: var(--status-budget-bg); }
+.work-run-status.status-paused,.work-run-status.status-cancelled { --run-status-color: var(--status-exited); --run-status-bg: var(--status-neutral-bg); }
+.run-header-actions { flex: none; display: flex; align-items: center; gap: 10px; }
+.sidebar-create-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 12px 12px; }
+.sidebar-create-actions > button { min-width: 0; margin: 0; padding: 8px 4px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
+.new-run-button { border: 1px solid var(--status-waiting); background: var(--status-waiting-bg); color: var(--status-waiting); }
+
+.run-workspace { width: min(920px,calc(100% - 48px)); margin: 26px auto; padding: 30px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); overflow: auto; }
+.run-workspace > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--border-muted); }
+.run-workspace h1 { margin: 6px 0 0; font-size: 25px; line-height: 1.3; font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
+.run-workspace h2 { margin: 24px 0 11px; font-size: 13px; font-weight: 600; }
+.run-workspace small,.run-workspace dt,.run-workspace > footer { color: var(--text-muted); font-size: 10.5px; }
+.run-workspace ol { display: grid; gap: 7px; padding-left: 22px; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
+.run-intent-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1px; margin: 22px 0; background: var(--border-muted); border: 1px solid var(--border-muted); border-radius: var(--radius-md); overflow: hidden; }
+.run-intent-grid > div { min-width: 0; padding: 14px 15px; background: var(--surface-panel); }
+.run-intent-grid dd { display: grid; gap: 5px; margin: 7px 0 0; overflow-wrap: anywhere; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
+.run-intent-grid code { padding: 5px 7px; border-radius: var(--radius-sm); background: var(--surface-code); font: 11.5px/1.5 var(--font-mono); }
+
+/* A section whose facts stay reachable once settled, but no longer need to
+   hold the page open: expanded while there is something to decide or fix
+   (open reflects live state, not a stored preference), a quiet one-line
+   summary — heading plus its status pill — once ready. Distinct from
+   .run-technical-detail (used for a nested, always-secondary disclosure like
+   Permissions & limits) so this one can carry a heading-sized summary. */
+.run-section-detail { margin-top: 4px; }
+.run-section-detail > summary { display: flex; align-items: center; gap: 10px; padding: 2px 2px 12px; cursor: pointer; list-style: none; }
+.run-section-detail > summary::-webkit-details-marker { display: none; }
+.run-section-detail > summary h2 { flex: 1; margin: 0; }
+.run-section-detail[open] > summary { padding-bottom: 12px; }
+.run-workspace > footer { padding-top: 18px; border-top: 1px solid var(--border-muted); }
+.run-preparation .button { margin-top: 4px; }
+.run-attempt .button { margin-top: 4px; }
+.run-technical-detail { margin-top: 4px; }
+.run-technical-detail summary { padding: 8px 2px; color: var(--text-muted); font-size: 11.5px; cursor: pointer; list-style: none; }
+.run-technical-detail summary::-webkit-details-marker { display: none; }
+.run-technical-detail summary:hover { color: var(--text-primary); }
+.run-technical-detail .run-intent-grid { margin-top: 8px; }
+.run-attempt-activity { display: grid; gap: 7px; margin: 14px 0 0; padding: 0; list-style: none; }
+.run-attempt-event { padding: 10px 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-panel); }
+.run-attempt-event strong { font-size: 10.5px; font-weight: 600; color: var(--text-secondary); }
+.run-attempt-event p { margin: 5px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-attempt-event.kind-failure { border-color: var(--status-error); }
+.run-attempt-event.kind-completion { border-color: var(--status-working); }
+
+/* The readable Attempt report: the answer, then what the Run did in plain
+   sentences. The raw command stays available under "Show technical detail" —
+   the durable log keeps it, so a reader who wants the exact shell is one
+   click away, and everyone else is not reading /bin/zsh -lc by default. */
+.run-attempt-answer { margin: 16px 0 0; padding: 15px 17px; border: 1px solid var(--border-muted); border-left: 2px solid var(--status-working); border-radius: var(--radius-md); background: var(--surface-panel); }
+.run-attempt-answer h3,.run-attempt-steps h3 { margin: 0; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.run-attempt-answer p { margin: 9px 0 0; color: var(--text-primary); font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.run-attempt-answer p.is-empty { color: var(--text-muted); font-style: italic; }
+.run-attempt-steps { margin: 18px 0 0; }
+.run-attempt-steps-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.run-attempt-steps .run-attempt-activity { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.run-detail-toggle { padding: 6px 10px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.run-detail-toggle:hover { background: var(--surface-hover); }
+.run-attempt-step { display: grid; grid-template-columns: 16px minmax(0,1fr); align-items: baseline; gap: 8px; padding: 6px 0; border: 0; background: none; }
+.run-step-mark { color: var(--status-working); font: 11px var(--font-mono); }
+.run-attempt-step.status-failed .run-step-mark { color: var(--status-error); }
+.run-attempt-step.status-started .run-step-mark { color: var(--text-muted); }
+.run-step-label { color: var(--text-primary); font-size: 13px; line-height: 1.5; }
+.run-attempt-step code { grid-column: 2; margin-top: 5px; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-code); color: var(--text-secondary); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.run-attempt-verdict { margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; }
+.run-attempt-verdict.is-success { color: var(--status-working); }
+.run-attempt-verdict.is-failure { color: var(--status-error); }
+.run-attempt-raw { margin-top: 16px; }
+
+/* Ticket 07: a pending Run attention request — approve/deny or provide
+   clarifying input, matching the .run-attempt-event kind-* accent pattern
+   above (border color keyed to what the request means). */
+.run-attention-request { position: relative; margin: 16px 0 0; padding: 14px 16px 14px 55px; border: 1px solid color-mix(in srgb, var(--status-waiting) 45%, transparent); border-radius: var(--radius-md); background: var(--status-waiting-bg); }
+.run-attention-request::before { content: ''; position: absolute; left: 16px; top: 14px; width: 28px; height: 28px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--status-waiting) 18%, transparent); }
+.run-attention-request strong { display: block; font-size: 13px; font-weight: 600; color: var(--status-waiting); }
+.run-attention-request p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-attention-actions { display: flex; gap: 8px; margin-top: 11px; }
+.run-attention-input-form { display: flex; gap: 8px; margin-top: 11px; }
+.run-attention-input-form input { flex: 1; min-width: 0; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-primary); font: 12.5px var(--font-sans); }
+
+/* Presentation-only redesign slice (docs/prototypes/agentdeck-redesign.html):
+   Overview/Activity/Execution, styled like the shell's own .workspace-tabs
+   underline pattern so a Run's own detail sections read as one family with
+   the outer shell rather than a second, different-looking tab widget. */
+.run-detail-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 24px; border-bottom: 1px solid var(--border-muted); }
+.run-detail-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 2px 10px; margin-right: 20px; background: transparent; color: var(--text-muted); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.run-detail-tabs button:hover { color: var(--text-primary); }
+.run-detail-tabs button.is-active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.run-detail-panel { margin-top: 4px; }
+/* A blocker with no settled Attempt yet to carry it (preparation failed,
+   envelope refused) — the one thing besides pending Attention worth
+   surfacing above the tabs, since neither has a RunResult to live in. */
+.run-blocked-notice { margin-top: 18px; padding: 13px 15px; border: 1px solid color-mix(in srgb, var(--status-error) 45%, transparent); border-radius: var(--radius-md); background: var(--status-error-bg); }
+.run-blocked-notice strong { display: block; color: var(--status-error); font-size: 11.5px; font-weight: 600; }
+.run-blocked-notice p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-blocked-notice .button { margin-top: 10px; }
+.run-publication-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-muted); color: var(--text-secondary); font-size: 12.5px; }
+.run-publication-hint .button { margin-left: auto; }
+
+.run-submission-modal { width: min(760px,calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); box-shadow: var(--modal-shadow); }
+.run-submission-modal > header { position: sticky; z-index: 2; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--border-muted); background: var(--surface-panel); }
+.run-submission-modal h2 { margin: 4px 0 0; font-size: 19px; font-weight: 600; }
+.run-submission-modal header small { color: var(--accent); font-size: 11.5px; font-weight: 600; }
+.run-submission-modal header button { width: 32px; height: 32px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: 20px; cursor: pointer; }
+.run-submission-modal header button:hover { background: var(--surface-hover); color: var(--text-primary); }
+.run-submission-modal form { display: grid; gap: 20px; padding: 24px; }
+.run-submission-modal label { display: grid; gap: 7px; color: var(--text-secondary); font-size: 13px; font-weight: 500; }
+.run-submission-modal input,.run-submission-modal textarea,.run-submission-modal select { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-primary); font-size: 13.5px; }
+.run-submission-modal textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
+.run-submission-modal fieldset { display: grid; gap: 12px; margin: 0; padding: 16px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); }
+.run-submission-modal legend { padding: 0 6px; color: var(--text-secondary); font-size: 12.5px; font-weight: 600; }
+.run-submission-modal .run-section-detail { margin-top: 0; border-top: 1px solid var(--border-muted); padding-top: 16px; }
+.run-submission-modal .run-section-detail summary h2 { font-size: 14px; font-weight: 600; }
+.run-submission-modal .run-section-detail > div,.run-submission-modal .run-section-detail > fieldset,.run-submission-modal .run-section-detail > label { margin-top: 14px; }
+.run-submission-modal .run-section-detail > fieldset:first-of-type { margin-top: 4px; }
+.run-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.run-choice-row { display: flex; flex-wrap: wrap; gap: 18px; }
+.run-runtime-readiness { font-size: 11px; }
+.run-runtime-readiness.status-managed { color: var(--status-working); }
+.run-runtime-readiness.status-compatibility-only { color: var(--status-waiting); }
+.run-runtime-readiness.status-unavailable { color: var(--status-error); }
+/* A runtime that cannot run managed work explains itself on its own line,
+   rather than squeezing the reason in beside the other runtimes' names. */
+.run-choice-row label:has(.run-runtime-reason) { flex-basis: 100%; flex-wrap: wrap; opacity: 0.7; }
+.run-runtime-reason { flex-basis: 100%; margin-top: 2px; color: var(--text-muted); font-size: 11px; font-weight: 400; line-height: 1.45; }
+.run-choice-row label,.run-check { display: flex; grid-template-columns: auto 1fr; align-items: center; }
+.run-choice-row input,.run-check input { width: auto; }
+.run-submission-modal form > footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px; }
+
+@media (max-width: 700px) {
+  .run-form-grid,.run-intent-grid { grid-template-columns: 1fr; }
+}
+
+/* Ticket 13: publication is its own explicit step after a verified result.
+   'succeeded' shares the success look; 'ambiguous' is deliberately the
+   waiting color, not error — the admin has to look, not retry blindly. */
+.run-publication { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--border-muted); }
+.run-publication h3 { margin: 14px 0 0; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.run-publication-note { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; }
+.run-publication .button { margin-top: 4px; }
+.run-publication a { color: var(--status-working); }
+/* A finished Run whose result never reached the Repository checkout. Styled as
+   waiting, not error, and lifted out of the result grid: nothing failed, the
+   commit is intact on its own branch, and an operator has to clear the way. */
+.run-delivery-blocked { margin: 18px 0 0; padding: 13px 15px; border: 1px solid color-mix(in srgb, var(--status-waiting) 45%, transparent); border-radius: var(--radius-md); background: var(--status-waiting-bg); }
+.run-delivery-blocked strong { display: block; color: var(--status-waiting); font-size: 11.5px; font-weight: 600; }
+.run-delivery-blocked p { margin: 6px 0 0; color: var(--text-primary); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.run-delivery-blocked code { padding: 2px 5px; border-radius: var(--radius-sm); background: var(--surface-code); font: 11px var(--font-mono); }
+
+/* Verification evidence: a sentence-readable checklist rather than a wall of
+   commands — each gate's pass/fail reads first, its command follows as a
+   secondary, muted detail. */
+.run-result-verification { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; font-size: 12.5px; }
+.run-result-verification li { color: var(--text-primary); line-height: 1.5; }
+.run-result-verification li.is-success { color: var(--status-working); }
+.run-result-verification li.is-failure { color: var(--status-error); }
+.run-result-verification code { display: block; margin: 4px 0 0 21px; padding: 4px 7px; border-radius: var(--radius-sm); background: var(--surface-code); color: var(--text-secondary); font: 11px var(--font-mono); }
+
+/* A11y note: the glyph is decorative (the card's heading text already says
+   "Approval requested" vs. "Input requested"), so it is CSS content keyed off
+   the data attribute RunWorkspace already sets, not an element of its own. */
+.run-attention-request::before { content: '?'; display: flex; align-items: center; justify-content: center; color: var(--status-waiting); font-size: 15px; font-weight: 700; }
+.run-attention-request[data-attention-kind="approval"]::before { content: '\2713'; }

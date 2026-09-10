@@ -1,13 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentMessage, Conflict, DiscoveryStatus, FileClaim, Repo, Session } from '../types.js';
+import type {
+  AgentMessage, CollaboratorSession, Conflict, DiscoveryStatus, FileClaim, Repo, RunAttentionItem, Session,
+} from '../types.js';
+import type {
+  AttentionDecisionInput, CollaboratorRunSummary, Profile, PublicationTarget, WorkRun,
+} from '../work-engine/types.js';
+import { deriveRunCompanionSessions } from '../work-engine/run-companion-session.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
-import { apiFetch, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
+import { adminRepos, adminRuns, adminSessions } from './adminProjection.js';
+import { listCollaboratorRuns, type CollaboratorListState } from './collaboratorRuns.js';
+import { listCollaboratorSessions } from './collaboratorSessions.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
+import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
-import { SettingsModal } from './components/SettingsModal.js';
+import { RunSubmissionModal } from './components/RunSubmissionModal.js';
+import { SettingsWorkspace } from './components/SettingsWorkspace.js';
 import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
-import { type ThemePreference, useTheme } from './theme.js';
+import { THEME_OPTIONS, useTheme } from './theme.js';
 import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
+import { AdminSidebar } from './workspace/AdminSidebar.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
 import { GridView } from './workspace/GridView.js';
 import { HistoryView } from './workspace/HistoryView.js';
@@ -15,18 +27,14 @@ import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSession
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { OperationsView } from './workspace/OperationsView.js';
-import { SessionSidebar } from './workspace/SessionSidebar.js';
+import { OverviewView } from './workspace/OverviewView.js';
+import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SignalsView } from './workspace/SignalsView.js';
+import { TasksView } from './workspace/TasksView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
-import { parseInitialNavigation } from './navigation.js';
-import { finalizeRemoteAuthentication } from './remote-auth.js';
-
-const THEME_OPTIONS: { value: ThemePreference; label: string; glyph: string }[] = [
-  { value: 'system', label: 'System', glyph: '◐' },
-  { value: 'light', label: 'Light', glyph: '☀' },
-  { value: 'dark', label: 'Dark', glyph: '☾' },
-];
+import { isInspectorRelevant, parseInitialNavigation } from './navigation.js';
+import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
 // Owns its own 1 Hz interval so the footer clock ticks without re-rendering
 // the rest of the app (see docs/specs: "Stop the global setNow re-render").
@@ -48,7 +56,7 @@ function ThemeControl() {
   }, [open]);
   return (
     <div className="theme-control" ref={hostRef}>
-      <button aria-expanded={open} aria-haspopup="menu" className="top-icon-button" onClick={() => setOpen((current) => !current)} title={`Appearance: ${selected.label}`} type="button">{selected.glyph}</button>
+      <button aria-expanded={open} aria-haspopup="menu" aria-label={`Appearance: ${selected.label}`} className="top-icon-button" onClick={() => setOpen((current) => !current)} title={`Appearance: ${selected.label}`} type="button">{selected.glyph}</button>
       {open && <div className="theme-menu" role="menu"><div>Appearance</div>{THEME_OPTIONS.map((option) => <button aria-checked={preference === option.value} key={option.value} onClick={() => { setPreference(option.value); setOpen(false); }} role="menuitemradio" type="button"><span>{option.glyph}</span><strong>{option.label}</strong>{option.value === 'system' && <small>{resolvedTheme}</small>}<em>{preference === option.value ? '✓' : ''}</em></button>)}</div>}
     </div>
   );
@@ -57,6 +65,16 @@ function ThemeControl() {
 export function App() {
   const initialNavigation = useMemo(() => parseInitialNavigation(location.search), []);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [runs, setRuns] = useState<WorkRun[]>([]);
+  // Ticket 07: a remote (mobile) connection cannot fetch full Run objects
+  // (see the isRemoteAllowedRoute comment in app.ts) — this is the one
+  // minimal, remote-safe queue it polls instead (GET /api/runs/attention).
+  // The local/desktop path never needs it: RunWorkspace already reads
+  // run.pendingAttention straight off the full Run objects `runs` above.
+  const [runAttention, setRunAttention] = useState<RunAttentionItem[]>([]);
+  // Ticket 05: the structured Attempt panel stays hidden until this
+  // admin-configured feature gate (config.json's structuredAttemptsEnabled) is on.
+  const [structuredAttemptsEnabled, setStructuredAttemptsEnabled] = useState(false);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [events, setEvents] = useState<AgentMessage[]>([]);
   const [claims, setClaims] = useState<FileClaim[]>([]);
@@ -65,15 +83,22 @@ export function App() {
   const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
   const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'operations');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [showLaunch, setShowLaunch] = useState(false);
+  const [showRunSubmission, setShowRunSubmission] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsVisited, setSettingsVisited] = useState(false);
+  useEffect(() => { if (showSettings) setSettingsVisited(true); }, [showSettings]);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [repositoryNavigationRequest, setRepositoryNavigationRequest] = useState<{ repositoryId: string | null; sequence: number }>({ repositoryId: null, sequence: 0 });
+  const [overviewRepositoryName, setOverviewRepositoryName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => readInspectorCollapsed(inspectorPreferenceStorage()));
   const wsRef = useRef<WebSocket | null>(null);
   const requestedSessionIdRef = useRef(initialNavigation.sessionId);
+  const requestedRunIdRef = useRef(initialNavigation.runId);
   const historyWitnessRef = useRef(INITIAL_HISTORY_WITNESS_STATE);
   // Ticket 05: defaults to 'ready' (render normally, no delay) rather than
   // an initial "unknown/loading" state — the ordinary desktop/loopback case
@@ -83,16 +108,63 @@ export function App() {
   const [connectionGate, setConnectionGate] = useState<'ready' | 'needs-token' | 'denied'>('ready');
   const [tokenInput, setTokenInput] = useState('');
   const [tokenError, setTokenError] = useState<string | null>(null);
+  // Ticket 11 AC1: a named collaborator's device has no shared tailnet
+  // token to enter — it exchanges a one-time invitation code for its own
+  // device credential instead. Same gate, a second mode.
+  const [authMode, setAuthMode] = useState<'token' | 'invitation'>('token');
+  const [inviteCode, setInviteCode] = useState('');
+  const [deviceLabel, setDeviceLabel] = useState('');
+  const [inviteError, setInviteError] = useState<string | null>(null);
   // Ticket 13: which workspace to render once the gate is 'ready'. Defaults
   // to 'local' for the same reason connectionGate defaults to 'ready' — the
   // ordinary desktop/loopback case must render its normal tree immediately,
   // with zero extra delay, and only switch to the phone view once
   // GET /api/connection actually reports 'remote'.
   const [connectionKind, setConnectionKind] = useState<'local' | 'remote'>('local');
+  // Ticket 12 AC1/AC6: set only when this connection resolved to a named
+  // collaborator's device credential — drives whether MobileWorkspace
+  // offers launching/guiding Runs, and which Repositories/Profiles it
+  // offers them for.
+  const [collaboratorPrincipal, setCollaboratorPrincipal] = useState<{ id: string; displayName: string } | null>(null);
+  const [collaboratorRepos, setCollaboratorRepos] = useState<Repo[]>([]);
+  const [collaboratorProfiles, setCollaboratorProfiles] = useState<Profile[]>([]);
+  /** Kept apart from `runs` above: a collaborator device receives the narrowed projection (server/collaborator-run-view.ts), not a WorkRun, and the desktop's deep-link/selection logic reads `runs` expecting the full shape. */
+  const [collaboratorRuns, setCollaboratorRuns] = useState<CollaboratorRunSummary[]>([]);
+  const [collaboratorRunListState, setCollaboratorRunListState] = useState<CollaboratorListState>('loading');
+  const [collaboratorRepositoryListState, setCollaboratorRepositoryListState] = useState<CollaboratorListState>('loading');
+  /** Kept apart from `sessions` above for the same reason: GET /api/sessions answers a collaborator device with CollaboratorSession (server/collaborator-session-view.ts), which has no cwd, worktreePath, pid or launchSpec — the desktop tree reads `sessions` expecting all of them. */
+  const [collaboratorSessions, setCollaboratorSessions] = useState<CollaboratorSession[]>([]);
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
-  const selectedRepoPath = selected ? repoPathOf(selected) : repos[0]?.path ?? null;
+  const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  // Ticket 68 (B13): live, derived, admin-only — never stored, never a
+  // claim that a companion Session is this Run's own terminal.
+  const companionSessions = useMemo(
+    () => selectedRun ? deriveRunCompanionSessions(selectedRun, sessions) : [],
+    [selectedRun, sessions],
+  );
+  const selectedRepoPath = selectedRun?.spec.repository.path ?? (selected ? repoPathOf(selected) : repos[0]?.path ?? null);
+  const changesRepoPath = selectedRun?.preparation.state === 'ready'
+    ? selectedRun.preparation.worktreePath ?? selectedRepoPath
+    : selectedRepoPath;
   const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
+  const inspectorRelevant = !showSettings && isInspectorRelevant(view, Boolean(selected) && !selectedRun);
+  const pageTitle = showSettings
+    ? 'Settings & access'
+    : view === 'overview' && overviewRepositoryName
+      ? overviewRepositoryName
+      : selectedRun && view === 'operations'
+        ? selectedRun.spec.objective
+        : selected && view === 'terminal'
+          ? sessionLabel(selected)
+          : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
+  // A14: Settings is an additional workspace-stage layer, not a `view` of
+  // its own (it isn't a sidebar destination) — so a given view's layer is
+  // active only while Settings isn't showing, and Settings' own layer is
+  // active exactly when it is. This keeps whatever `view` was open
+  // underneath fully intact (mounted, unchanged) while Settings is shown,
+  // so leaving it is a plain visibility flip, not a re-navigation.
+  const layerClass = (id: WorkspaceView) => (!showSettings && view === id ? 'workspace-layer is-active' : 'workspace-layer');
 
   // Ticket 10: an ended managed session stays in the rail ~1h, then moves to
   // History. `historyWitnessRef` is advanced synchronously during render
@@ -121,7 +193,8 @@ export function App() {
   }), []);
 
   const refreshSessions = useCallback(() => apiFetch('/api/sessions')
-    .then((response) => responseJsonArray<Session>(response)).then((body) => {
+    .then((response) => responseJsonArray<Session>(response)).then((all) => {
+      const body = adminSessions(all);
       setSessions(body);
       setError(null);
       const requested = requestedSessionIdRef.current;
@@ -140,7 +213,46 @@ export function App() {
         return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
       });
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then(setRepos).catch(() => undefined), []);
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => setRepos(adminRepos(all))).catch(() => undefined), []);
+  const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((all) => {
+    const body = adminRuns(all);
+    setRuns(body);
+    // Ticket 07: the native companion's openRun deep-link (?run=<id>) — same
+    // one-shot "consume once loaded, then clear the URL" shape as the
+    // session deep-link above.
+    const requestedRunId = requestedRunIdRef.current;
+    if (requestedRunId && body.some((run) => run.id === requestedRunId)) {
+      requestedRunIdRef.current = undefined;
+      history.replaceState(null, '', location.pathname);
+      setSelectedId(null);
+      setSelectedRunId(requestedRunId);
+      setView('operations');
+    }
+  }).catch(() => undefined), []);
+  const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
+  const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then((next) => {
+    setCollaboratorRuns(next);
+    setCollaboratorRunListState('ready');
+  }).catch(() => setCollaboratorRunListState('error')), []);
+  const refreshCollaboratorSessions = useCallback(() => listCollaboratorSessions().then(setCollaboratorSessions).catch(() => undefined), []);
+  // Ticket 12 AC1/AC6: a resolved collaborator device gets its own granted
+  // Repositories and Profiles — GET /api/repos and GET /api/profiles are
+  // already grant-filtered (and, for Repositories, narrowed) server-side, so
+  // this is the same shape refreshRepos would do for the desktop path, just
+  // scoped to when there's actually a collaborator Principal to fetch for.
+  // Polled rather than fetched once: the Repository drawer is now the
+  // collaborator's persistent navigation, so a grant revoked mid-session has
+  // to stop appearing in it.
+  const refreshCollaboratorGrants = useCallback(() => Promise.all([
+    apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((grantedRepos) => {
+      setCollaboratorRepos(grantedRepos);
+      setCollaboratorRepositoryListState('ready');
+    }).catch(() => setCollaboratorRepositoryListState('error')),
+    // Profile loading keeps its previous behavior: a failed refresh exposes
+    // no request Profile choices. Crucially, it cannot now suppress an
+    // independently successful Repository revocation response.
+    apiFetch('/api/profiles').then((response) => responseJsonArray<Profile>(response)).catch(() => []).then(setCollaboratorProfiles),
+  ]).then(() => undefined), []);
   const refreshEvents = useCallback(() => apiFetch('/api/events?limit=300').then((response) => responseJsonArray<AgentMessage>(response)).then(setEvents).catch(() => undefined), []);
   const refreshClaims = useCallback(() => apiFetch('/api/claims').then((response) => responseJsonArray<FileClaim>(response)).then(setClaims).catch(() => undefined), []);
   const refreshConflicts = useCallback(() => apiFetch('/api/conflicts').then((response) => responseJsonArray<Conflict>(response)).then(setConflicts).catch(() => undefined), []);
@@ -150,14 +262,51 @@ export function App() {
   useEffect(() => {
     refreshSessions();
     // The remote mobile surface intentionally cannot access repository,
-    // event, discovery, or integration APIs. Stop polling them once the
-    // connection is classified; response validation above also makes the
+    // event, discovery, or integration APIs — but GET /api/runs/attention
+    // is the one deliberately narrow, remote-safe Run read it does poll
+    // (see app.ts's isRemoteAllowedRoute and attention.ts's
+    // deriveRunAttentionItems). Response validation above also makes the
     // brief pre-classification requests harmless if their 403s arrive late.
-    if (connectionKind === 'remote') return;
-    refreshRepos(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
-    const background = setInterval(() => { refreshRepos(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
+    if (connectionKind === 'remote') {
+      // A named collaborator device also polls its own Run list, and its
+      // grants alongside it. The `collaboratorPrincipal` guard is
+      // load-bearing, not cosmetic: GET /api/runs, /api/repos and
+      // /api/profiles are on isCollaboratorAllowedRoute ONLY, so the admin's
+      // own phone (the legacy shared token, no Principal) would 403 on all
+      // three every tick. Re-reading the grants each time is also how a
+      // revoked Repository stops appearing in the drawer mid-session —
+      // enforcement was always server-side, but the display used to go
+      // stale until reload.
+      const refreshCollaborator = () => {
+        refreshRunAttention();
+        if (!collaboratorPrincipal) return;
+        refreshCollaboratorRuns();
+        refreshCollaboratorGrants();
+        // The admin's own phone keeps its session list current from WS
+        // 'session_update' frames, but ws.ts excludes a collaborator socket
+        // from both session broadcasts (and 'attach'), so this list is only
+        // ever as fresh as the last poll. GET /api/sessions is grant-scoped
+        // and narrowed for a collaborator device (collaborator-session-view.ts).
+        refreshCollaboratorSessions();
+      };
+      refreshCollaborator();
+      const background = setInterval(refreshCollaborator, collaboratorPrincipal ? 3000 : 5000);
+      return () => { clearInterval(background); };
+    }
+    refreshRepos(); refreshRuns(); refreshEvents(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode();
+    const background = setInterval(() => { refreshRepos(); refreshRuns(); refreshClaims(); refreshConflicts(); refreshDiscovery(); refreshVsCode(); }, 5000);
     return () => { clearInterval(background); };
-  }, [connectionKind, refreshClaims, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshSessions, refreshVsCode]);
+  }, [collaboratorPrincipal, connectionKind, refreshClaims, refreshCollaboratorGrants, refreshCollaboratorRuns, refreshCollaboratorSessions, refreshConflicts, refreshDiscovery, refreshEvents, refreshRepos, refreshRunAttention, refreshRuns, refreshSessions, refreshVsCode]);
+
+  useEffect(() => {
+    if (connectionKind === 'remote') return;
+    let disposed = false;
+    apiFetch('/api/settings')
+      .then((response) => response.ok ? response.json() as Promise<{ structuredAttemptsEnabled?: boolean }> : null)
+      .then((body) => { if (!disposed && body) setStructuredAttemptsEnabled(Boolean(body.structuredAttemptsEnabled)); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [connectionKind]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -223,7 +372,12 @@ export function App() {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setShowLaunch(true); }
       if (!typing && /^[1-9]$/.test(event.key)) {
         const session = sessions[Number(event.key) - 1];
-        if (session) setSelectedId(session.id);
+        if (session) {
+          setSelectedRunId(null);
+          setSelectedId(session.id);
+          setView('terminal');
+          setTerminalVisited(true);
+        }
       }
       if (event.key === 'Escape') setPaletteOpen(false);
     };
@@ -237,6 +391,49 @@ export function App() {
     persistInspectorCollapsed(inspectorPreferenceStorage(), inspectorCollapsed);
   }, [inspectorCollapsed]);
 
+  // Three places learn this connection's identity — the probe below and
+  // both gate submissions — and every one of them has to apply it the same
+  // way. They used to diverge: submitToken/submitInvitation set the gate
+  // but dropped `principal`, so a collaborator who had just redeemed an
+  // invitation code stayed on the admin's session view until a full reload
+  // (MobileWorkspace forks on collaboratorPrincipal). One helper, three
+  // callers, so they cannot drift again.
+  const applyConnection = useCallback((body: ConnectionInfo) => {
+    const { kind, gate, principal } = resolveConnectionState(body);
+    if (kind === 'remote') setConnectionKind('remote');
+    setConnectionGate(gate);
+    // Ticket 12 AC6: present only for a resolved collaborator device —
+    // drives whether MobileWorkspace renders the collaborator workspace at
+    // all, and which Repositories/Profiles it offers work in.
+    setCollaboratorPrincipal(principal);
+  }, []);
+
+  // A device can hold exactly one credential, and the gate is only
+  // reachable while GET /api/connection reports zero capabilities — so a
+  // phone handed the shared tailnet token first could never reach the
+  // invitation-code form again without clearing localStorage by hand.
+  // Dropping the stored credential and re-gating is the only way to change
+  // identity on a device; the server-side classification is unchanged.
+  const signOut = useCallback(() => {
+    setStoredToken(tokenStorage(), '');
+    setCollaboratorPrincipal(null);
+    setCollaboratorRepos([]);
+    setCollaboratorProfiles([]);
+    setCollaboratorRuns([]);
+    setCollaboratorRunListState('loading');
+    setCollaboratorRepositoryListState('loading');
+    setCollaboratorSessions([]);
+    setSessions([]);
+    setRunAttention([]);
+    setError(null);
+    setTokenInput('');
+    setTokenError(null);
+    setInviteCode('');
+    setInviteError(null);
+    setAuthMode('token');
+    setConnectionGate('needs-token');
+  }, []);
+
   // Ticket 05: how the client discovers "you're remote, please enter a
   // token". The endpoint is reachable without a token, but this request
   // still carries a stored token so a returning phone can validate it and
@@ -245,16 +442,11 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     fetchConnection()
-      .then((body: { kind: 'local' | 'remote' | 'denied'; capabilities: string[] }) => {
-        if (cancelled) return;
-        if (body.kind === 'remote') setConnectionKind('remote');
-        if (body.kind === 'denied') setConnectionGate('denied');
-        else if (body.kind === 'remote' && body.capabilities.length === 0) setConnectionGate('needs-token');
-        else setConnectionGate('ready');
-      })
+      .then((body) => { if (!cancelled) applyConnection(body); })
       .catch(() => undefined); // can't reach the API at all — leave the normal error/reconnect paths to surface that
     return () => { cancelled = true; };
-  }, []);
+  }, [applyConnection]);
+
 
   const submitToken = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -262,9 +454,8 @@ export function App() {
     try {
       const body = await fetchConnection();
       if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
-        setConnectionKind('remote');
+        applyConnection(body);
         setTokenError(null);
-        setConnectionGate('ready');
       } else {
         setTokenError('That token was not accepted. Check it and try again.');
       }
@@ -273,8 +464,163 @@ export function App() {
     }
   };
 
-  const selectSession = (session: Session) => setSelectedId(session.id);
-  const openTerminal = (session: Session) => { setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  // Ticket 11 AC1: exchanges the one-time invitation code the bootstrap
+  // admin issued for this device's own bearer token (collaborators.ts
+  // stores it exactly like the shared tailnet token), then re-checks
+  // GET /api/connection the same way submitToken does above.
+  const submitInvitation = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const result = await exchangeInvitationCode(inviteCode.trim(), deviceLabel.trim());
+    if (!result.ok) { setInviteError(result.error); return; }
+    try {
+      const body = await fetchConnection();
+      if (await finalizeRemoteAuthentication(body, refreshSessions, () => setError(null))) {
+        applyConnection(body);
+        setInviteError(null);
+      } else {
+        setInviteError('The device credential was not accepted.');
+      }
+    } catch {
+      setInviteError('Could not reach AgentDeck to confirm the device.');
+    }
+  };
+
+  const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
+  const selectRun = (run: WorkRun) => { setShowSettings(false); setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
+  // Ticket 47: Overview/Repository rows hand off to the same Run/Session
+  // detail every other entry point (sidebar, command palette) already
+  // opens — selectSession alone doesn't switch tabs, so pair it with the
+  // view change the way CommandPalette's onSelectSession already does.
+  const selectSessionFromOverview = (session: Session) => { setShowSettings(false); selectSession(session); setView('operations'); };
+  const openTerminal = (session: Session) => { setShowSettings(false); setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  // A14: these are the two navigation surfaces that stay reachable while the
+  // Settings workspace is open (AdminSidebar, always visible; CommandPalette,
+  // reachable via ⌘K) — every view layer that could otherwise call this is
+  // itself hidden behind `!showSettings` (App.tsx's workspace-stage), so
+  // leaving Settings here is exactly the "navigate elsewhere" case, never a
+  // stray reset of an in-progress view.
+  const navigateToView = (nextView: WorkspaceView) => {
+    setShowSettings(false);
+    if (nextView === 'overview') {
+      setRepositoryNavigationRequest((current) => ({ repositoryId: null, sequence: current.sequence + 1 }));
+    }
+    if (nextView === 'terminal') {
+      setSelectedRunId(null);
+      setSelectedId((current) => current && sessions.some((session) => session.id === current) ? current : railSessions[0]?.id ?? null);
+      setTerminalVisited(true);
+    }
+    setView(nextView);
+  };
+
+  const prepareRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/prepare`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Run preparation failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  const startRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/start`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Starting the Attempt failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  const runRecoveryAction = async (run: WorkRun, actionName: 'apply' | 'reverify') => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/${actionName}`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? `Run ${actionName} failed.`);
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  // Ticket 68 (B12): a genuinely new Attempt — its own route
+  // (POST /api/runs/:id/attempts), never overloading startRun above.
+  const retryAttempt = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/attempts`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Starting a new Attempt failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  // Ticket 70 (B10): mints an ephemeral, loopback-only preview session and
+  // opens it in a new tab — deliberately never an iframe, so no change to
+  // this dashboard's own Content-Security-Policy is needed.
+  const previewRun = async (run: WorkRun, previewPath: string) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/preview`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: previewPath }),
+    });
+    const body = await response.json() as { previewUrl?: string; error?: string };
+    if (!response.ok || !body.previewUrl) return setError(body.error ?? 'Starting the preview failed.');
+    window.open(body.previewUrl, '_blank');
+  };
+
+  // Ticket 54 (B11): requests pause/resume against the existing engine's
+  // safe-boundary controls (work-routes.ts's POST .../pause and .../resume).
+  // The Run state shown afterward is always the server's response body —
+  // never a locally-guessed "paused" label — so a refusal, a completion
+  // that beat the request, or a pause that hasn't reached its safe boundary
+  // yet all render exactly what the engine actually did.
+  const guideRun = async (run: WorkRun, actionName: 'pause' | 'resume') => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/${actionName}`, { method: 'POST' });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? `Run ${actionName} failed.`);
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  // Ticket 13 AC2: the admin's explicit authorization of an external effect
+  // — the request blocks until publication reaches a settled state, and the
+  // returned Run carries the durable publication record whatever it is.
+  const publishRun = async (run: WorkRun, target: PublicationTarget) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}/publish`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target }),
+    });
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Publishing the Run result failed.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  // Ticket 07 AC2: the one Work Engine policy path every transport's
+  // approve/deny/provide-input command reaches — this is the REST call both
+  // the local desktop RunWorkspace and the mobile attention card make.
+  const resolveRunAttention = async (runId: string, attentionId: string, decision: AttentionDecisionInput) => {
+    const action = decision.kind === 'approve' ? 'approve' : decision.kind === 'deny' ? 'deny' : 'input';
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/attention/${encodeURIComponent(attentionId)}/${action}`, {
+      method: 'POST',
+      ...(decision.kind === 'input'
+        ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: decision.value }) }
+        : {}),
+    });
+    if (connectionKind === 'remote') {
+      if (response.ok) setRunAttention((current) => current.filter((item) => item.attentionId !== attentionId));
+      else setError((await response.json().catch(() => ({}))).error ?? 'Could not resolve the pending Run attention.');
+      return;
+    }
+    const body = await response.json() as WorkRun & { error?: string };
+    if (!response.ok) return setError(body.error ?? 'Could not resolve the pending Run attention.');
+    setRuns((current) => current.map((item) => item.id === body.id ? body : item));
+  };
+
+  const deleteRun = async (run: WorkRun) => {
+    const response = await apiFetch(`/api/runs/${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      setError(body.error ?? 'Deleting the Run failed.');
+      return;
+    }
+    setRuns((current) => current.filter((item) => item.id !== run.id));
+    setSelectedRunId((current) => current === run.id ? null : current);
+  };
+
+  const deleteSession = async (session: Session) => {
+    const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      setError(body.error ?? 'Deleting the session failed.');
+      return;
+    }
+    setSessions((current) => current.filter((item) => item.id !== session.id));
+    setSelectedId((current) => current === session.id ? null : current);
+  };
 
   const action = async (session: Session, actionName: 'stop' | 'restart' | 'focus') => {
     const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/${actionName}`, { method: 'POST' });
@@ -320,18 +666,41 @@ export function App() {
   if (connectionGate === 'needs-token') {
     return (
       <div className="agentdeck-shell">
-        <form onSubmit={(event) => { void submitToken(event); }}>
-          <label htmlFor="agentdeck-token-input">Enter access token</label>
-          <input
-            autoFocus
-            id="agentdeck-token-input"
-            onChange={(event) => setTokenInput(event.target.value)}
-            type="password"
-            value={tokenInput}
-          />
-          <button type="submit">Continue</button>
-          {tokenError && <p role="alert">{tokenError}</p>}
-        </form>
+        {authMode === 'token' ? (
+          <form onSubmit={(event) => { void submitToken(event); }}>
+            <label htmlFor="agentdeck-token-input">Enter access token</label>
+            <input
+              autoFocus
+              id="agentdeck-token-input"
+              onChange={(event) => setTokenInput(event.target.value)}
+              type="password"
+              value={tokenInput}
+            />
+            <button type="submit">Continue</button>
+            {tokenError && <p role="alert">{tokenError}</p>}
+            <button onClick={() => setAuthMode('invitation')} type="button">Have an invitation code instead?</button>
+          </form>
+        ) : (
+          <form onSubmit={(event) => { void submitInvitation(event); }}>
+            <label htmlFor="agentdeck-invite-code-input">Invitation code</label>
+            <input
+              autoFocus
+              id="agentdeck-invite-code-input"
+              onChange={(event) => setInviteCode(event.target.value)}
+              value={inviteCode}
+            />
+            <label htmlFor="agentdeck-device-label-input">This device&rsquo;s name</label>
+            <input
+              id="agentdeck-device-label-input"
+              onChange={(event) => setDeviceLabel(event.target.value)}
+              placeholder="e.g. My phone"
+              value={deviceLabel}
+            />
+            <button type="submit">Continue</button>
+            {inviteError && <p role="alert">{inviteError}</p>}
+            <button onClick={() => setAuthMode('token')} type="button">Have an access token instead?</button>
+          </form>
+        )}
       </div>
     );
   }
@@ -345,41 +714,63 @@ export function App() {
     return (
       <div className="mobile-shell">
         {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
-        <MobileWorkspace onError={setError} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
+        <MobileWorkspace
+          appearanceControl={<ThemeControl />}
+          collaboratorPrincipal={collaboratorPrincipal}
+          collaboratorProfiles={collaboratorProfiles}
+          collaboratorRepos={collaboratorRepos}
+          collaboratorRuns={collaboratorRuns}
+          collaboratorRunListState={collaboratorRunListState}
+          collaboratorRepositoryListState={collaboratorRepositoryListState}
+          collaboratorSessions={collaboratorSessions}
+          onError={setError}
+          onResolveRunAttention={resolveRunAttention}
+          onRunsStale={refreshCollaboratorRuns}
+          onSelect={selectSession}
+          onSignOut={signOut}
+          runAttention={runAttention}
+          session={selected}
+          sessions={sessions}
+          ws={wsRef.current}
+          wsReady={wsReady}
+        />
       </div>
     );
   }
 
   return (
     <div className="agentdeck-shell">
+      <div className="admin-shell-main">
+        <AdminSidebar activeView={view} changeCount={changeCount} historyCount={historySessions.length} onLaunch={() => setShowLaunch(true)} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} onSubmitRun={() => setShowRunSubmission(true)} onView={navigateToView} runs={runs} sessions={railSessions} />
+        <div className="admin-shell-content">
       <header className="app-topbar">
-        <div className="app-brand"><span className="brand-mark"><i /></span><strong>AgentDeck</strong></div>
-        <nav className="workspace-tabs" aria-label="Workspace views">
-          {WORKSPACE_VIEWS.map((item) => <button className={view === item.id ? 'is-active' : ''} key={item.id} onClick={() => setView(item.id)} type="button">{item.label}{item.id === 'changes' && changeCount > 0 && <span>{changeCount}</span>}{item.id === 'history' && historySessions.length > 0 && <span>{historySessions.length}</span>}</button>)}
-        </nav>
-        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Jump to session, file, or action…</strong><kbd>⌘K</kbd></button>
+        <div className="topbar-context"><span>Workspace</span><strong title={pageTitle}>{pageTitle}</strong></div>
+        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Search repositories, runs, sessions, or actions…</strong><kbd>⌘K</kbd></button>
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
-          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — summary model default and API key" type="button">⚙</button>
-          <button className="button compact-button" onClick={() => void installHooks()} type="button">Install hooks</button>
-          <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button">Launch agent <kbd>⌘L</kbd></button>
+          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — workspace configuration and access management" type="button">⚙</button>
+          <button aria-label="Install hooks" className="button compact-button hooks-button" onClick={() => void installHooks()} title="Install hooks" type="button"><span aria-hidden="true">⌁</span><strong>Install hooks</strong></button>
+          <button className="button compact-button top-new-run-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
+          <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button"><span>Launch agent</span> <kbd>⌘L</kbd></button>
         </div>
       </header>
 
       {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
 
       <div className="app-body">
-        <SessionSidebar discoveryStatus={discoveryStatus} onLaunch={() => setShowLaunch(true)} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selectedId={selectedId} sessions={railSessions} />
         <main className="workspace-stage">
-          <div className={view === 'operations' ? 'workspace-layer is-active' : 'workspace-layer'}><OperationsView conflicts={conflicts} events={events} onOpenTerminal={openTerminal} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} /></div>
-          {terminalVisited && <div className={view === 'terminal' ? 'workspace-layer is-active' : 'workspace-layer'}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
-          <div className={view === 'changes' ? 'workspace-layer is-active' : 'workspace-layer'}><ChangesWorkspace claims={claims} onError={setError} repoPath={selectedRepoPath} sessions={sessions} /></div>
-          <div className={view === 'grid' ? 'workspace-layer is-active' : 'workspace-layer'}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
-          <div className={view === 'signals' ? 'workspace-layer is-active' : 'workspace-layer'}><SignalsView events={events} /></div>
-          <div className={view === 'history' ? 'workspace-layer is-active' : 'workspace-layer'}><HistoryView repos={repos} sessions={historySessions} /></div>
+          <div className={layerClass('overview')}><OverviewView onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={layerClass('tasks')}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
+          <div className={layerClass('operations')}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
+          {terminalVisited && <div className={layerClass('terminal')}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
+          <div className={layerClass('changes')}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
+          <div className={layerClass('grid')}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
+          <div className={layerClass('signals')}><SignalsView events={events} /></div>
+          <div className={layerClass('history')}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
+          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} />}</div>
         </main>
-        <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`}>
+        <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button
             aria-controls="agentdeck-inspector-panel"
             aria-expanded={!inspectorCollapsed}
@@ -390,7 +781,7 @@ export function App() {
             type="button"
           >{inspectorCollapsed ? '‹' : '›'}</button>
           <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
-            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={setView} selected={selected} view={view} />
+            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={navigateToView} selected={selectedRun ? null : selected} view={view} />
           </div>
         </div>
       </div>
@@ -398,16 +789,35 @@ export function App() {
       <footer className="app-statusbar">
         <span className={wsReady ? 'is-live' : ''}><i />{wsReady ? 'Live' : 'Offline'}</span>
         <span>AgentDeck v0.1.0</span>
-        <span>▣ {selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
+        <span>▣ {selectedRun ? selectedRun.spec.repository.name : selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
         {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
-        <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>
+        {!showSettings && (['operations', 'terminal', 'signals'] as WorkspaceView[]).includes(view) && <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>}
         <Clock />
         <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
+        </div>
+      </div>
 
-      <CommandPalette onClose={() => setPaletteOpen(false)} onLaunch={() => setShowLaunch(true)} onSelectSession={(session) => { selectSession(session); setView('operations'); }} onView={setView} open={paletteOpen} repos={repos} sessions={sessions} />
-      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { upsertSession(session); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      <CommandPalette
+        onClose={() => setPaletteOpen(false)}
+        onLaunch={() => setShowLaunch(true)}
+        onSelectRepo={(repo) => {
+          setShowSettings(false);
+          setSelectedId(null);
+          setSelectedRunId(null);
+          setRepositoryNavigationRequest((current) => ({ repositoryId: repo.id, sequence: current.sequence + 1 }));
+          setView('overview');
+        }}
+        onSelectRun={selectRun}
+        onSelectSession={(session) => { setShowSettings(false); selectSession(session); setView('operations'); }}
+        onView={navigateToView}
+        open={paletteOpen}
+        repos={repos}
+        runs={runs}
+        sessions={sessions}
+      />
+      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { setShowSettings(false); upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
+      {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
     </div>
   );
 }

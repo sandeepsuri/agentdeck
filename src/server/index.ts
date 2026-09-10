@@ -1,6 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import type { FastifyRequest } from 'fastify';
 import type { WebSocketServer } from 'ws';
 import { loadConfig } from '../config.js';
 import { CoordinationService } from '../coordination/service.js';
@@ -14,12 +15,18 @@ import { openStore } from '../store/index.js';
 import { buildApp } from './app.js';
 import { reconcileSessionsOnBoot } from './boot.js';
 import { attachWs, closeWs } from './ws.js';
-import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
+import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
 import { WakeLock } from './wake-lock.js';
 import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
 import { coordinateManagedWakeLock } from './managed-wake-lock.js';
+import { DurableWorkEngine } from '../work-engine/engine.js';
+import { registerWorkRoutes } from './work-routes.js';
+import { CollaboratorService } from '../collaborators/service.js';
+import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
+import { resolveSenderIdentity } from './session-conversation.js';
+import { RunPreviewServer } from './run-preview-server.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -27,6 +34,23 @@ export async function startServer(): Promise<RunningServer> {
   const config = loadConfig();
   const port = process.env.AGENTDECK_DEV ? config.port + 1 : config.port;
   const store = openStore(config.dataDir);
+  // Ticket 70 (B10): loopback-only, ephemeral, never persisted — dies with
+  // this process (see close() in the shutdown path below).
+  const runPreviewServer = new RunPreviewServer();
+  const workEngine = new DurableWorkEngine(store, path.join(config.dataDir, 'runs'));
+  // Wired as a plain field assignment, not a constructor argument — see
+  // DurableWorkEngine.onWorktreeReset's own doc comment for why.
+  workEngine.onWorktreeReset = (runId) => runPreviewServer.invalidate(runId);
+  // Ticket 11: named collaborators and their device credentials, backed by
+  // the same durable store as everything else — survives a restart exactly
+  // like a queued Run does.
+  const collaborators = new CollaboratorService(store);
+  // Ticket 06: no in-memory Attempt task survives a restart, so any Run
+  // still 'running' from before this process started is ended now with a
+  // precise unrecoverable reason rather than left stuck — see
+  // DurableWorkEngine.recover. Must finish before any route can observe or
+  // start a Run.
+  await workEngine.recover();
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than
@@ -91,8 +115,29 @@ export async function startServer(): Promise<RunningServer> {
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
   const app = buildApp({
-    config, manager, store, terminals, coordination, vscode, discovery, modelCatalog,
-    remoteHosts: remoteAccess.hosts,
+    config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
+    remoteHosts: remoteAccess.hosts, collaborators,
+  });
+  // Ticket 11/12: the same ConnectionTrust.classify() every other route
+  // defers to (see app.ts's onRequest hook) — resolves a collaborator
+  // device's grants, or undefined (unrestricted) for local and the legacy
+  // shared-token remote path.
+  const requestTrust = (req: FastifyRequest) => classify(
+    { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+    { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
+  );
+  registerWorkRoutes(app, workEngine, {
+    resolveGrantedRepositoryIds: (req) => requestTrust(req).device?.grantedRepositoryIds,
+    resolveActor: (req) => {
+      const device = requestTrust(req).device;
+      return device && toRunActor(device);
+    },
+    // B07: reuses the exact identity resolution shared session chat already
+    // established (docs/specs/shared-session-chat.md) rather than a second,
+    // parallel "who sent this" decision.
+    resolveAuthor: (req) => resolveSenderIdentity(requestTrust(req)),
+    runFeedbackStore: store,
+    runPreviewServer,
   });
   let wss: WebSocketServer | undefined;
   let tailnetServer: HttpServer | undefined;
@@ -109,6 +154,7 @@ export async function startServer(): Promise<RunningServer> {
     await manager.shutdown();
     if (wss) await closeWs(wss);
     if (tailnetServer) await new Promise<void>((resolve) => tailnetServer!.close(() => resolve()));
+    await runPreviewServer.close();
     await app.close();
     store.close();
   };
@@ -131,8 +177,9 @@ export async function startServer(): Promise<RunningServer> {
         sessions,
         attention,
         agents: deriveCompanionAgents(sessions, events, attention),
+        runAttention: deriveRunAttentionItems(workEngine.list()),
       };
-    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken });
+    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine, collaborators);
 
     companion = launchNativeCompanion(port);
     discovery.start();

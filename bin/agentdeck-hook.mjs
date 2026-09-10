@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -57,6 +58,56 @@ function processContext() {
   return { sourcePids, ...(tty ? { tty } : {}) };
 }
 
+async function callAgentDeck(pathname, init) {
+  const bases = typeof process.env.AGENTDECK_HOOK_URL === 'string'
+    ? [process.env.AGENTDECK_HOOK_URL]
+    : ['http://127.0.0.1:4040', 'http://127.0.0.1:4041'];
+  for (const base of bases) {
+    try {
+      const response = await fetch(`${base}${pathname}`, {
+        ...init, signal: AbortSignal.timeout(2000), headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+      });
+      if (response.ok) return response;
+    } catch { /* AgentDeck may not be running on this port. */ }
+  }
+  return undefined;
+}
+
+async function bridgeClaudeInteraction(payload) {
+  const isQuestion = payload.hook_event_name === 'PreToolUse' && payload.tool_name === 'AskUserQuestion';
+  const isApproval = payload.hook_event_name === 'PermissionRequest';
+  if (!isQuestion && !isApproval) return undefined;
+  const request = {
+    ...payload,
+    ...(isApproval ? { agentdeck_request_id: randomUUID() } : {}),
+    ...(typeof process.env.AGENTDECK_SESSION_ID === 'string' ? { agentdeck_session_id: process.env.AGENTDECK_SESSION_ID } : {}),
+  };
+  const created = await callAgentDeck('/api/provider/claude/interactions', { method: 'POST', body: JSON.stringify(request) });
+  if (!created) return undefined;
+  const { id } = await created.json();
+  for (let attempt = 0; attempt < 1150; attempt += 1) {
+    const polled = await callAgentDeck(`/api/provider/claude/interactions/${encodeURIComponent(id)}`);
+    if (!polled) break;
+    const result = await polled.json();
+    if (result.status === 'resolved' && result.response?.kind === 'answer') {
+      await callAgentDeck(`/api/provider/claude/interactions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' });
+      const answers = Object.fromEntries(Object.entries(result.response.answers)
+        .map(([question, values]) => [question, Array.isArray(values) ? values.join(', ') : String(values)]));
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { ...payload.tool_input, answers } } };
+    }
+    if (result.status === 'resolved' && result.response?.kind === 'approval') {
+      await callAgentDeck(`/api/provider/claude/interactions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' });
+      return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: result.response.decision === 'approve'
+        ? { behavior: 'allow', updatedInput: payload.tool_input }
+        : { behavior: 'deny', message: 'Denied by an authorized AgentDeck participant.' } } };
+    }
+    if (result.status === 'expired') return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  await callAgentDeck(`/api/provider/claude/interactions/${encodeURIComponent(id)}/expire`, { method: 'POST' });
+  return undefined;
+}
+
 const args = process.argv.slice(2);
 const forwardIndex = args.indexOf('--forward-base64');
 const encoded = forwardIndex >= 0 ? args[forwardIndex + 1] : undefined;
@@ -65,6 +116,8 @@ const input = payloadArg ?? fs.readFileSync(0, 'utf8');
 
 try {
   const payload = JSON.parse(input);
+  const interactionOutput = await bridgeClaudeInteraction(payload);
+  if (interactionOutput) console.log(JSON.stringify(interactionOutput));
   const cwd = payload.cwd;
   const agentSessionId = payload.type === 'agent-turn-complete'
     ? `codex:${payload['thread-id'] ?? 'unknown'}`
@@ -120,6 +173,7 @@ try {
           ?? (typeof payload.transcript_path === 'string' ? lastAssistantText(payload.transcript_path) : undefined);
         message = { ts: new Date().toISOString(), agent, repo: cwd, event: 'done', status: 'idle', message: reply, summary: reply, turnId: payload.prompt_id, ...correlation };
       }
+      else if (event === 'StopFailure') message = { ts: new Date().toISOString(), agent, repo: cwd, event: 'failed', message: payload.error ?? payload.message ?? 'Claude Code stopped because of an error.', ...correlation };
       else if (event === 'SessionStart') message = { ts: new Date().toISOString(), agent, repo: cwd, event: 'session_start', status: 'idle', ...correlation };
     }
     if (message) {

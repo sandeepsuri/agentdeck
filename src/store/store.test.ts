@@ -3,6 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentMessage, Repo, Session, Task } from '../types.js';
+import { buildAttemptEventEnvelope } from '../work-engine/durable-events.js';
+import type {
+  AttemptEvent, Profile, RunPublication, RunRepository, WorkSpec,
+} from '../work-engine/types.js';
 import { Store, openStore } from './index.js';
 
 let dir: string;
@@ -161,6 +165,253 @@ describe('repos', () => {
   });
 });
 
+describe('durable Attempt events (ticket 06)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+  const spec: WorkSpec = {
+    objective: 'Add durable managed work',
+    acceptanceCriteria: ['Restart keeps identity'],
+    repository,
+    requestedBaseReference: 'refs/heads/main',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 3_600_000 },
+    verificationIntent: { required: false, commands: [] },
+    requestedDeliveryResult: 'working-tree',
+  };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'queued',
+        spec,
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('projects idle with no attempts row', () => {
+    createRun('run-1');
+    expect(store.getRun('run-1')?.attempt).toEqual({ state: 'idle' });
+    expect(store.getRun('run-1')?.status).toBe('queued');
+    expect(store.getRun('run-1')?.attempts).toEqual([]);
+  });
+
+  // Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a Run may
+  // have more than one attempts row. `attempt` must keep meaning "the
+  // current (latest) one" for every existing reader, while `attempts`
+  // exposes the full ordered history without ever losing an earlier
+  // attempt's own durable evidence.
+  describe('multiple Attempts (ticket 68, B12)', () => {
+    it('folds every attempts row into an ordered attempts list, oldest first', () => {
+      createRun('run-multi');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-multi', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-multi', attemptId: 'attempt-1',
+        event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' },
+      }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-multi', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      const run = store.getRun('run-multi')!;
+      expect(run.attempts).toHaveLength(2);
+      expect(run.attempts?.[0]).toMatchObject({ attemptId: 'attempt-1', ordinal: 1, state: { state: 'failed', reason: 'process crashed' } });
+      expect(run.attempts?.[1]).toMatchObject({ attemptId: 'attempt-2', ordinal: 2, state: { state: 'running' } });
+    });
+
+    it('keeps `attempt` meaning "the current (latest) one" — unchanged for every existing reader', () => {
+      createRun('run-latest');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-latest', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-latest', attemptId: 'attempt-1',
+        event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' },
+      }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-latest', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+      store.appendAttemptEvent(buildAttemptEventEnvelope({
+        runId: 'run-latest', attemptId: 'attempt-2',
+        event: { kind: 'message', sequence: 0, at: '2026-09-01T00:10:01.000Z', role: 'assistant', text: 'Trying again.' },
+      }));
+
+      const run = store.getRun('run-latest')!;
+      expect(run.attempt).toEqual({
+        state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z',
+        events: [{ kind: 'message', sequence: 0, at: '2026-09-01T00:10:01.000Z', role: 'assistant', text: 'Trying again.' }],
+      });
+    });
+
+    it('never loses or mixes an earlier attempt\'s own event log once a later one exists', () => {
+      createRun('run-preserved');
+      store.startAttempt({ id: 'attempt-1', runId: 'run-preserved', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      const firstEvent: AttemptEvent = { kind: 'failure', sequence: 0, at: '2026-09-01T00:06:00.000Z', reason: 'process crashed' };
+      store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-preserved', attemptId: 'attempt-1', event: firstEvent }));
+      store.startAttempt({ id: 'attempt-2', runId: 'run-preserved', runtime: 'codex', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      const run = store.getRun('run-preserved')!;
+      expect(run.attempts?.[0]?.state).toEqual({
+        state: 'failed', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', failedAt: firstEvent.at, reason: 'process crashed', events: [firstEvent],
+      });
+    });
+
+    it('getLatestAttemptId always resolves to the most recently started attempt', () => {
+      createRun('run-order');
+      store.startAttempt({ id: 'attempt-old', runId: 'run-order', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+      store.startAttempt({ id: 'attempt-new', runId: 'run-order', runtime: 'claude', startedAt: '2026-09-01T00:10:00.000Z' });
+
+      expect(store.getLatestAttemptId('run-order')).toBe('attempt-new');
+    });
+  });
+
+  it('folds a durable event log into a running Attempt, and derives status from it', () => {
+    createRun('run-2');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-2', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event: AttemptEvent = {
+      kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Working on it.',
+    };
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-2', attemptId: 'attempt-1', event }));
+
+    const run = store.getRun('run-2')!;
+    expect(run.status).toBe('running');
+    expect(run.attempt).toEqual({
+      state: 'running', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z', events: [event],
+    });
+  });
+
+  it('derives verifying (not completed) from a bare completion event — verification (ticket 08) has not concluded yet', () => {
+    createRun('run-3');
+    // No updateRun('running'/'completed') call ever happens here — the raw
+    // column stays exactly 'queued' from createRun, exactly as a crash
+    // right after the completion event persisted would leave it.
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-3', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+
+    expect(store.getRun('run-3')?.status).toBe('verifying');
+  });
+
+  it('derives status from a verification-outcome event even though the raw runs.status column was never separately written', () => {
+    createRun('run-3b');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-3b', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3b',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-3b',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: '2026-09-01T00:06:05.000Z', outcome: 'verified', repairAttempts: 0,
+      },
+    }));
+
+    expect(store.getRun('run-3b')?.status).toBe('completed');
+  });
+
+  it('is idempotent: appending the same logical event twice never duplicates durable history', () => {
+    createRun('run-4');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-4', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event: AttemptEvent = {
+      kind: 'usage', sequence: 0, at: '2026-09-01T00:05:01.000Z', inputTokens: 100, outputTokens: 50,
+    };
+    const envelope = buildAttemptEventEnvelope({ runId: 'run-4', attemptId: 'attempt-1', event });
+
+    store.appendAttemptEvent(envelope);
+    // A redelivered notification after a reconnect reproduces the same
+    // content but a fresh sequence/timestamp — still the same dedupeKey.
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-4', attemptId: 'attempt-1', event: { ...event, sequence: 7, at: '2026-09-01T00:09:00.000Z' },
+    }));
+
+    const run = store.getRun('run-4')!;
+    if (run.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(run.attempt.events).toHaveLength(1);
+    expect(run.attempt.events[0]).toEqual(event);
+  });
+
+  it('persists only the shared AttemptEvent shape — no extra property survives the JSON round trip', () => {
+    createRun('run-5');
+    store.startAttempt({
+      id: 'attempt-1', runId: 'run-5', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    const event = {
+      kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'hi',
+      // A hypothetical leaked provider/credential field — must not survive.
+      threadId: 'thread-should-never-persist', apiKey: 'sk-should-never-persist',
+    } as unknown as AttemptEvent;
+    store.appendAttemptEvent(buildAttemptEventEnvelope({ runId: 'run-5', attemptId: 'attempt-1', event }));
+
+    const run = store.getRun('run-5')!;
+    expect(JSON.stringify(run)).not.toContain('should-never-persist');
+  });
+
+  it('reopens a Run\'s full durable Attempt history after the store restarts', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-store-attempts-'));
+    const dbPath = path.join(dir, 'agentdeck.db');
+    const firstStore = openStore(dir);
+    firstStore.upsertRepo(repository);
+    firstStore.createTaskAndRun(
+      { id: 'task-run-6', title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: 'run-6',
+        taskId: 'task-run-6',
+        status: 'queued',
+        spec,
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+    firstStore.startAttempt({
+      id: 'attempt-1', runId: 'run-6', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z',
+    });
+    firstStore.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-6',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'completion', sequence: 0, at: '2026-09-01T00:06:00.000Z', outcome: 'success',
+      },
+    }));
+    firstStore.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-6',
+      attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: '2026-09-01T00:06:05.000Z', outcome: 'verified', repairAttempts: 0,
+      },
+    }));
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = reopenedStore.getRun('run-6')!;
+    expect(reopened.status).toBe('completed');
+    expect(reopened.attempt.state).toBe('completed');
+    reopenedStore.close();
+  });
+});
+
 describe('events', () => {
   const msg = (over: Partial<AgentMessage>): AgentMessage => ({
     ts: '2026-07-17T10:00:00.000Z',
@@ -198,6 +449,165 @@ describe('settings', () => {
   });
 });
 
+describe('collaborators (ticket 11)', () => {
+  it('round-trips a collaborator and its granted repositories', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [] });
+    expect(store.getCollaborator('collab-1')).toEqual({
+      id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z',
+      grantedRepositoryIds: ['repo-1'], grantedProfileIds: [],
+    });
+    expect(store.listCollaborators()).toHaveLength(1);
+    store.updateCollaboratorGrants('collab-1', { repositoryIds: ['repo-1', 'repo-2'], profileIds: ['profile-1'] });
+    expect(store.getCollaborator('collab-1')?.grantedRepositoryIds).toEqual(['repo-1', 'repo-2']);
+    expect(store.getCollaborator('collab-1')?.grantedProfileIds).toEqual(['profile-1']);
+  });
+
+  it('looks an invitation up by its code hash, never by id, and records consumption', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
+    store.createInvitation(
+      { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
+      'a-code-hash',
+    );
+    expect(store.getInvitationByCodeHash('a-code-hash')).toEqual({
+      id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z',
+    });
+    expect(store.getInvitationByCodeHash('no-such-hash')).toBeUndefined();
+    store.consumeInvitation('inv-1', '2026-01-01T01:00:00.000Z');
+    expect(store.getInvitationByCodeHash('a-code-hash')?.consumedAt).toBe('2026-01-01T01:00:00.000Z');
+  });
+
+  it('looks a device up by its token hash and lists devices scoped to one collaborator', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
+    store.createCollaborator({ id: 'collab-2', displayName: 'Bob', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
+    store.createDevice({ id: 'device-2', collaboratorId: 'collab-2', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
+
+    expect(store.getDeviceByTokenHash('hash-1')?.id).toBe('device-1');
+    expect(store.getDeviceByTokenHash('no-such-hash')).toBeUndefined();
+    expect(store.listDevices('collab-1')).toEqual([
+      { id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' },
+    ]);
+    expect(store.listDevices()).toHaveLength(2);
+  });
+
+  it('revoking a device is visible by id and by token hash, and does not touch other devices', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: [], grantedProfileIds: [] });
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-1');
+    store.createDevice({ id: 'device-2', collaboratorId: 'collab-1', deviceLabel: 'laptop', createdAt: '2026-01-01T00:00:00.000Z' }, 'hash-2');
+
+    store.revokeDevice('device-1', '2026-01-01T02:00:00.000Z');
+
+    expect(store.getDevice('device-1')?.revokedAt).toBe('2026-01-01T02:00:00.000Z');
+    expect(store.getDeviceByTokenHash('hash-1')?.revokedAt).toBe('2026-01-01T02:00:00.000Z');
+    expect(store.getDevice('device-2')?.revokedAt).toBeUndefined();
+  });
+
+  it('survives a restart: collaborators, invitations, and devices are reopened with the same identity', () => {
+    store.createCollaborator({ id: 'collab-1', displayName: 'Alice', createdAt: '2026-01-01T00:00:00.000Z', grantedRepositoryIds: ['repo-1'], grantedProfileIds: [] });
+    store.createInvitation(
+      { id: 'inv-1', collaboratorId: 'collab-1', createdAt: '2026-01-01T00:00:00.000Z', expiresAt: '2026-01-02T00:00:00.000Z' },
+      'a-code-hash',
+    );
+    store.createDevice({ id: 'device-1', collaboratorId: 'collab-1', deviceLabel: 'phone', createdAt: '2026-01-01T00:00:00.000Z' }, 'a-token-hash');
+    store.close();
+
+    const reopened = openStore(dir);
+    expect(reopened.getCollaborator('collab-1')?.grantedRepositoryIds).toEqual(['repo-1']);
+    expect(reopened.getInvitationByCodeHash('a-code-hash')?.id).toBe('inv-1');
+    expect(reopened.getDeviceByTokenHash('a-token-hash')?.id).toBe('device-1');
+    reopened.close();
+    store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('profiles (ticket 12)', () => {
+  const profile: Profile = {
+    id: 'profile-1',
+    name: 'Standard Codex run',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 900_000, maxModelTurns: 25 },
+    verificationIntent: { required: true, commands: ['npm test'] },
+    requestedDeliveryResult: 'local-commit',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  it('round-trips a Profile exactly, including its nested budget and verification intent', () => {
+    store.createProfile(profile);
+    expect(store.getProfile('profile-1')).toEqual(profile);
+    expect(store.getProfile('no-such-profile')).toBeUndefined();
+    expect(store.listProfiles()).toEqual([profile]);
+  });
+
+  it('survives a restart with the same identity', () => {
+    store.createProfile(profile);
+    store.close();
+    const reopened = openStore(dir);
+    expect(reopened.getProfile('profile-1')).toEqual(profile);
+    reopened.close();
+    store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('Run activity (ticket 12 AC2)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+  const spec: WorkSpec = {
+    objective: 'Add durable managed work',
+    acceptanceCriteria: ['Restart keeps identity'],
+    repository,
+    requestedBaseReference: 'refs/heads/main',
+    runtimePreference: ['codex'],
+    budget: { maxWallClockMs: 3_600_000 },
+    verificationIntent: { required: false, commands: [] },
+    requestedDeliveryResult: 'working-tree',
+  };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: spec.objective, status: 'todo', sessionIds: [] },
+      {
+        id: runId, taskId: `task-${runId}`, status: 'queued', spec, submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' }, envelope: { state: 'pending' }, verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('appends activity in chronological order, scoped to one Run', () => {
+    createRun('run-1');
+    createRun('run-2');
+    store.appendRunActivity({
+      id: 'act-1', runId: 'run-1', kind: 'submitted',
+      principal: { id: 'collab-1', displayName: 'Alice' }, device: { id: 'device-1', label: 'phone' },
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    store.appendRunActivity({
+      id: 'act-2', runId: 'run-1', kind: 'approved',
+      principal: { id: 'local:admin', displayName: 'admin' },
+      at: '2026-01-01T00:01:00.000Z',
+    });
+    store.appendRunActivity({
+      id: 'act-3', runId: 'run-2', kind: 'submitted',
+      principal: { id: 'local:admin', displayName: 'admin' }, at: '2026-01-01T00:02:00.000Z',
+    });
+
+    const activity = store.listRunActivity('run-1');
+    expect(activity.map((a) => a.id)).toEqual(['act-1', 'act-2']);
+    expect(activity[0]).toEqual({
+      id: 'act-1', runId: 'run-1', kind: 'submitted',
+      principal: { id: 'collab-1', displayName: 'Alice' }, device: { id: 'device-1', label: 'phone' },
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    // No `device` key at all for the local admin's own action — omitted, not null.
+    expect(activity[1]).not.toHaveProperty('device');
+  });
+
+  it('returns an empty list for a Run with no recorded activity', () => {
+    expect(store.listRunActivity('no-such-run')).toEqual([]);
+  });
+});
+
 describe('migrations', () => {
   it('boot is idempotent: reopening the same file re-runs migrate harmlessly', () => {
     store.upsertSession(externalSession);
@@ -207,5 +617,192 @@ describe('migrations', () => {
     expect(again.listSessions()).toHaveLength(1);
     again.close();
     store = openStore(dir); // hand back to afterEach
+  });
+});
+
+describe('Run publications (ticket 13)', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: 'Publish me', status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'queued',
+        spec: {
+          objective: 'Publish me',
+          acceptanceCriteria: ['It is published'],
+          repository,
+          requestedBaseReference: 'main',
+          runtimePreference: ['codex'],
+          budget: {},
+          verificationIntent: { required: false, commands: [] },
+          requestedDeliveryResult: 'pull-request',
+        },
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  function publication(runId: string): RunPublication {
+    return {
+      id: `pub-${runId}`,
+      runId,
+      idempotencyKey: `run:${runId}:commit:abc123`,
+      target: 'draft-pull-request',
+      commit: 'abc123',
+      branch: `agentdeck/run/${runId}`,
+      state: 'authorized',
+      authorizedBy: { id: 'local:admin', displayName: 'admin' },
+      authorizedAt: '2026-09-02T00:00:00.000Z',
+      updatedAt: '2026-09-02T00:00:00.000Z',
+      executions: 0,
+    };
+  }
+
+  it('reads no publication for a Run that never had one authorized', () => {
+    createRun('run-1');
+    expect(store.getRun('run-1')?.publication).toBeUndefined();
+    expect(store.getRunPublication('run-1')).toBeUndefined();
+  });
+
+  it('round-trips an authorized intent and folds it onto the Run on every read', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    expect(store.getRunPublication('run-1')).toEqual(publication('run-1'));
+    expect(store.getRun('run-1')?.publication).toEqual(publication('run-1'));
+    expect(store.listRuns()[0]?.publication).toEqual(publication('run-1'));
+  });
+
+  it('refuses a second intent for the same Run — one stable identity per Run (AC3)', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    expect(() => store.createRunPublication({ ...publication('run-1'), id: 'pub-other' })).toThrow();
+  });
+
+  it('updates state, executions, result, and reason in place, omitting absent optionals on read', () => {
+    createRun('run-1');
+    store.createRunPublication(publication('run-1'));
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'executing', executions: 1, updatedAt: '2026-09-02T00:00:01.000Z',
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'executing', executions: 1 });
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('result');
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('reason');
+
+    const result = {
+      remote: { name: 'origin' as const, url: 'git@github.com:example/project.git' },
+      branch: 'agentdeck/run/run-1',
+      commit: 'abc123',
+      pullRequest: { number: 7, url: 'https://github.com/example/project/pull/7', title: 'Publish me', draft: true },
+    };
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'succeeded', executions: 1, updatedAt: '2026-09-02T00:00:02.000Z', result,
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'succeeded', result });
+
+    store.updateRunPublication({
+      ...publication('run-1'), state: 'ambiguous', executions: 2, updatedAt: '2026-09-02T00:00:03.000Z', reason: 'origin unreachable',
+    });
+    expect(store.getRunPublication('run-1')).toMatchObject({ state: 'ambiguous', reason: 'origin unreachable' });
+    expect(store.getRunPublication('run-1')).not.toHaveProperty('result');
+  });
+
+  it('lists only incomplete intents (authorized or executing) for restart reconciliation (AC5)', () => {
+    for (const runId of ['run-a', 'run-b', 'run-c', 'run-d', 'run-e']) createRun(runId);
+    store.createRunPublication(publication('run-a'));
+    store.createRunPublication({ ...publication('run-b'), id: 'pub-b', idempotencyKey: 'run:run-b:commit:abc', state: 'executing' });
+    store.createRunPublication({ ...publication('run-c'), id: 'pub-c', idempotencyKey: 'run:run-c:commit:abc', state: 'succeeded' });
+    store.createRunPublication({ ...publication('run-d'), id: 'pub-d', idempotencyKey: 'run:run-d:commit:abc', state: 'failed' });
+    store.createRunPublication({ ...publication('run-e'), id: 'pub-e', idempotencyKey: 'run:run-e:commit:abc', state: 'ambiguous' });
+    expect(store.listIncompleteRunPublications().map((item) => item.runId).sort()).toEqual(['run-a', 'run-b']);
+  });
+});
+
+describe('Store.deleteRun', () => {
+  const repository: RunRepository = { id: 'repo-1', name: 'example-admin', path: '/Users/dev/projects/example-admin' };
+
+  function createRun(runId: string) {
+    store.upsertRepo(repository);
+    store.createTaskAndRun(
+      { id: `task-${runId}`, title: 'Delete me', status: 'todo', sessionIds: [] },
+      {
+        id: runId,
+        taskId: `task-${runId}`,
+        status: 'completed',
+        spec: {
+          objective: 'Delete me',
+          acceptanceCriteria: ['It is deleted'],
+          repository,
+          requestedBaseReference: 'main',
+          runtimePreference: ['codex'],
+          budget: {},
+          verificationIntent: { required: false, commands: [] },
+          requestedDeliveryResult: 'working-tree',
+        },
+        submittedAt: '2026-09-01T00:00:00.000Z',
+        principal: { id: 'local:test', displayName: 'test' },
+        preparation: { state: 'pending' },
+        envelope: { state: 'pending' },
+        verificationPolicy: { state: 'pending' },
+        attempt: { state: 'idle' },
+      },
+    );
+  }
+
+  it('removes the run row and every durable record scoped to it', () => {
+    createRun('run-1');
+    store.startAttempt({ id: 'attempt-1', runId: 'run-1', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-1',
+      attemptId: 'attempt-1',
+      event: { kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Working on it.' },
+    }));
+    store.appendRunActivity({
+      id: 'activity-1', runId: 'run-1', kind: 'submitted', principal: { id: 'local:test', displayName: 'test' }, at: '2026-09-01T00:00:00.000Z',
+    });
+    store.createRunPublication({
+      id: 'pub-1', runId: 'run-1', idempotencyKey: 'run:run-1:commit:abc123', target: 'push', commit: 'abc123',
+      branch: 'agentdeck/run/run-1', state: 'authorized', authorizedBy: { id: 'local:admin', displayName: 'admin' },
+      authorizedAt: '2026-09-02T00:00:00.000Z', updatedAt: '2026-09-02T00:00:00.000Z', executions: 0,
+    });
+
+    store.deleteRun('run-1');
+
+    expect(store.getRun('run-1')).toBeUndefined();
+    expect(store.listRuns()).toEqual([]);
+    expect(store.getLatestAttemptId('run-1')).toBeUndefined();
+    expect(store.listRunActivity('run-1')).toEqual([]);
+    expect(store.getRunPublication('run-1')).toBeUndefined();
+    // The Task a Run points to is left alone — runs.task_id references
+    // tasks(id), not the other way around.
+    expect(store.getTask('task-run-1')).toBeDefined();
+  });
+
+  it('leaves an unrelated Run and its own durable records untouched', () => {
+    createRun('run-1');
+    createRun('run-2');
+    store.startAttempt({ id: 'attempt-2', runId: 'run-2', runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: 'run-2',
+      attemptId: 'attempt-2',
+      event: { kind: 'message', sequence: 0, at: '2026-09-01T00:05:01.000Z', role: 'assistant', text: 'Still here.' },
+    }));
+
+    store.deleteRun('run-1');
+
+    expect(store.getRun('run-2')).toBeDefined();
+    expect(store.getRun('run-2')?.attempt).toMatchObject({ state: 'running' });
+  });
+
+  it('is a no-op for a run id that does not exist', () => {
+    expect(() => store.deleteRun('no-such-run')).not.toThrow();
   });
 });

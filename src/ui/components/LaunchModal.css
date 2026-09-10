@@ -1,0 +1,32 @@
+.agent-options em {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font: 10px var(--font-mono);
+  font-style: normal;
+}
+
+.agent-options [data-runtime-status="managed"] em { color: var(--status-working); }
+.agent-options [data-runtime-status="compatibility-only"] em { color: var(--status-waiting); }
+.agent-options [data-runtime-status="unavailable"] em { color: var(--status-error); }
+
+.runtime-readiness-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  background: var(--surface-input);
+}
+
+.runtime-readiness-detail > strong { font-size: 12px; }
+.runtime-readiness-detail.status-managed > strong { color: var(--status-working); }
+.runtime-readiness-detail.status-compatibility-only > strong { color: var(--status-waiting); }
+.runtime-readiness-detail.status-unavailable > strong { color: var(--status-error); }
+.runtime-readiness-detail > p { margin: 4px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+
+.runtime-capabilities { display: grid; gap: 6px; margin-top: 9px; }
+.runtime-capabilities > span { display: grid; grid-template-columns: 14px minmax(0,1fr); gap: 1px 5px; color: var(--text-secondary); }
+.runtime-capabilities i { grid-row: 1 / span 2; font: 10px var(--font-mono); font-style: normal; }
+.runtime-capabilities b { font-size: 11px; font-weight: 500; }
+.runtime-capabilities small { color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.runtime-capabilities .is-supported i { color: var(--status-working); }
+.runtime-capabilities .is-missing i { color: var(--status-error); }

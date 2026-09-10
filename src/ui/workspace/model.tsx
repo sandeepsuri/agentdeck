@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react';
 import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
+export type WorkspaceView = 'overview' | 'tasks' | 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'tasks', label: 'Tasks' },
   { id: 'operations', label: 'Operations' },
-  { id: 'terminal', label: 'Terminal' },
+  { id: 'terminal', label: 'Sessions' },
   { id: 'changes', label: 'Changes' },
   { id: 'grid', label: 'Grid' },
+  { id: 'signals', label: 'Signals' },
   { id: 'history', label: 'History' },
 ];
 
@@ -20,6 +23,11 @@ export const STATUS_LABELS: Record<SessionStatus, string> = {
   exited: 'Exited',
   unknown: 'Unknown',
 };
+
+/** Every Session state, shared by admin and collaborator filters so the two projections cannot drift. */
+export const SESSION_STATUS_OPTIONS: readonly SessionStatus[] = [
+  'starting', 'working', 'waiting_input', 'idle', 'completed', 'exited', 'unknown',
+];
 
 /**
  * True for a managed session whose process has exited. It stays listed
@@ -58,6 +66,25 @@ export function relativeTime(iso: string, now = Date.now()): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * Ticket 53 (B19): a narrative step's actual event time, rendered
+ * accessibly — never fabricated. Absent or unparseable `at` (a legacy step,
+ * a step that predates this field) returns `undefined` rather than a
+ * placeholder, so the caller can simply omit the time instead of showing a
+ * misleading one. `title` carries the full date and time zone for a screen
+ * reader or hover, while `label` stays short enough to sit next to the step.
+ */
+export function narrativeStepTime(at: string | undefined): { iso: string; label: string; title: string } | undefined {
+  if (at === undefined) return undefined;
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return {
+    iso: at,
+    label: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    title: date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' }),
+  };
 }
 
 export function elapsedTime(startedAt: string, now = Date.now()): string {

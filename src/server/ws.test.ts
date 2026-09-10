@@ -1,6 +1,7 @@
 // T4 protocol tests: WS bridge + REST routes against a fake backend.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,11 @@ import type { LaunchSpec } from '../types.js';
 import type { Handle, SessionBackend } from '../sessions/backend.js';
 import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
+import { CollaboratorService } from '../collaborators/service.js';
+import { DurableWorkEngine } from '../work-engine/engine.js';
+import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
+import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
+import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
 import { defaultConfig } from '../config.js';
 import { buildApp, isAllowedOrigin, isLoopbackHostHeader } from './app.js';
 import { attachWs, closeWs, getConnectionTrust } from './ws.js';
@@ -138,6 +144,7 @@ beforeEach(async () => {
     sessions: manager.listSessions(),
     attention: [],
     agents: [],
+    runAttention: [],
   }));
   const addr = app.server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
@@ -1093,5 +1100,402 @@ describe('remote (tailnet) WebSocket access', () => {
 
       wsB.close();
     }, 10_000);
+  });
+});
+
+describe('collaborator device WebSocket access (ticket 11)', () => {
+  const REMOTE_HOST = 'phone-test-host.tailnet-1234.ts.net';
+
+  let collabStore: Store;
+  let collabManager: SessionManager;
+  let collabBackend: FakeBackend;
+  let collabSessionsDir: string;
+  let collabApp: ReturnType<typeof buildApp>;
+  let collabWss: WebSocketServer;
+  let collaborators: CollaboratorService;
+  let collabPort: number;
+
+  beforeEach(async () => {
+    collabStore = new Store(':memory:');
+    collabSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-'));
+    collabBackend = new FakeBackend();
+    collabManager = new SessionManager(collabBackend, collabStore, { sessionsDir: collabSessionsDir });
+    collaborators = new CollaboratorService(collabStore);
+    collabApp = buildApp({
+      config: { ...defaultConfig() },
+      manager: collabManager,
+      store: collabStore,
+      remoteHosts: [REMOTE_HOST],
+      collaborators,
+    });
+    await collabApp.listen({ port: 0, host: '127.0.0.1' });
+    collabWss = attachWs(
+      [collabApp.server], collabManager, '/ws', undefined, undefined,
+      { remoteHosts: [REMOTE_HOST] }, undefined, collaborators,
+    );
+    const addr = collabApp.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    collabPort = addr.port;
+  });
+
+  afterEach(async () => {
+    await closeWs(collabWss);
+    await collabApp.close();
+    await collabManager.shutdown();
+    collabStore.close();
+    fs.rmSync(collabSessionsDir, { recursive: true, force: true });
+  });
+
+  function issueDeviceToken(): string {
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    return collaborators.exchangeInvitation(code, 'phone').token;
+  }
+
+  it('accepts a tailnet-host upgrade authenticated by a collaborator device token (no shared tailscaleToken configured at all)', async () => {
+    const token = issueDeviceToken();
+    const ws = new WebSocket(
+      `ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`,
+      { headers: { host: REMOTE_HOST } },
+    );
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  it('refuses an upgrade with an unknown or already-revoked device token', async () => {
+    const ws1 = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=bogus-token`, { headers: { host: REMOTE_HOST } });
+    const rejected1 = await new Promise<boolean>((resolve) => {
+      ws1.once('error', () => resolve(true));
+      ws1.once('open', () => resolve(false));
+    });
+    ws1.terminate();
+    expect(rejected1).toBe(true);
+
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Bob' });
+    const { device, token: bobToken } = collaborators.exchangeInvitation(code, 'bob-phone');
+    collaborators.revokeDevice(device.id);
+    const ws2 = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(bobToken)}`, { headers: { host: REMOTE_HOST } });
+    const rejected2 = await new Promise<boolean>((resolve) => {
+      ws2.once('error', () => resolve(true));
+      ws2.once('open', () => resolve(false));
+    });
+    ws2.terminate();
+    expect(rejected2).toBe(true);
+  });
+
+  it('revoking a device terminates its already-open socket without disrupting another device\'s socket (AC5)', async () => {
+    const { code: codeA } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const { device: deviceA, token: tokenA } = collaborators.exchangeInvitation(codeA, 'alice-phone');
+    const { code: codeB } = collaborators.inviteCollaborator({ displayName: 'Bob' });
+    const { token: tokenB } = collaborators.exchangeInvitation(codeB, 'bob-phone');
+
+    const wsA = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(tokenA)}`, { headers: { host: REMOTE_HOST } });
+    const wsB = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(tokenB)}`, { headers: { host: REMOTE_HOST } });
+    await Promise.all([wsA, wsB].map((ws) => new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    })));
+
+    const closedA = new Promise<void>((resolve) => wsA.once('close', () => resolve()));
+    collaborators.revokeDevice(deviceA.id);
+    await closedA;
+
+    expect(wsB.readyState).toBe(WebSocket.OPEN);
+    wsB.close();
+  });
+
+  it('a collaborator device cannot attach to a session or receive its output over WS (AC4: view only, never guide)', async () => {
+    const launched = await collabApp.inject({
+      method: 'POST', url: '/api/sessions', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(SPEC),
+    });
+    const { id, pid } = launched.json() as { id: string; pid: number };
+
+    const token = issueDeviceToken();
+    const ws = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+
+    const frames: unknown[] = [];
+    ws.on('message', (raw) => frames.push(JSON.parse(String(raw))));
+    ws.send(JSON.stringify({ t: 'attach', sessionId: id }));
+    collabBackend.emitOutput(pid, 'output after a refused attach');
+    ws.send(JSON.stringify({ t: 'input', sessionId: id, data: 'echo hi\n' }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // No replay, no reflow_text — the attach never registered a viewer.
+    expect(frames.some((f) => (f as { t: string }).t === 'replay')).toBe(false);
+    expect(frames.some((f) => (f as { t: string }).t === 'reflow_text')).toBe(false);
+    // The refused attach means 'input' never found a viewing session either.
+    expect(collabBackend.written.get(String(pid))).toEqual([]);
+
+    ws.close();
+  });
+
+  // This stays true now that a collaborator device CAN read Sessions over
+  // REST: GET /api/sessions is grant-scoped and narrowed
+  // (collaborator-session-view.ts), whereas these frames carry a full
+  // publicSession for every managed Session on the machine, granted or not.
+  // The WebSocket has no per-Repository scoping of its own, so it remains the
+  // boundary 'attach' already drew rather than being widened to match REST.
+  it('a collaborator device receives no session_update or session_removed frame for a managed session (the same boundary attach draws — unlike grant-scoped REST, a broadcast carries every Session on the machine)', async () => {
+    const token = issueDeviceToken();
+    const collabWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+    const localWs = new WebSocket(`ws://127.0.0.1:${collabPort}/ws`, { headers: { host: `127.0.0.1:${collabPort}` } });
+    await Promise.all([collabWs, localWs].map((socket) => new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve());
+      socket.once('error', reject);
+    })));
+
+    const collabFrames: ServerFrame[] = [];
+    const localFrames: ServerFrame[] = [];
+    collabWs.on('message', (raw) => collabFrames.push(JSON.parse(String(raw)) as ServerFrame));
+    localWs.on('message', (raw) => localFrames.push(JSON.parse(String(raw)) as ServerFrame));
+
+    // Launching a managed session produces session_update frames, and
+    // deleting it a session_removed — the exact pair a remote socket on the
+    // legacy shared token still receives.
+    const launched = await collabApp.inject({
+      method: 'POST', url: '/api/sessions', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(SPEC),
+    });
+    const { id } = launched.json() as { id: string };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await collabApp.inject({ method: 'DELETE', url: `/api/sessions/${id}` });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The local socket proves the frames were actually broadcast at all, so
+    // an empty collaborator list means "filtered", never "nothing happened".
+    expect(localFrames.some((f) => f.t === 'session_update' && f.session.id === id)).toBe(true);
+    expect(collabFrames.some((f) => f.t === 'session_update')).toBe(false);
+    expect(collabFrames.some((f) => f.t === 'session_removed')).toBe(false);
+
+    collabWs.close();
+    localWs.close();
+  });
+});
+
+describe('ticket 07: run_attention_resolve WS authorization — the same DurableWorkEngine.resolveAttention() REST reaches', () => {
+  const REMOTE_HOST = 'attention-test-host.tailnet-1234.ts.net';
+  const TOKEN = 'a-real-remote-access-token-0123456789';
+
+  let attnStore: Store;
+  let attnManager: SessionManager;
+  let attnBackend: FakeBackend;
+  let attnSessionsDir: string;
+  let attnApp: ReturnType<typeof buildApp>;
+  let attnWss: WebSocketServer;
+  let attnPort: number;
+  let resolveAttention: ReturnType<typeof vi.fn>;
+
+  function setUp(workEngine: unknown) {
+    attnStore = new Store(':memory:');
+    attnSessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-attention-'));
+    attnBackend = new FakeBackend();
+    attnManager = new SessionManager(attnBackend, attnStore, { sessionsDir: attnSessionsDir });
+    attnApp = buildApp({
+      config: { ...defaultConfig(), tailscaleToken: TOKEN }, manager: attnManager, store: attnStore, remoteHosts: [REMOTE_HOST],
+    });
+    return attnApp.listen({ port: 0, host: '127.0.0.1' }).then(() => {
+      attnWss = attachWs(
+        [attnApp.server], attnManager, '/ws', undefined, undefined,
+        { remoteHosts: [REMOTE_HOST], token: TOKEN },
+        workEngine as Parameters<typeof attachWs>[6],
+      );
+      const addr = attnApp.server.address();
+      if (addr === null || typeof addr === 'string') throw new Error('no port');
+      attnPort = addr.port;
+    });
+  }
+
+  beforeEach(() => {
+    resolveAttention = vi.fn(async () => ({}));
+  });
+
+  afterEach(async () => {
+    await closeWs(attnWss);
+    await attnApp.close();
+    await attnManager.shutdown();
+    attnStore.close();
+    fs.rmSync(attnSessionsDir, { recursive: true, force: true });
+  });
+
+  async function openWs(headers?: Record<string, string>): Promise<WebSocket> {
+    const ws = headers
+      ? new WebSocket(`ws://127.0.0.1:${attnPort}/ws?token=${encodeURIComponent(TOKEN)}`, { headers })
+      : new WebSocket(`ws://127.0.0.1:${attnPort}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', () => resolve());
+      ws.once('error', reject);
+    });
+    return ws;
+  }
+
+  it('a local connection resolving an approval reaches WorkEngine.resolveAttention with the exact decision', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'approve' });
+    ws.close();
+  });
+
+  it('an authenticated remote connection can also resolve attention — compose is granted to every authenticated remote socket', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs({ host: REMOTE_HOST });
+
+    ws.send(JSON.stringify({
+      t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'input', value: 'Use TypeScript',
+    }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'input', value: 'Use TypeScript' });
+    ws.close();
+  });
+
+  it('relays deny with no stray value field', async () => {
+    await setUp({ resolveAttention });
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'deny' }));
+    await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+    expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'deny' });
+    ws.close();
+  });
+
+  it('is a silent no-op (never throws or crashes the connection) when no WorkEngine is wired to attachWs', async () => {
+    await setUp(undefined);
+    const ws = await openWs();
+
+    ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
+  });
+
+  it('ticket 12 AC1/AC7: a collaborator device\'s run_attention_resolve forwards its RunActor (Principal, device, grants) — the exact same policy path REST reaches, this socket never deciding allow/deny itself', async () => {
+    // Deliberately not using this describe block's shared setUp()/attnWss —
+    // attachWs registers its own 'upgrade' listener on the http.Server, so
+    // a second attachWs call on the same server (to add a collaborators
+    // service) would leave both listeners active and racing. A fully
+    // separate app/server/wss, same shape as the "collaborator device
+    // WebSocket access" describe block above, avoids that entirely.
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-attention-'));
+    const manager = new SessionManager(new FakeBackend(), store, { sessionsDir });
+    const collaborators = new CollaboratorService(store);
+    const app = buildApp({ config: defaultConfig(), manager, store, remoteHosts: [REMOTE_HOST], collaborators });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const wss = attachWs(
+      [app.server], manager, '/ws', undefined, undefined,
+      { remoteHosts: [REMOTE_HOST] }, { resolveAttention } as unknown as Parameters<typeof attachWs>[6], collaborators,
+    );
+    const addr = app.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+
+    try {
+      const { code, collaborator } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['repo-1'] });
+      const { token, device } = collaborators.exchangeInvitation(code, 'phone');
+
+      const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+
+      ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: 'run-1', attentionId: 'attention-1', decision: 'approve' }));
+      await vi.waitUntil(() => resolveAttention.mock.calls.length > 0);
+
+      expect(resolveAttention).toHaveBeenCalledWith('run-1', 'attention-1', { kind: 'approve' }, {
+        principal: { id: collaborator.id, displayName: 'Alice' },
+        device: { id: device.id, label: 'phone' },
+        grants: { repositoryIds: ['repo-1'], profileIds: [] },
+      });
+      ws.close();
+    } finally {
+      await closeWs(wss);
+      await app.close();
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ticket 12 AC1/AC8: an ungranted collaborator device cannot bypass policy over WebSocket', () => {
+  const REMOTE_HOST = 'collab-attention-policy-host.tailnet-1234.ts.net';
+
+  it('run_attention_resolve for a Repository this collaborator was never granted never actually resolves the Run\'s pending attention', async () => {
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-policy-'));
+    const manager = new SessionManager(new FakeBackend(), store, { sessionsDir });
+    const collaborators = new CollaboratorService(store);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-ws-collab-policy-engine-'));
+    const repoPath = path.join(root, 'repo');
+    execFileSync('git', ['init'], { cwd: (() => { fs.mkdirSync(repoPath, { recursive: true }); return repoPath; })() });
+    execFileSync('git', ['config', 'user.email', 'agentdeck@example.test'], { cwd: repoPath });
+    execFileSync('git', ['config', 'user.name', 'AgentDeck Test'], { cwd: repoPath });
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'fixture\n');
+    execFileSync('git', ['add', 'README.md'], { cwd: repoPath });
+    execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoPath });
+    execFileSync('git', ['branch', '-M', 'main'], { cwd: repoPath });
+    store.upsertRepo({ id: repoPath, name: 'repo', path: repoPath });
+    store.setRepositoryVerificationPolicy(repoPath, { kind: 'no-verification' });
+    const fakeCodex = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const workEngine = new DurableWorkEngine(store, path.join(root, 'runs'), stubRuntimeReadinessSource(), {
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fakeCodex.spawn }),
+    });
+
+    const app = buildApp({ config: defaultConfig(), manager, store, remoteHosts: [REMOTE_HOST], collaborators, workEngine });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const wss = attachWs([app.server], manager, '/ws', undefined, undefined, { remoteHosts: [REMOTE_HOST] }, workEngine, collaborators);
+    const addr = app.server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+
+    try {
+      // Granted a DIFFERENT repository — never this one.
+      const { code } = collaborators.inviteCollaborator({ displayName: 'Alice', grantedRepositoryIds: ['some-other-repo'] });
+      const { token } = collaborators.exchangeInvitation(code, 'phone');
+
+      const submitted = await workEngine.submit({
+        objective: 'Fix the flaky login test', acceptanceCriteria: ['The test passes reliably'],
+        repository: { id: repoPath, name: 'repo', path: repoPath }, requestedBaseReference: 'main',
+        runtimePreference: ['codex'], budget: { maxWallClockMs: 900_000 },
+        verificationIntent: { required: false, commands: [] }, requestedDeliveryResult: 'working-tree',
+      });
+      await workEngine.prepare(submitted.id);
+      await workEngine.start(submitted.id);
+      await vi.waitUntil(() => workEngine.get(submitted.id)?.pendingAttention !== undefined);
+      const pending = workEngine.get(submitted.id)!.pendingAttention!;
+
+      const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws?token=${encodeURIComponent(token)}`, { headers: { host: REMOTE_HOST } });
+      await new Promise<void>((resolve, reject) => {
+        ws.once('open', () => resolve());
+        ws.once('error', reject);
+      });
+      ws.send(JSON.stringify({ t: 'run_attention_resolve', runId: submitted.id, attentionId: pending.id, decision: 'approve' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Still pending — the policy-denied resolveAttention() rejection was
+      // swallowed (fire-and-forget, same as any other resolveAttention
+      // failure — see the case's own comment), but the Run itself was
+      // never touched.
+      expect(workEngine.get(submitted.id)?.pendingAttention?.id).toBe(pending.id);
+      ws.close();
+    } finally {
+      await closeWs(wss);
+      await app.close();
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

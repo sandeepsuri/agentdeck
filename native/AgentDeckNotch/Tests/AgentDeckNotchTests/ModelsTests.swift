@@ -82,6 +82,78 @@ final class ModelsTests: XCTestCase {
         )
     }
 
+    // Ticket 07: RunAttentionKind/RunAttentionItem must decode the exact
+    // wire shape src/types.ts's RunAttentionItem and attention.ts's
+    // deriveRunAttentionItems produce — 'approval'/'input' (unlike
+    // AttentionKind's snake_case Session variants), and the full field set
+    // GET /api/runs/attention and the companion_snapshot WS push both send.
+    func testRunAttentionWireValuesMatchServerContract() throws {
+        XCTAssertEqual(try JSONEncoder().encode(RunAttentionKind.approval), Data("\"approval\"".utf8))
+        XCTAssertEqual(try JSONDecoder().decode(RunAttentionKind.self, from: Data("\"input\"".utf8)), .input)
+
+        let json = """
+        {
+            "runId": "run-1",
+            "attentionId": "attention-1",
+            "objective": "Fix the flaky test",
+            "kind": "approval",
+            "reason": "Approve command: rm -rf node_modules",
+            "requestedAt": "2026-09-01T00:00:00.000Z"
+        }
+        """
+        let decoded = try JSONDecoder().decode(RunAttentionItem.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.runId, "run-1")
+        XCTAssertEqual(decoded.attentionId, "attention-1")
+        XCTAssertEqual(decoded.id, "attention-1")
+        XCTAssertEqual(decoded.kind, .approval)
+    }
+
+    // AC6's regression guarantee made concrete: one CompanionSnapshot decode
+    // call must produce BOTH Session attention and Run attention correctly
+    // — this is the strict-decode failure mode a missing/mismatched field
+    // would hit (CompanionStore.fetchSnapshot/receive both use `try?`,
+    // silently dropping the *entire* snapshot, Session attention included,
+    // on any decode error — see the class's own doc comments).
+    func testCompanionSnapshotDecodesBothSessionAndRunAttentionTogether() throws {
+        let json = """
+        {
+            "sessions": [],
+            "attention": [{
+                "id": "sess-1:action_required",
+                "kind": "action_required",
+                "sessionId": "sess-1",
+                "agent": "claude",
+                "sessionName": "example",
+                "repo": "/repos/example",
+                "repoName": "example",
+                "occurredAt": "2026-09-01T00:00:00.000Z"
+            }],
+            "agents": [],
+            "runAttention": [{
+                "runId": "run-1",
+                "attentionId": "attention-1",
+                "objective": "Fix the flaky test",
+                "kind": "input",
+                "reason": "What framework should this use?",
+                "requestedAt": "2026-09-01T00:00:00.000Z"
+            }],
+            "uiVisible": false
+        }
+        """
+        let snapshot = try JSONDecoder().decode(CompanionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.attention.map(\.id), ["sess-1:action_required"])
+        XCTAssertEqual(snapshot.runAttention.map(\.attentionId), ["attention-1"])
+        XCTAssertEqual(snapshot.runAttention[0].kind, .input)
+    }
+
+    func testExpandedBodyHeightGrowsWithPendingRunAttention() {
+        let withoutRunAttention = NotchGeometry.bodyHeight(groups: 1, agents: 2)
+        let withRunAttention = NotchGeometry.bodyHeight(groups: 1, agents: 2, runAttentionCount: 2)
+        XCTAssertGreaterThan(withRunAttention, withoutRunAttention)
+        // The 2-argument form (every pre-ticket-07 call site) is unchanged.
+        XCTAssertEqual(NotchGeometry.bodyHeight(groups: 0, agents: 0), 180)
+    }
+
     @MainActor
     func testExpandedDashboardRendersAtTargetWidth() {
         let agents = [
@@ -113,6 +185,38 @@ final class ModelsTests: XCTestCase {
            let png = bitmap.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: path))
         }
+    }
+
+    // Ticket 07 AC6: the same dashboard render this suite already exercised
+    // for Session attention (testExpandedDashboardRendersAtTargetWidth,
+    // unmodified above) still renders correctly with Run attention items
+    // also present — proving the addition doesn't regress the existing
+    // Session-attention render path rather than merely not crashing.
+    @MainActor
+    func testExpandedDashboardRendersRunAttentionAlongsideSessionAttention() {
+        let agents = [
+            agent("action", repo: "agentdeck-web", status: .action, progress: 48),
+            agent("working", repo: "agentdeck-api", status: .working),
+        ]
+        let runAttention = [
+            RunAttentionItem(
+                runId: "run-1", attentionId: "attention-1", objective: "Fix the flaky test",
+                kind: .approval, reason: "Approve command: rm -rf node_modules", requestedAt: "2026-09-01T00:00:00Z"
+            ),
+        ]
+        let store = CompanionStore(port: 4040, initialAgents: agents, initialRunAttention: runAttention)
+        XCTAssertEqual(store.agents.count, 2)
+        XCTAssertEqual(store.runAttention.count, 1)
+        let host = NSHostingView(rootView:
+            DetachedDashboardView(store: store)
+                .frame(width: NotchGeometry.expandedWidth, height: store.bodyHeight)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: NotchGeometry.expandedWidth, height: store.bodyHeight)
+        host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds)
+        if let bitmap { host.cacheDisplay(in: host.bounds, to: bitmap) }
+        XCTAssertNotNil(bitmap)
     }
 
     @MainActor

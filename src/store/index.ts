@@ -4,8 +4,21 @@
 import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentMessage, Repo, Session, Task } from '../types.js';
+import type {
+  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, ReviewDecision, Session,
+  SessionInteractionChoice, SessionInteractionResponse, Task,
+} from '../types.js';
+import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
+import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
+import type {
+  AttemptEvent, Profile, RepositoryVerificationPolicy, RunActivity, RunActivityKind, RunActorDevice, RunAttemptRecord,
+  RunEnvelopeState, RunPreparation, RunPrincipal, RunPublication, RunPublicationResult, RunVerificationPolicyState,
+  WorkRun, WorkSpec,
+} from '../work-engine/types.js';
 import { migrate } from './migrate.js';
+import type {
+  CollaboratorRow, CollaboratorStore, DeviceRow, InvitationRow,
+} from '../collaborators/service.js';
 
 const MIGRATIONS_DIR = path.resolve(import.meta.dirname, '../../migrations');
 
@@ -60,7 +73,8 @@ function rowToSession(r: SessionRow): Session {
 
 interface TaskRow {
   id: string; title: string; repo_id: string | null; status: string;
-  depends_on: string | null; session_ids: string;
+  depends_on: string | null; session_ids: string; objective: string | null;
+  acceptance_criteria: string | null;
 }
 
 function rowToTask(r: TaskRow): Task {
@@ -70,10 +84,45 @@ function rowToTask(r: TaskRow): Task {
     status: r.status as Task['status'],
     sessionIds: fromJson<string[]>(r.session_ids) ?? [],
   };
+  if (r.objective !== null) t.objective = r.objective;
+  const acceptanceCriteria = fromJson<string[]>(r.acceptance_criteria);
+  if (acceptanceCriteria !== undefined) t.acceptanceCriteria = acceptanceCriteria;
   if (r.repo_id !== null) t.repoId = r.repo_id;
   const dependsOn = fromJson<string[]>(r.depends_on);
   if (dependsOn !== undefined) t.dependsOn = dependsOn;
   return t;
+}
+
+interface RunRow {
+  id: string; task_id: string; status: string; work_spec: string; submitted_at: string;
+  preparation: string; envelope: string; verification_policy: string; principal: string;
+}
+
+interface AttemptRow {
+  id: string; runtime: string; started_at: string;
+}
+
+/**
+ * A Run before its Attempt is folded in. `status` here is raw — see
+ * Store.attachAttempt/deriveRunStatus: the 'running'/'completed'/'failed'
+ * half of RunStatus is never trusted from this row alone, so a crash
+ * between an Attempt's terminal event persisting and any status write can
+ * never leave the two disagreeing.
+ */
+type RawRun = Omit<WorkRun, 'status' | 'attempt'> & { status: string };
+
+function rowToRun(r: RunRow): RawRun {
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    status: r.status,
+    spec: JSON.parse(r.work_spec) as WorkSpec,
+    submittedAt: r.submitted_at,
+    preparation: JSON.parse(r.preparation) as RunPreparation,
+    envelope: JSON.parse(r.envelope) as RunEnvelopeState,
+    verificationPolicy: JSON.parse(r.verification_policy) as RunVerificationPolicyState,
+    principal: JSON.parse(r.principal) as RunPrincipal,
+  };
 }
 
 interface RepoRow {
@@ -92,6 +141,218 @@ function rowToRepo(r: RepoRow): Repo {
   return repo;
 }
 
+interface CollaboratorTableRow {
+  id: string; display_name: string; created_at: string; granted_repository_ids: string; granted_profile_ids: string;
+}
+
+function rowToCollaborator(r: CollaboratorTableRow): CollaboratorRow {
+  return {
+    id: r.id, displayName: r.display_name, createdAt: r.created_at,
+    grantedRepositoryIds: fromJson<string[]>(r.granted_repository_ids) ?? [],
+    grantedProfileIds: fromJson<string[]>(r.granted_profile_ids) ?? [],
+  };
+}
+
+interface InvitationTableRow {
+  id: string; collaborator_id: string; created_at: string; expires_at: string; consumed_at: string | null;
+}
+
+function rowToInvitation(r: InvitationTableRow): InvitationRow {
+  const invitation: InvitationRow = {
+    id: r.id, collaboratorId: r.collaborator_id, createdAt: r.created_at, expiresAt: r.expires_at,
+  };
+  if (r.consumed_at !== null) invitation.consumedAt = r.consumed_at;
+  return invitation;
+}
+
+interface DeviceTableRow {
+  id: string; collaborator_id: string; device_label: string; created_at: string; revoked_at: string | null;
+}
+
+function rowToDevice(r: DeviceTableRow): DeviceRow {
+  const device: DeviceRow = {
+    id: r.id, collaboratorId: r.collaborator_id, deviceLabel: r.device_label, createdAt: r.created_at,
+  };
+  if (r.revoked_at !== null) device.revokedAt = r.revoked_at;
+  return device;
+}
+
+interface ProfileTableRow {
+  id: string; name: string; runtime_preference: string; budget: string; verification_intent: string;
+  requested_delivery_result: string; created_at: string;
+}
+
+function rowToProfile(r: ProfileTableRow): Profile {
+  return {
+    id: r.id,
+    name: r.name,
+    runtimePreference: JSON.parse(r.runtime_preference) as Profile['runtimePreference'],
+    budget: JSON.parse(r.budget) as Profile['budget'],
+    verificationIntent: JSON.parse(r.verification_intent) as Profile['verificationIntent'],
+    requestedDeliveryResult: r.requested_delivery_result as Profile['requestedDeliveryResult'],
+    createdAt: r.created_at,
+  };
+}
+
+interface RunActivityTableRow {
+  id: string; run_id: string; kind: string; principal: string; device: string | null; at: string;
+}
+
+function rowToRunActivity(r: RunActivityTableRow): RunActivity {
+  const activity: RunActivity = {
+    id: r.id,
+    runId: r.run_id,
+    kind: r.kind as RunActivityKind,
+    principal: JSON.parse(r.principal) as RunPrincipal,
+    at: r.at,
+  };
+  const device = fromJson<RunActorDevice>(r.device);
+  return device !== undefined ? { ...activity, device } : activity;
+}
+
+interface RunPublicationTableRow {
+  id: string; run_id: string; idempotency_key: string; target: string; commit_sha: string; branch: string;
+  state: string; authorized_by: string; authorized_at: string; updated_at: string; executions: number;
+  result: string | null; reason: string | null;
+}
+
+function rowToRunPublication(r: RunPublicationTableRow): RunPublication {
+  const publication: RunPublication = {
+    id: r.id,
+    runId: r.run_id,
+    idempotencyKey: r.idempotency_key,
+    target: r.target as RunPublication['target'],
+    commit: r.commit_sha,
+    branch: r.branch,
+    state: r.state as RunPublication['state'],
+    authorizedBy: JSON.parse(r.authorized_by) as RunPrincipal,
+    authorizedAt: r.authorized_at,
+    updatedAt: r.updated_at,
+    executions: r.executions,
+  };
+  const result = fromJson<RunPublicationResult>(r.result);
+  return {
+    ...publication,
+    ...(result !== undefined ? { result } : {}),
+    ...(r.reason !== null ? { reason: r.reason } : {}),
+  };
+}
+
+interface SessionChatMessageRow {
+  id: string; session_id: string; sequence: number; ts: string; author_kind: string;
+  principal_id: string | null; display_name: string; text: string; audience: string;
+  delivery: string | null; delivery_reason: string | null;
+}
+
+/** A durably stored human chat post (docs/specs/shared-session-chat.md) — the agent's own turns are never stored here, see server/session-conversation.ts. */
+export interface StoredSessionChatMessage {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  ts: string;
+  authorKind: 'human';
+  principalId?: string;
+  displayName: string;
+  text: string;
+  audience: ChatAudience;
+  delivery?: ChatDeliveryState;
+  deliveryReason?: string;
+}
+
+function rowToSessionChatMessage(r: SessionChatMessageRow): StoredSessionChatMessage {
+  const message: StoredSessionChatMessage = {
+    id: r.id,
+    sessionId: r.session_id,
+    sequence: r.sequence,
+    ts: r.ts,
+    authorKind: 'human',
+    displayName: r.display_name,
+    text: r.text,
+    audience: r.audience as ChatAudience,
+  };
+  if (r.principal_id !== null) message.principalId = r.principal_id;
+  if (r.delivery !== null) message.delivery = r.delivery as ChatDeliveryState;
+  if (r.delivery_reason !== null) message.deliveryReason = r.delivery_reason;
+  return message;
+}
+
+interface SessionInteractionRow {
+  id: string; session_id: string; provider: string; provider_session_id: string; provider_request_id: string;
+  kind: string; question: string; choices: string; context: string | null; allows_free_text: number;
+  requested_at: string; status: string; response: string | null; response_delivered_at: string | null; responder_principal_id: string | null;
+  responder_display_name: string | null; resolved_at: string | null;
+}
+
+export interface StoredSessionInteraction {
+  id: string;
+  sessionId: string;
+  provider: 'claude' | 'codex';
+  providerSessionId: string;
+  providerRequestId: string;
+  kind: 'question' | 'approval';
+  question: string;
+  choices: SessionInteractionChoice[];
+  context?: string;
+  allowsFreeText: boolean;
+  requestedAt: string;
+  status: 'pending' | 'resolved' | 'expired';
+  response?: SessionInteractionResponse;
+  responseDeliveredAt?: string;
+  responderPrincipalId?: string;
+  responderDisplayName?: string;
+  resolvedAt?: string;
+}
+
+function rowToSessionInteraction(row: SessionInteractionRow): StoredSessionInteraction {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    provider: row.provider as StoredSessionInteraction['provider'],
+    providerSessionId: row.provider_session_id,
+    providerRequestId: row.provider_request_id,
+    kind: row.kind as StoredSessionInteraction['kind'],
+    question: row.question,
+    choices: JSON.parse(row.choices) as SessionInteractionChoice[],
+    ...(row.context !== null ? { context: row.context } : {}),
+    allowsFreeText: row.allows_free_text === 1,
+    requestedAt: row.requested_at,
+    status: row.status as StoredSessionInteraction['status'],
+    ...(row.response !== null ? { response: JSON.parse(row.response) as SessionInteractionResponse } : {}),
+    ...(row.response_delivered_at !== null ? { responseDeliveredAt: row.response_delivered_at } : {}),
+    ...(row.responder_principal_id !== null ? { responderPrincipalId: row.responder_principal_id } : {}),
+    ...(row.responder_display_name !== null ? { responderDisplayName: row.responder_display_name } : {}),
+    ...(row.resolved_at !== null ? { resolvedAt: row.resolved_at } : {}),
+  };
+}
+
+interface RunFeedbackRow {
+  id: string; task_id: string; run_id: string; sequence: number; posted_at: string;
+  principal_id: string | null; display_name: string; text: string; review_decision: string | null;
+}
+
+/** One durably stored, plain-commentary Task/Run post (docs/specs/run-feedback-review.md, B07) — independent of StoredSessionChatMessage above; never routed to a runtime. Ticket 71 (B09): `reviewDecision`, when present, is the exact same row — never a second table. */
+export interface StoredRunFeedback {
+  id: string;
+  taskId: string;
+  runId: string;
+  sequence: number;
+  postedAt: string;
+  principalId?: string;
+  displayName: string;
+  text: string;
+  reviewDecision?: ReviewDecision;
+}
+
+function rowToRunFeedback(r: RunFeedbackRow): StoredRunFeedback {
+  const entry: StoredRunFeedback = {
+    id: r.id, taskId: r.task_id, runId: r.run_id, sequence: r.sequence, postedAt: r.posted_at,
+    displayName: r.display_name, text: r.text,
+  };
+  if (r.principal_id !== null) entry.principalId = r.principal_id;
+  if (r.review_decision === 'changes_requested' || r.review_decision === 'reviewed') entry.reviewDecision = r.review_decision;
+  return entry;
+}
+
 // --- store -------------------------------------------------------------------
 
 export interface StoredEvent extends AgentMessage {
@@ -99,7 +360,7 @@ export interface StoredEvent extends AgentMessage {
   eventId: number;
 }
 
-export class Store {
+export class Store implements CollaboratorStore {
   private db: Database;
 
   /** @param dbPath file path, or ':memory:' (tests) */
@@ -194,7 +455,11 @@ export class Store {
   }
 
   deleteSession(id: string): void {
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM session_interactions WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM session_chat_messages WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    })();
   }
 
   // -- tasks --
@@ -202,15 +467,19 @@ export class Store {
   saveTask(t: Task): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, title, repo_id, status, depends_on, session_ids)
-         VALUES (@id, @title, @repoId, @status, @dependsOn, @sessionIds)
+        `INSERT INTO tasks (id, title, objective, acceptance_criteria, repo_id, status, depends_on, session_ids)
+         VALUES (@id, @title, @objective, @acceptanceCriteria, @repoId, @status, @dependsOn, @sessionIds)
          ON CONFLICT(id) DO UPDATE SET
-           title=excluded.title, repo_id=excluded.repo_id, status=excluded.status,
+           title=excluded.title, objective=excluded.objective,
+           acceptance_criteria=excluded.acceptance_criteria,
+           repo_id=excluded.repo_id, status=excluded.status,
            depends_on=excluded.depends_on, session_ids=excluded.session_ids`,
       )
       .run({
         id: t.id,
         title: t.title,
+        objective: t.objective ?? null,
+        acceptanceCriteria: toJson(t.acceptanceCriteria),
         repoId: t.repoId ?? null,
         status: t.status,
         dependsOn: toJson(t.dependsOn),
@@ -225,6 +494,209 @@ export class Store {
 
   listTasks(): Task[] {
     return (this.db.prepare('SELECT * FROM tasks').all() as TaskRow[]).map(rowToTask);
+  }
+
+  // -- durable work runs --
+
+  createTaskAndRun(task: Task, run: WorkRun): void {
+    this.db.transaction(() => {
+      this.saveTask(task);
+      this.db.prepare(
+        `INSERT INTO runs (id, task_id, status, work_spec, submitted_at, preparation, envelope, verification_policy, principal)
+         VALUES (@id, @taskId, @status, @workSpec, @submittedAt, @preparation, @envelope, @verificationPolicy, @principal)`,
+      ).run({
+        id: run.id,
+        taskId: run.taskId,
+        status: run.status,
+        workSpec: JSON.stringify(run.spec),
+        submittedAt: run.submittedAt,
+        preparation: JSON.stringify(run.preparation),
+        envelope: JSON.stringify(run.envelope),
+        verificationPolicy: JSON.stringify(run.verificationPolicy),
+        principal: JSON.stringify(run.principal),
+      });
+    })();
+  }
+
+  getRun(id: string): WorkRun | undefined {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as RunRow | undefined;
+    return row ? this.attachAttempt(rowToRun(row)) : undefined;
+  }
+
+  listRuns(): WorkRun[] {
+    return (this.db.prepare('SELECT * FROM runs ORDER BY submitted_at DESC').all() as RunRow[])
+      .map((row) => this.attachAttempt(rowToRun(row)));
+  }
+
+  /**
+   * Permanently removes a Run and every durable record scoped to it —
+   * its Attempt event log, activity trail, and publication intent. All
+   * FK-referencing tables (`foreign_keys = ON`, see the constructor) are
+   * deleted first, in one transaction, so a crash mid-delete never leaves
+   * an orphaned child row behind. The Task a Run points to is left alone —
+   * runs.task_id references tasks(id), not the other way around, so
+   * nothing else depends on this Run existing.
+   */
+  deleteRun(id: string): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM attempt_events WHERE attempt_id IN (SELECT id FROM attempts WHERE run_id = ?)').run(id);
+      this.db.prepare('DELETE FROM attempts WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM run_activity WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM run_publications WHERE run_id = ?').run(id);
+      this.db.prepare('DELETE FROM runs WHERE id = ?').run(id);
+    })();
+  }
+
+  /** Updates a Run's status, preparation, envelope, and verification policy. The frozen spec never changes; Attempt state is durable elsewhere (see appendAttemptEvent). */
+  updateRun(run: Pick<WorkRun, 'id' | 'status' | 'preparation' | 'envelope' | 'verificationPolicy'>): void {
+    this.db.prepare(
+      `UPDATE runs SET status = @status, preparation = @preparation, envelope = @envelope,
+         verification_policy = @verificationPolicy WHERE id = @id`,
+    ).run({
+      id: run.id,
+      status: run.status,
+      preparation: JSON.stringify(run.preparation),
+      envelope: JSON.stringify(run.envelope),
+      verificationPolicy: JSON.stringify(run.verificationPolicy),
+    });
+  }
+
+  // -- durable Attempt event log (ticket 06) --
+
+  /** Records the one piece of Attempt metadata that isn't itself an event: which runtime, started when. Call once, before the first event. */
+  startAttempt(record: { id: string; runId: string; runtime: AgentType; startedAt: string }): void {
+    this.db.prepare(
+      'INSERT INTO attempts (id, run_id, runtime, started_at) VALUES (@id, @runId, @runtime, @startedAt)',
+    ).run(record);
+  }
+
+  /** Idempotent: an envelope whose dedupeKey already exists for this Attempt is silently dropped — a redelivered provider event never duplicates durable history. */
+  appendAttemptEvent(envelope: AttemptEventEnvelope): void {
+    this.db.prepare(
+      `INSERT OR IGNORE INTO attempt_events
+         (attempt_id, sequence, correlation_id, dedupe_key, schema_version, durability, at, payload)
+       VALUES (@attemptId, @sequence, @correlationId, @dedupeKey, @schemaVersion, @durability, @at, @payload)`,
+    ).run({
+      attemptId: envelope.attemptId,
+      sequence: envelope.sequence,
+      correlationId: envelope.correlationId,
+      dedupeKey: envelope.dedupeKey,
+      schemaVersion: envelope.schemaVersion,
+      durability: envelope.durability,
+      at: envelope.at,
+      payload: JSON.stringify(envelope.event),
+    });
+  }
+
+  /**
+   * The attemptId for a Run's most recent Attempt, or undefined if none has
+   * started — recovery's, reverify's, and apply's only use of Attempt
+   * identity outside the projected AttemptState. Only the latest attempt
+   * can ever be 'running' or need a settled-event append (ticket 68 (B12)):
+   * retryAttempt() only ever starts a new one once the previous is
+   * terminal, so "latest" and "current" are always the same attempt.
+   */
+  getLatestAttemptId(runId: string): string | undefined {
+    const row = this.db.prepare('SELECT id FROM attempts WHERE run_id = ? ORDER BY started_at DESC LIMIT 1')
+      .get(runId) as { id: string } | undefined;
+    return row?.id;
+  }
+
+  private loadAttemptEvents(attemptId: string): AttemptEvent[] {
+    return (
+      this.db.prepare('SELECT payload FROM attempt_events WHERE attempt_id = ? ORDER BY sequence ASC')
+        .all(attemptId) as { payload: string }[]
+    ).map((r) => JSON.parse(r.payload) as AttemptEvent);
+  }
+
+  /** Every Attempt row for a Run, oldest first (ticket 68 (B12)) — a Run with no Attempt yet returns []. */
+  private loadAttempts(runId: string): AttemptRow[] {
+    return this.db.prepare('SELECT id, runtime, started_at FROM attempts WHERE run_id = ? ORDER BY started_at ASC')
+      .all(runId) as AttemptRow[];
+  }
+
+  /** Folds every durable Attempt event log into an ordered attempts list and derives `status` from the current (last) one (ticket 06 AC4, extended by ticket 68 (B12) to more than one attempt) — see attempt-projection.ts for both reducers. Ticket 13: the Run's publication intent, if any, rides along the same way. */
+  private attachAttempt(run: RawRun): WorkRun {
+    const attempts: RunAttemptRecord[] = this.loadAttempts(run.id).map((record, index) => ({
+      attemptId: record.id,
+      ordinal: index + 1,
+      state: projectAttemptState(
+        { runtime: record.runtime as AgentType, startedAt: record.started_at },
+        this.loadAttemptEvents(record.id),
+      ),
+    }));
+    const attempt = attempts.at(-1)?.state ?? { state: 'idle' as const };
+    const pendingAttention = deriveOpenAttentionRequest(attempt);
+    const status = deriveRunStatus(run.status as WorkRun['status'], attempt, pendingAttention);
+    const publication = this.getRunPublication(run.id);
+    return {
+      ...run, status, attempt, attempts, pendingAttention, ...(publication ? { publication } : {}),
+    };
+  }
+
+  // -- Run publications (ticket 13) --
+  //
+  // One durable intent per Run (run_id UNIQUE), written BEFORE any push or
+  // pull-request command runs (AC3) and updated in place as execution
+  // progresses — the only Run-scoped record that is ever updated rather
+  // than appended, because its whole point is to be the single, current
+  // answer to "did this external effect happen?".
+
+  createRunPublication(publication: RunPublication): void {
+    this.db.prepare(
+      `INSERT INTO run_publications
+         (id, run_id, idempotency_key, target, commit_sha, branch, state, authorized_by, authorized_at, updated_at,
+          executions, result, reason)
+       VALUES (@id, @runId, @idempotencyKey, @target, @commit, @branch, @state, @authorizedBy, @authorizedAt, @updatedAt,
+          @executions, @result, @reason)`,
+    ).run(this.publicationParams(publication));
+  }
+
+  /**
+   * Ticket 13: updates every mutable field of an existing intent — not
+   * only state/executions/result/reason. A retarget (DurableWorkEngine.
+   * publish() re-authorizing a different target for the same Run) changes
+   * `target`, `authorizedBy`, and `authorizedAt` too; leaving those columns
+   * unwritten would silently keep reporting the original target forever
+   * even though the in-memory object (and the actual push/pull-request it
+   * drove) used the new one. `id`, `runId`, and `idempotencyKey` are the
+   * one row's permanent identity and are never part of an update.
+   */
+  updateRunPublication(publication: RunPublication): void {
+    this.db.prepare(
+      `UPDATE run_publications SET target = @target, commit_sha = @commit, branch = @branch, state = @state,
+         authorized_by = @authorizedBy, authorized_at = @authorizedAt, updated_at = @updatedAt,
+         executions = @executions, result = @result, reason = @reason WHERE id = @id`,
+    ).run(this.publicationParams(publication));
+  }
+
+  private publicationParams(publication: RunPublication): Record<string, unknown> {
+    return {
+      id: publication.id,
+      runId: publication.runId,
+      idempotencyKey: publication.idempotencyKey,
+      target: publication.target,
+      commit: publication.commit,
+      branch: publication.branch,
+      state: publication.state,
+      authorizedBy: JSON.stringify(publication.authorizedBy),
+      authorizedAt: publication.authorizedAt,
+      updatedAt: publication.updatedAt,
+      executions: publication.executions,
+      result: toJson(publication.result),
+      reason: publication.reason ?? null,
+    };
+  }
+
+  getRunPublication(runId: string): RunPublication | undefined {
+    const row = this.db.prepare('SELECT * FROM run_publications WHERE run_id = ?').get(runId) as RunPublicationTableRow | undefined;
+    return row ? rowToRunPublication(row) : undefined;
+  }
+
+  /** Every intent a restart must reconcile before anything else can touch it (AC5): authorized but never executed, or executing when the previous process stopped. */
+  listIncompleteRunPublications(): RunPublication[] {
+    return (this.db.prepare("SELECT * FROM run_publications WHERE state IN ('authorized', 'executing') ORDER BY authorized_at")
+      .all() as RunPublicationTableRow[]).map(rowToRunPublication);
   }
 
   // -- repos --
@@ -254,6 +726,28 @@ export class Store {
     return (this.db.prepare('SELECT * FROM repos ORDER BY name').all() as RepoRow[]).map(rowToRepo);
   }
 
+  // -- repository verification policy (ticket 08) --
+  //
+  // Deliberately its own table, not a column on `repos`: that table is
+  // rewritten wholesale by periodic filesystem discovery (git/scan.ts),
+  // which knows nothing about verification and would otherwise silently
+  // drop an admin's approved policy on the next scan.
+
+  /** Sets (or replaces) the admin-approved verification policy for a Repository. */
+  setRepositoryVerificationPolicy(repoId: string, policy: RepositoryVerificationPolicy): void {
+    this.db.prepare(
+      `INSERT INTO repo_verification_policy (repo_id, policy) VALUES (@repoId, @policy)
+       ON CONFLICT(repo_id) DO UPDATE SET policy = excluded.policy`,
+    ).run({ repoId, policy: JSON.stringify(policy) });
+  }
+
+  /** Undefined means no policy has ever been approved for this Repository — never conflated with an explicit no-verification declaration. */
+  getRepositoryVerificationPolicy(repoId: string): RepositoryVerificationPolicy | undefined {
+    const row = this.db.prepare('SELECT policy FROM repo_verification_policy WHERE repo_id = ?')
+      .get(repoId) as { policy: string } | undefined;
+    return row ? (JSON.parse(row.policy) as RepositoryVerificationPolicy) : undefined;
+  }
+
   // -- events archive --
 
   appendEvent(m: AgentMessage): number {
@@ -277,6 +771,148 @@ export class Store {
       .reverse(); // chronological
   }
 
+  // -- session chat (docs/specs/shared-session-chat.md) --
+  //
+  // One row per HUMAN post to a Session's shared conversation, attributed to
+  // a real Principal instead of collapsed into a `dashboard:<sessionId>` bus
+  // row. `sequence` is assigned here, not by the caller, so a monotonic
+  // per-session order survives concurrent posters without them coordinating.
+
+  /** `input.sequence` is never accepted from the caller — assigned as this session's next value so two posters can never collide or reorder each other. */
+  appendSessionChatMessage(input: {
+    id: string; sessionId: string; ts: string; principalId?: string; displayName: string;
+    text: string; audience: ChatAudience; delivery?: ChatDeliveryState; deliveryReason?: string;
+  }): StoredSessionChatMessage {
+    const { sequence } = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM session_chat_messages WHERE session_id = ?')
+      .get(input.sessionId) as { sequence: number };
+    this.db.prepare(
+      `INSERT INTO session_chat_messages
+         (id, session_id, sequence, ts, author_kind, principal_id, display_name, text, audience, delivery, delivery_reason)
+       VALUES (@id, @sessionId, @sequence, @ts, 'human', @principalId, @displayName, @text, @audience, @delivery, @deliveryReason)`,
+    ).run({
+      id: input.id,
+      sessionId: input.sessionId,
+      sequence,
+      ts: input.ts,
+      principalId: input.principalId ?? null,
+      displayName: input.displayName,
+      text: input.text,
+      audience: input.audience,
+      delivery: input.delivery ?? null,
+      deliveryReason: input.deliveryReason ?? null,
+    });
+    const message: StoredSessionChatMessage = {
+      id: input.id, sessionId: input.sessionId, sequence, ts: input.ts, authorKind: 'human',
+      displayName: input.displayName, text: input.text, audience: input.audience,
+    };
+    if (input.principalId !== undefined) message.principalId = input.principalId;
+    if (input.delivery !== undefined) message.delivery = input.delivery;
+    if (input.deliveryReason !== undefined) message.deliveryReason = input.deliveryReason;
+    return message;
+  }
+
+  /** Most recent `limit` posts for one Session, oldest first — the same tail shape GET /api/sessions/:id/messages already returns. */
+  listSessionChatMessages(sessionId: string, limit = 100): StoredSessionChatMessage[] {
+    const rows = this.db
+      .prepare('SELECT * FROM session_chat_messages WHERE session_id = ? ORDER BY sequence DESC LIMIT ?')
+      .all(sessionId, limit) as SessionChatMessageRow[];
+    return rows.reverse().map(rowToSessionChatMessage);
+  }
+
+  upsertSessionInteraction(input: Omit<StoredSessionInteraction, 'status' | 'response' | 'responderPrincipalId' | 'responderDisplayName' | 'resolvedAt'>): StoredSessionInteraction {
+    this.db.prepare(
+      `INSERT INTO session_interactions
+         (id, session_id, provider, provider_session_id, provider_request_id, kind, question, choices, context, allows_free_text, requested_at)
+       VALUES (@id, @sessionId, @provider, @providerSessionId, @providerRequestId, @kind, @question, @choices, @context, @allowsFreeText, @requestedAt)
+       ON CONFLICT(provider, provider_session_id, provider_request_id) DO NOTHING`,
+    ).run({ ...input, choices: JSON.stringify(input.choices), context: input.context ?? null, allowsFreeText: input.allowsFreeText ? 1 : 0 });
+    const row = this.db.prepare(
+      'SELECT * FROM session_interactions WHERE provider = ? AND provider_session_id = ? AND provider_request_id = ?',
+    ).get(input.provider, input.providerSessionId, input.providerRequestId) as SessionInteractionRow;
+    return rowToSessionInteraction(row);
+  }
+
+  getSessionInteraction(id: string): StoredSessionInteraction | undefined {
+    const row = this.db.prepare('SELECT * FROM session_interactions WHERE id = ?').get(id) as SessionInteractionRow | undefined;
+    return row ? rowToSessionInteraction(row) : undefined;
+  }
+
+  listSessionInteractions(sessionId: string): StoredSessionInteraction[] {
+    return (this.db.prepare('SELECT * FROM session_interactions WHERE session_id = ? ORDER BY requested_at, id')
+      .all(sessionId) as SessionInteractionRow[]).map(rowToSessionInteraction);
+  }
+
+  resolveSessionInteraction(id: string, input: {
+    response: SessionInteractionResponse; principalId?: string; displayName: string; resolvedAt: string;
+  }): boolean {
+    const result = this.db.prepare(
+      `UPDATE session_interactions SET status = 'resolved', response = @response,
+         responder_principal_id = @principalId, responder_display_name = @displayName, resolved_at = @resolvedAt
+       WHERE id = @id AND status = 'pending'`,
+    ).run({ id, response: JSON.stringify(input.response), principalId: input.principalId ?? null, displayName: input.displayName, resolvedAt: input.resolvedAt });
+    return result.changes === 1;
+  }
+
+  expireSessionInteraction(id: string): boolean {
+    return this.db.prepare("UPDATE session_interactions SET status = 'expired' WHERE id = ? AND status = 'pending'").run(id).changes === 1;
+  }
+
+  acknowledgeSessionInteractionResponse(id: string, deliveredAt: string): boolean {
+    return this.db.prepare(
+      "UPDATE session_interactions SET response_delivered_at = ? WHERE id = ? AND status = 'resolved' AND response_delivered_at IS NULL",
+    ).run(deliveredAt, id).changes === 1;
+  }
+
+  // -- run feedback (docs/specs/run-feedback-review.md, B07) --
+
+  /**
+   * `input.sequence` is never accepted from the caller — assigned as this
+   * Task's next value, mirroring appendSessionChatMessage's per-key
+   * monotonic ordering. Keyed by taskId (not runId): see
+   * migrations/020_run_feedback.sql's own header for why. Ticket 71 (B09):
+   * `reviewDecision` writes into the column that migration already
+   * reserved for exactly this — an ordinary comment (the overwhelming
+   * majority of calls) simply omits it.
+   */
+  appendRunFeedback(input: {
+    id: string; taskId: string; runId: string; postedAt: string; principalId?: string; displayName: string; text: string;
+    reviewDecision?: ReviewDecision;
+  }): StoredRunFeedback {
+    const { sequence } = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_feedback WHERE task_id = ?')
+      .get(input.taskId) as { sequence: number };
+    this.db.prepare(
+      `INSERT INTO run_feedback (id, task_id, run_id, sequence, posted_at, principal_id, display_name, text, review_decision)
+       VALUES (@id, @taskId, @runId, @sequence, @postedAt, @principalId, @displayName, @text, @reviewDecision)`,
+    ).run({
+      id: input.id,
+      taskId: input.taskId,
+      runId: input.runId,
+      sequence,
+      postedAt: input.postedAt,
+      principalId: input.principalId ?? null,
+      displayName: input.displayName,
+      text: input.text,
+      reviewDecision: input.reviewDecision ?? null,
+    });
+    const entry: StoredRunFeedback = {
+      id: input.id, taskId: input.taskId, runId: input.runId, sequence, postedAt: input.postedAt,
+      displayName: input.displayName, text: input.text,
+    };
+    if (input.principalId !== undefined) entry.principalId = input.principalId;
+    if (input.reviewDecision !== undefined) entry.reviewDecision = input.reviewDecision;
+    return entry;
+  }
+
+  /** Every feedback entry for one Task, oldest first — never filtered by runId, so a Task's conversation stays whole across a future retried Attempt/Run (B12). */
+  listRunFeedback(taskId: string): StoredRunFeedback[] {
+    const rows = this.db
+      .prepare('SELECT * FROM run_feedback WHERE task_id = ? ORDER BY sequence ASC')
+      .all(taskId) as RunFeedbackRow[];
+    return rows.map(rowToRunFeedback);
+  }
+
   // -- settings --
 
   getSetting<T>(key: string): T | undefined {
@@ -293,6 +929,142 @@ export class Store {
          ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       )
       .run(key, JSON.stringify(value));
+  }
+
+  // -- collaborators (ticket 11) --
+  //
+  // CollaboratorService (collaborators/service.ts) owns all hashing and
+  // lifecycle logic; these methods are plain row storage, exactly the
+  // CollaboratorStore surface it depends on. Bearer secrets never reach
+  // here in plaintext -- only the hashes the service already computed.
+
+  createCollaborator(row: CollaboratorRow): void {
+    this.db.prepare(
+      `INSERT INTO collaborators (id, display_name, created_at, granted_repository_ids, granted_profile_ids)
+       VALUES (@id, @displayName, @createdAt, @grantedRepositoryIds, @grantedProfileIds)`,
+    ).run({
+      ...row,
+      grantedRepositoryIds: JSON.stringify(row.grantedRepositoryIds),
+      grantedProfileIds: JSON.stringify(row.grantedProfileIds),
+    });
+  }
+
+  getCollaborator(id: string): CollaboratorRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborators WHERE id = ?').get(id) as CollaboratorTableRow | undefined;
+    return row ? rowToCollaborator(row) : undefined;
+  }
+
+  listCollaborators(): CollaboratorRow[] {
+    return (this.db.prepare('SELECT * FROM collaborators ORDER BY created_at').all() as CollaboratorTableRow[])
+      .map(rowToCollaborator);
+  }
+
+  updateCollaboratorGrants(id: string, grants: { repositoryIds: string[]; profileIds: string[] }): void {
+    this.db.prepare('UPDATE collaborators SET granted_repository_ids = ?, granted_profile_ids = ? WHERE id = ?')
+      .run(JSON.stringify(grants.repositoryIds), JSON.stringify(grants.profileIds), id);
+  }
+
+  createInvitation(row: InvitationRow, codeHash: string): void {
+    this.db.prepare(
+      `INSERT INTO collaborator_invitations (id, collaborator_id, code_hash, created_at, expires_at)
+       VALUES (@id, @collaboratorId, @codeHash, @createdAt, @expiresAt)`,
+    ).run({ ...row, codeHash });
+  }
+
+  getInvitationByCodeHash(codeHash: string): InvitationRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_invitations WHERE code_hash = ?')
+      .get(codeHash) as InvitationTableRow | undefined;
+    return row ? rowToInvitation(row) : undefined;
+  }
+
+  consumeInvitation(id: string, consumedAt: string): void {
+    this.db.prepare('UPDATE collaborator_invitations SET consumed_at = ? WHERE id = ?').run(consumedAt, id);
+  }
+
+  createDevice(row: DeviceRow, tokenHash: string): void {
+    this.db.prepare(
+      `INSERT INTO collaborator_devices (id, collaborator_id, device_label, token_hash, created_at)
+       VALUES (@id, @collaboratorId, @deviceLabel, @tokenHash, @createdAt)`,
+    ).run({ ...row, tokenHash });
+  }
+
+  getDeviceByTokenHash(tokenHash: string): DeviceRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_devices WHERE token_hash = ?')
+      .get(tokenHash) as DeviceTableRow | undefined;
+    return row ? rowToDevice(row) : undefined;
+  }
+
+  getDevice(id: string): DeviceRow | undefined {
+    const row = this.db.prepare('SELECT * FROM collaborator_devices WHERE id = ?').get(id) as DeviceTableRow | undefined;
+    return row ? rowToDevice(row) : undefined;
+  }
+
+  listDevices(collaboratorId?: string): DeviceRow[] {
+    const rows = (collaboratorId === undefined
+      ? this.db.prepare('SELECT * FROM collaborator_devices ORDER BY created_at').all()
+      : this.db.prepare('SELECT * FROM collaborator_devices WHERE collaborator_id = ? ORDER BY created_at').all(collaboratorId)
+    ) as DeviceTableRow[];
+    return rows.map(rowToDevice);
+  }
+
+  revokeDevice(id: string, revokedAt: string): void {
+    this.db.prepare('UPDATE collaborator_devices SET revoked_at = ? WHERE id = ?').run(revokedAt, id);
+  }
+
+  /** Hard delete: children first to satisfy the `REFERENCES collaborators(id)` FK (foreign_keys pragma is ON), then the collaborator row itself. Leaves every other collaborator and all repository/profile/run data untouched. */
+  removeCollaborator(id: string): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM collaborator_devices WHERE collaborator_id = ?').run(id);
+      this.db.prepare('DELETE FROM collaborator_invitations WHERE collaborator_id = ?').run(id);
+      this.db.prepare('DELETE FROM collaborators WHERE id = ?').run(id);
+    })();
+  }
+
+  // -- profiles (ticket 12) --
+  //
+  // Immutable once created — no update method, only a new row — exactly
+  // like a Run's own frozen work_spec.
+
+  createProfile(profile: Profile): void {
+    this.db.prepare(
+      `INSERT INTO profiles (id, name, runtime_preference, budget, verification_intent, requested_delivery_result, created_at)
+       VALUES (@id, @name, @runtimePreference, @budget, @verificationIntent, @requestedDeliveryResult, @createdAt)`,
+    ).run({
+      ...profile,
+      runtimePreference: JSON.stringify(profile.runtimePreference),
+      budget: JSON.stringify(profile.budget),
+      verificationIntent: JSON.stringify(profile.verificationIntent),
+    });
+  }
+
+  getProfile(id: string): Profile | undefined {
+    const row = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(id) as ProfileTableRow | undefined;
+    return row ? rowToProfile(row) : undefined;
+  }
+
+  listProfiles(): Profile[] {
+    return (this.db.prepare('SELECT * FROM profiles ORDER BY created_at').all() as ProfileTableRow[]).map(rowToProfile);
+  }
+
+  // -- Run activity (ticket 12 AC2) --
+  //
+  // Append-only audit trail of who did what to a Run — never updated or
+  // deleted, exactly like the events/attempt_events archives.
+
+  appendRunActivity(activity: RunActivity): void {
+    this.db.prepare(
+      `INSERT INTO run_activity (id, run_id, kind, principal, device, at)
+       VALUES (@id, @runId, @kind, @principal, @device, @at)`,
+    ).run({
+      id: activity.id, runId: activity.runId, kind: activity.kind, at: activity.at,
+      principal: JSON.stringify(activity.principal),
+      device: toJson(activity.device),
+    });
+  }
+
+  listRunActivity(runId: string): RunActivity[] {
+    return (this.db.prepare('SELECT * FROM run_activity WHERE run_id = ? ORDER BY at').all(runId) as RunActivityTableRow[])
+      .map(rowToRunActivity);
   }
 }
 

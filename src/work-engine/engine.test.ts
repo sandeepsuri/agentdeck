@@ -1,0 +1,1887 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
+import {
+  afterEach, describe, expect, it, vi,
+} from 'vitest';
+import type { RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
+import { createFakeClock } from '../test-fixtures/clock.js';
+import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
+import { stubRuntimeReadinessSource } from '../test-fixtures/runtime-readiness.js';
+import { Store } from '../store/index.js';
+import { buildAttemptEventEnvelope } from './durable-events.js';
+import { CHILD_RUN_CEILING, TRUSTED_RUNTIME_PROVIDER_DOMAINS } from './envelope.js';
+import {
+  DurableWorkEngine, InvalidRunStateError, RunAttentionNotPendingError, RunNotFoundError, UnsupportedRuntimeError,
+} from './engine.js';
+import { runBranchName, runWorktreePath } from './prepare.js';
+import { createCodexAttemptAdapter } from './runtimes/codex.js';
+import type { CodexAttemptProcess, CodexProcessSpawner } from './runtimes/codex.js';
+import { deriveRunResult } from './run-result.js';
+import { createShellVerificationGateRunner, MAX_VERIFICATION_REPAIR_ATTEMPTS } from './verification.js';
+import type { GateExecutionResult, VerificationGateRunner } from './verification.js';
+import type { RunRepository, WorkRun, WorkSpec } from './types.js';
+
+const tempDirectories: string[] = [];
+
+function tempDir(): string {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-work-engine-'));
+  tempDirectories.push(directory);
+  return directory;
+}
+
+function databasePath(): string {
+  return path.join(tempDir(), 'agentdeck.db');
+}
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function initGitRepo(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  git(dir, 'init');
+  git(dir, 'config', 'user.email', 'agentdeck@example.test');
+  git(dir, 'config', 'user.name', 'AgentDeck Test');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'fixture\n');
+  git(dir, 'add', 'README.md');
+  git(dir, 'commit', '-m', 'fixture');
+  git(dir, 'branch', '-M', 'main');
+}
+
+function registerGitRepository(store: Store, repoPath: string): RunRepository {
+  const repository: RunRepository = { id: repoPath, name: path.basename(repoPath), path: repoPath };
+  store.upsertRepo(repository);
+  // Ticket 08: these tests are about preparation/envelope/Attempt behavior,
+  // not verification — an explicit no-verification declaration keeps a
+  // successful Attempt reaching 'completed_unverified' instead of the
+  // 'failed_verification' a Repository with no approved policy at all would
+  // now correctly produce (AC8). Verification/repair behavior itself is
+  // covered by its own describe block below.
+  store.setRepositoryVerificationPolicy(repository.id, { kind: 'no-verification' });
+  return repository;
+}
+
+function workSpec(): WorkSpec {
+  return {
+    objective: 'Add durable managed work',
+    acceptanceCriteria: [
+      'The queued run survives restart',
+      'The submitted intent is unchanged',
+    ],
+    repository: {
+      id: '/repos/agentdeck',
+      name: 'agentdeck',
+      path: '/repos/agentdeck',
+    },
+    requestedBaseReference: 'refs/heads/main',
+    runtimePreference: ['codex', 'claude'],
+    budget: {
+      maxWallClockMs: 3_600_000,
+      maxModelTurns: 40,
+      maxToolCalls: 200,
+    },
+    verificationIntent: {
+      required: true,
+      commands: ['npm test', 'npm run typecheck'],
+    },
+    requestedDeliveryResult: 'local-commit',
+  };
+}
+
+function registerRepository(store: Store): void {
+  store.upsertRepo({ id: '/repos/agentdeck', name: 'agentdeck', path: '/repos/agentdeck' });
+  store.setRepositoryVerificationPolicy('/repos/agentdeck', { kind: 'no-verification' });
+}
+
+afterEach(() => {
+  for (const directory of tempDirectories.splice(0)) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+describe('DurableWorkEngine', () => {
+  it('submits one objective as a durable task and queued run with frozen intent', async () => {
+    const store = new Store(':memory:');
+    registerRepository(store);
+    const engine = new DurableWorkEngine(store);
+    const submitted = workSpec();
+
+    const run = await engine.submit(submitted);
+
+    expect(run).toMatchObject({
+      taskId: expect.any(String),
+      id: expect.any(String),
+      status: 'queued',
+      spec: submitted,
+      submittedAt: expect.any(String),
+    });
+    expect(engine.get(run.id)).toEqual(run);
+    expect(engine.list()).toEqual([run]);
+    expect(Object.isFrozen(run)).toBe(true);
+    expect(Object.isFrozen(run.spec)).toBe(true);
+    expect(Object.isFrozen(run.spec.acceptanceCriteria)).toBe(true);
+
+    store.close();
+  });
+
+  it('reopens the same queued run and submitted intent after the store restarts', async () => {
+    const dbPath = databasePath();
+    const firstStore = new Store(dbPath);
+    registerRepository(firstStore);
+    const submitted = workSpec();
+    const created = await new DurableWorkEngine(firstStore).submit(submitted);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore).get(created.id);
+
+    expect(reopened).toEqual(created);
+    expect(reopened?.id).toBe(created.id);
+    expect(reopened?.taskId).toBe(created.taskId);
+    expect(reopened?.status).toBe('queued');
+    expect(reopened?.spec).toEqual(submitted);
+    reopenedStore.close();
+  });
+
+  it('copies submitted values so caller mutation cannot rewrite the frozen run', async () => {
+    const store = new Store(':memory:');
+    registerRepository(store);
+    const engine = new DurableWorkEngine(store);
+    const submitted = workSpec();
+    const run = await engine.submit(submitted);
+
+    submitted.acceptanceCriteria.push('A later caller mutation');
+    submitted.repository.name = 'renamed-after-submit';
+    submitted.runtimePreference.reverse();
+
+    expect(engine.get(run.id)?.spec).toEqual(workSpec());
+    store.close();
+  });
+
+  it('rejects incomplete intent before creating a run', async () => {
+    const store = new Store(':memory:');
+    registerRepository(store);
+    const engine = new DurableWorkEngine(store);
+    const submitted = workSpec();
+    submitted.acceptanceCriteria = [];
+
+    await expect(engine.submit(submitted)).rejects.toThrow('acceptanceCriteria');
+    expect(engine.list()).toEqual([]);
+    store.close();
+  });
+
+  it('rejects a Repository outside AgentDeck\'s known repository boundary', async () => {
+    const store = new Store(':memory:');
+    const engine = new DurableWorkEngine(store);
+
+    await expect(engine.submit(workSpec())).rejects.toThrow('repository is not known');
+    expect(engine.list()).toEqual([]);
+    store.close();
+  });
+});
+
+describe('DurableWorkEngine.prepare', () => {
+  function setUp(runtimeReadiness: RuntimeReadinessSource = stubRuntimeReadinessSource()) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, runtimeReadiness);
+    return { root, repoPath, store, repository, runsRoot, engine };
+  }
+
+  async function submitRun(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    return engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main', ...overrides });
+  }
+
+  it('resolves the exact local base commit with no fetch and creates a dedicated clean worktree', async () => {
+    const { repoPath, store, repository, runsRoot, engine } = setUp();
+    const headSha = git(repoPath, 'rev-parse', 'HEAD');
+    const submitted = await submitRun(engine, repository);
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.status).toBe('preparing');
+    expect(prepared.preparation).toEqual({
+      state: 'ready',
+      baseCommit: headSha,
+      worktreePath: runWorktreePath(runsRoot, submitted.id),
+      branch: runBranchName(submitted.id),
+      targetBranch: 'main',
+    });
+    expect(fs.existsSync(prepared.preparation.worktreePath!)).toBe(true);
+    expect(git(prepared.preparation.worktreePath!, 'rev-parse', 'HEAD')).toBe(headSha);
+    expect(engine.get(submitted.id)).toEqual(prepared);
+    store.close();
+  });
+
+  it('freezes a ready capability envelope pinned to the first eligible preferred runtime once the worktree exists', async () => {
+    const { store, repository, runsRoot, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.envelope).toEqual({
+      state: 'ready',
+      capabilityEnvelope: {
+        runtime: 'codex',
+        profile: {
+          writableWorktree: runWorktreePath(runsRoot, submitted.id),
+          readableRoots: [runWorktreePath(runsRoot, submitted.id)],
+          allowedNetworkDomains: TRUSTED_RUNTIME_PROVIDER_DOMAINS.codex,
+          environmentAllowlist: expect.any(Array),
+          processCeiling: expect.any(Number),
+          childRunCeiling: CHILD_RUN_CEILING,
+        },
+        secretGrants: [],
+      },
+    });
+    store.close();
+  });
+
+  it('refuses managed envelope status when no preferred runtime can enforce execution restrictions', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository, { runtimePreference: ['claude'] });
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.preparation.state).toBe('ready');
+    expect(prepared.envelope.state).toBe('refused');
+    if (prepared.envelope.state !== 'refused') throw new Error('expected refused');
+    expect(prepared.envelope.reason).toContain('Claude Code');
+    store.close();
+  });
+
+  it('reopens a prepared run with its frozen envelope intact after restart', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const submitted = await new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource()).submit(
+      { ...workSpec(), repository, requestedBaseReference: 'main' },
+    );
+    const prepared = await new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource()).prepare(submitted.id);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(submitted.id);
+
+    expect(reopened?.envelope).toEqual(prepared.envelope);
+    reopenedStore.close();
+  });
+
+  it('creates a clean worktree even when the source checkout has untracked files and dirty tracked files', async () => {
+    const { repoPath, store, repository, engine } = setUp();
+    const headSha = git(repoPath, 'rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'uncommitted local edit\n');
+    fs.writeFileSync(path.join(repoPath, 'scratch.txt'), 'never committed\n');
+    const submitted = await submitRun(engine, repository);
+
+    const prepared = await engine.prepare(submitted.id);
+
+    expect(prepared.preparation.state).toBe('ready');
+    expect(prepared.preparation.baseCommit).toBe(headSha);
+    const worktreePath = prepared.preparation.worktreePath!;
+    expect(fs.readFileSync(path.join(worktreePath, 'README.md'), 'utf8')).toBe('fixture\n');
+    expect(fs.existsSync(path.join(worktreePath, 'scratch.txt'))).toBe(false);
+    store.close();
+  });
+
+  it('fails with a precise, recoverable explanation on a worktree path collision, leaving it untouched', async () => {
+    const { store, repository, runsRoot, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    const collidingPath = runWorktreePath(runsRoot, submitted.id);
+    fs.mkdirSync(collidingPath, { recursive: true });
+    fs.writeFileSync(path.join(collidingPath, 'keep.txt'), 'pre-existing\n');
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow(/Worktree path already exists/);
+
+    const run = engine.get(submitted.id)!;
+    expect(run.status).toBe('preparing');
+    expect(run.preparation.state).toBe('failed');
+    expect(run.preparation.error).toMatch(/Worktree path already exists/);
+    expect(fs.readFileSync(path.join(collidingPath, 'keep.txt'), 'utf8')).toBe('pre-existing\n');
+    store.close();
+  });
+
+  it('fails with a precise, recoverable explanation on a branch-name collision', async () => {
+    const { repoPath, store, repository, runsRoot, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    git(repoPath, 'branch', runBranchName(submitted.id));
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow(/Branch already exists/);
+
+    const run = engine.get(submitted.id)!;
+    expect(run.preparation.state).toBe('failed');
+    expect(run.preparation.error).toMatch(/Branch already exists/);
+    expect(fs.existsSync(runWorktreePath(runsRoot, submitted.id))).toBe(false);
+    store.close();
+  });
+
+  it('fails clearly when the requested base reference does not exist locally, creating no worktree', async () => {
+    const { store, repository, runsRoot, engine } = setUp();
+    const submitted = await submitRun(engine, repository, { requestedBaseReference: 'refs/heads/does-not-exist' });
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow(/does not exist locally/);
+
+    const run = engine.get(submitted.id)!;
+    expect(run.preparation.state).toBe('failed');
+    expect(fs.existsSync(runWorktreePath(runsRoot, submitted.id))).toBe(false);
+    store.close();
+  });
+
+  it('rejects preparation once the Repository no longer exists at its recorded path', async () => {
+    const { repoPath, store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    fs.rmSync(repoPath, { recursive: true, force: true });
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow(/no longer exists/);
+    expect(engine.get(submitted.id)!.preparation.state).toBe('failed');
+    store.close();
+  });
+
+  it('does not recreate or fail a worktree that is already ready', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    const ready = await engine.prepare(submitted.id);
+
+    const repeated = await engine.prepare(submitted.id);
+
+    expect(repeated).toEqual(ready);
+    store.close();
+  });
+
+  it('rejects preparing an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.prepare('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('reopens a prepared run with its resolved base commit and worktree intact after restart', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const submitted = await new DurableWorkEngine(firstStore, runsRoot).submit(
+      { ...workSpec(), repository, requestedBaseReference: 'main' },
+    );
+    const prepared = await new DurableWorkEngine(firstStore, runsRoot).prepare(submitted.id);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(submitted.id);
+
+    expect(reopened).toEqual(prepared);
+    expect(fs.existsSync(prepared.preparation.worktreePath!)).toBe(true);
+    reopenedStore.close();
+  });
+
+  it('cancellation preserves an already-created worktree for inspection', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    const prepared = await engine.prepare(submitted.id);
+
+    const cancelled = await engine.cancel(submitted.id);
+
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.preparation).toEqual(prepared.preparation);
+    expect(fs.existsSync(prepared.preparation.worktreePath!)).toBe(true);
+    store.close();
+  });
+
+  it('rejects cancelling an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.cancel('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('refuses to prepare a cancelled run, leaving its worktree exactly as it was', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await submitRun(engine, repository);
+    const prepared = await engine.prepare(submitted.id);
+    await engine.cancel(submitted.id);
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow(InvalidRunStateError);
+
+    expect(engine.get(submitted.id)?.preparation).toEqual(prepared.preparation);
+    store.close();
+  });
+});
+
+describe('DurableWorkEngine.start', () => {
+  function setUp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters);
+    return { root, repoPath, store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  it('rejects starting an Attempt before the worktree is prepared', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+
+    await expect(engine.start(submitted.id)).rejects.toThrow(/prepared/);
+    store.close();
+  });
+
+  it('rejects starting an Attempt when no preferred runtime satisfies the envelope', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository, { runtimePreference: ['claude'] });
+    expect(prepared.envelope.state).toBe('refused');
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(/capability envelope/);
+    store.close();
+  });
+
+  it('rejects starting an Attempt for a runtime with no wired adapter', async () => {
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(UnsupportedRuntimeError);
+    store.close();
+  });
+
+  it('rejects starting an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.start('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('starts one Codex Attempt in the prepared worktree, reporting ordered structured progress to completion', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    const started = await engine.start(prepared.id);
+
+    expect(started.status).toBe('running');
+    expect(started.attempt).toMatchObject({ state: 'running', runtime: 'codex' });
+
+    const settled = await waitForSettled(engine, prepared.id);
+    expect(settled.status).toBe('completed_unverified');
+    expect(settled.attempt.state).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.map((event) => event.kind)).toEqual([
+      'lifecycle', 'lifecycle', 'tool-activity', 'tool-activity', 'message', 'usage', 'lifecycle', 'completion',
+      'worktree-changes',
+      'verification-outcome',
+    ]);
+    expect(settled.attempt.events[0]).toMatchObject({ kind: 'lifecycle', phase: 'attempt-started' });
+    expect(fake.writes.some((line) => line.includes(prepared.preparation.worktreePath!))).toBe(true);
+    store.close();
+  });
+
+  it('never leaks the Codex provider conversation id into the stored Run', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success', threadId: 'thread-should-stay-internal' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(JSON.stringify(settled)).not.toContain('thread-should-stay-internal');
+    store.close();
+  });
+
+  it('ends a Run in failed status with a precise reason when the Attempt fails', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed');
+    expect(settled.attempt).toMatchObject({ state: 'failed', reason: 'The sandboxed command exited non-zero.' });
+    store.close();
+  });
+
+  it('never leaves a Run permanently running when Codex rejects the objective-start request', async () => {
+    // The app-server double answers 'turn/start' with a JSON-RPC error and
+    // then stays alive and silent forever — no notification, no exit. Before
+    // the objective was tracked with request(), that error was dropped and
+    // the Run sat in 'running' with only 'attempt-started' recorded, with
+    // nothing left that could ever settle it.
+    const fake = createFakeCodexAppServer({ behavior: 'objective-start-unsupported' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    const started = await engine.start(prepared.id);
+    expect(started.status).toBe('running');
+
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed');
+    expect(settled.attempt).toMatchObject({
+      state: 'failed', reason: expect.stringContaining('Method not found: turn/start'),
+    });
+    store.close();
+  });
+
+  it('refuses to start a second Attempt once one has already been started', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+
+    await expect(engine.start(prepared.id)).rejects.toThrow(/already been started/);
+    await waitForSettled(engine, prepared.id);
+    store.close();
+  });
+
+  it('persists Attempt progress durably: a fresh engine on the same store observes the completed Attempt', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await submitAndPrepare(firstEngine, repository);
+    await firstEngine.start(prepared.id);
+    await waitForSettled(firstEngine, prepared.id);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id);
+
+    expect(reopened?.status).toBe('completed_unverified');
+    expect(reopened?.attempt.state).toBe('completed');
+    reopenedStore.close();
+  });
+
+  it('lets a cancellation surface while the Attempt is still running, without hiding a later real terminal outcome', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    // Ticket 06 doesn't stop the underlying process (ticket 09's "safe
+    // controls" does) — this simulates the Attempt still being 'running'
+    // durably when cancel() is called.
+    store.startAttempt({
+      id: 'attempt-cancel-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString(),
+    });
+    expect(engine.get(prepared.id)?.status).toBe('running');
+
+    const cancelled = await engine.cancel(prepared.id);
+
+    expect(cancelled.status).toBe('cancelled');
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
+
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id,
+      attemptId: 'attempt-cancel-1',
+      event: {
+        kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success',
+      },
+    }));
+    // A completion event with no verification-outcome yet is not a real
+    // terminal outcome (ticket 08) — the stale cancellation still surfaces.
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
+
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id,
+      attemptId: 'attempt-cancel-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'unverified', repairAttempts: 0,
+      },
+    }));
+
+    expect(engine.get(prepared.id)?.status).toBe('completed_unverified');
+    store.close();
+  });
+});
+
+// Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): a genuinely new
+// Attempt — distinct from reverify()/apply(), which never touch a runtime.
+describe('DurableWorkEngine.retryAttempt', () => {
+  function setUp(runtimeAdapters?: ConstructorParameters<typeof DurableWorkEngine>[3]) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters);
+    return {
+      root, repoPath, store, repository, runsRoot, engine,
+    };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  async function failedRun(engine: DurableWorkEngine, repository: RunRepository) {
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+    return waitForSettled(engine, prepared.id);
+  }
+
+  it('rejects retrying an unknown run', async () => {
+    const { store, engine } = setUp();
+    await expect(engine.retryAttempt('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('rejects retrying a Run in a non-retryable status (still preparing, no Attempt yet)', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    store.close();
+  });
+
+  it('rejects retrying a completed Run — nothing to recover, publish() already covers that case', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success' },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'verified', repairAttempts: 0,
+      },
+    }));
+    expect(engine.get(prepared.id)?.status).toBe('completed');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    store.close();
+  });
+
+  it('rejects retrying while the current Attempt is still running (idempotent-retry guard)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+    await engine.start(prepared.id);
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    // 'running' is not itself a retryable status, so the status check
+    // refuses first — proving the same double-click can never reach a live
+    // Attempt via this path either way.
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await waitForSettled(engine, prepared.id);
+    store.close();
+  });
+
+  it('rejects retrying a Run that was cancelled before ever starting an Attempt, with an honest message', async () => {
+    const { store, repository, engine } = setUp();
+    const prepared = await submitAndPrepare(engine, repository);
+    const cancelled = await engine.cancel(prepared.id);
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.attempt.state).toBe('idle');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(/no Attempt to retry/);
+    store.close();
+  });
+
+  it('starts a second Attempt for a failed Run, resetting the worktree and preserving the first attempt\'s evidence', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const settled = await failedRun(engine, repository);
+    expect(settled.status).toBe('failed');
+    const firstAttemptEvents = settled.attempt.state === 'failed' ? settled.attempt.events : [];
+    expect(firstAttemptEvents.length).toBeGreaterThan(0);
+
+    // A real, uncommitted stray file the first Attempt "left behind" — the
+    // worktree-reuse hazard the reset must actually discard, not a mock.
+    const strayPath = path.join(settled.preparation.worktreePath!, 'stray.txt');
+    fs.writeFileSync(strayPath, 'leftover from attempt 1\n');
+    expect(fs.existsSync(strayPath)).toBe(true);
+
+    const retried = await engine.retryAttempt(settled.id);
+
+    expect(retried.status).toBe('running');
+    expect(retried.attempts).toHaveLength(2);
+    expect(retried.attempts?.[0]).toMatchObject({ ordinal: 1, state: { state: 'failed' } });
+    expect(retried.attempts?.[0]?.state).toMatchObject({ events: firstAttemptEvents });
+    expect(retried.attempts?.[1]).toMatchObject({ ordinal: 2, state: { state: 'running' } });
+    expect(engine.listActivity(settled.id).at(-1)).toMatchObject({ kind: 'attempt-retried' });
+
+    // The worktree reset (and the adapter it gates) run in the background,
+    // exactly like start()'s own Attempt — never blocking retryAttempt()'s
+    // own return the way an HTTP caller must not be blocked on it either.
+    const settledAgain = await waitForSettled(engine, settled.id);
+    expect(fs.existsSync(strayPath)).toBe(false);
+    // Attempt 1's own durable log is byte-for-byte unchanged after attempt 2 settles too.
+    expect(settledAgain.attempts?.[0]?.state).toMatchObject({ events: firstAttemptEvents });
+    store.close();
+  });
+
+  it('ends the new Attempt with a precise reason, never starting the adapter, when the worktree reset itself fails', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }),
+    });
+    const settled = await failedRun(engine, repository);
+    // Corrupt the frozen worktree path so `git reset --hard` fails cleanly —
+    // a real git-level failure, not a mock.
+    const brokenPath = path.join(settled.preparation.worktreePath!, 'does-not-exist');
+    store.updateRun({ ...settled, preparation: { ...settled.preparation, worktreePath: brokenPath } });
+
+    const retried = await engine.retryAttempt(settled.id);
+    expect(retried.attempts).toHaveLength(2);
+
+    const settledAgain = await waitForSettled(engine, settled.id);
+    expect(settledAgain.attempts?.[1]?.state.state).toBe('failed');
+    if (settledAgain.attempts?.[1]?.state.state === 'failed') {
+      expect(settledAgain.attempts[1].state.reason).toMatch(/Could not reset the worktree/);
+    }
+    store.close();
+  });
+
+  it('notifies onWorktreeReset with this Run\'s id before resetting — ticket 70 (B10)\'s own hook for invalidating an active preview', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'turn-failure' });
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+    const onWorktreeReset = vi.fn();
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), adapters);
+    engine.onWorktreeReset = onWorktreeReset;
+    const settled = await failedRun(engine, repository);
+
+    await engine.retryAttempt(settled.id);
+
+    expect(onWorktreeReset).toHaveBeenCalledWith(settled.id);
+    await waitForSettled(engine, settled.id);
+    store.close();
+  });
+
+  it('refuses a cancelled Run whose Attempt is still durably "running" — cancel() records intent, but the live task may not have actually stopped yet', async () => {
+    // deriveRunStatus checks a terminal attempt state (failed/completed)
+    // before its own rawStatus === 'cancelled' branch, so 'cancelled' is
+    // only ever the *derived* status while the attempt itself is idle or
+    // running — never while it already carries a real terminal outcome
+    // (see attempt-projection.ts). The idempotent-retry guard must still
+    // hold across that combination: cancel() alone never proves the prior
+    // live task has actually stopped.
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    await engine.cancel(prepared.id);
+    expect(engine.get(prepared.id)?.status).toBe('cancelled');
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(/already been started/);
+    store.close();
+  });
+
+  it('allows retrying a Run that failed verification — the named escape hatch from reverify()', async () => {
+    const { store, repository, engine } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: new Date().toISOString() });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'completion', sequence: 0, at: new Date().toISOString(), outcome: 'success' },
+    }));
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: {
+        kind: 'verification-outcome', sequence: 1, at: new Date().toISOString(), outcome: 'failed_verification', repairAttempts: 0,
+      },
+    }));
+    expect(engine.get(prepared.id)?.status).toBe('failed_verification');
+
+    // No adapter wired in this setUp — proves eligibility is reached (the
+    // rejection is UnsupportedRuntimeError, past every precondition check).
+    await expect(engine.retryAttempt(prepared.id)).rejects.toThrow(UnsupportedRuntimeError);
+    store.close();
+  });
+
+  it('rejects retrying before the worktree is prepared, even for an otherwise-retryable status', async () => {
+    const { store, repository, engine } = setUp();
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+    const cancelled = await engine.cancel(submitted.id);
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.preparation.state).toBe('pending');
+
+    await expect(engine.retryAttempt(submitted.id)).rejects.toThrow(/prepared/);
+    store.close();
+  });
+
+  it('recovers a restart mid-attempt-2 with a synthetic failure event scoped to attempt 2 only, leaving attempt 1 untouched', async () => {
+    // Mirrors engine.recovery.test.ts's own "crash mid-Attempt" pattern:
+    // the crashed state is constructed directly on the store (no real
+    // adapter/process ever runs), then a fresh engine on the same store
+    // instance recovers it — no restart-vs-in-flight-process race to avoid.
+    const { store, repository, engine, runsRoot } = setUp({});
+    const prepared = await submitAndPrepare(engine, repository);
+    store.startAttempt({ id: 'attempt-1', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:00:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-1',
+      event: { kind: 'failure', sequence: 0, at: '2026-09-01T00:00:01.000Z', reason: 'process crashed' },
+    }));
+    store.startAttempt({ id: 'attempt-2', runId: prepared.id, runtime: 'codex', startedAt: '2026-09-01T00:05:00.000Z' });
+    store.appendAttemptEvent(buildAttemptEventEnvelope({
+      runId: prepared.id, attemptId: 'attempt-2',
+      event: { kind: 'lifecycle', sequence: 0, at: '2026-09-01T00:05:01.000Z', phase: 'attempt-started' },
+    }));
+    expect(engine.get(prepared.id)?.attempts).toHaveLength(2);
+    expect(engine.get(prepared.id)?.attempt.state).toBe('running');
+
+    const restarted = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), {});
+    await restarted.recover();
+
+    const recovered = restarted.get(prepared.id)!;
+    expect(recovered.attempts).toHaveLength(2);
+    expect(recovered.attempts?.[0]?.state).toMatchObject({ state: 'failed', reason: 'process crashed' });
+    expect(recovered.attempts?.[1]?.state.state).toBe('failed');
+    if (recovered.attempts?.[1]?.state.state === 'failed') {
+      expect(recovered.attempts[1].state.reason).toMatch(/restart/i);
+    }
+    store.close();
+  });
+});
+
+describe('DurableWorkEngine.resolveAttention', () => {
+  function setUp(spawn: ReturnType<typeof createFakeCodexAppServer>['spawn']) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), {
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }),
+    });
+    return { store, repository, engine };
+  }
+
+  async function submitPrepareAndStart(engine: DurableWorkEngine, repository: RunRepository) {
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+    await engine.prepare(submitted.id);
+    return engine.start(submitted.id);
+  }
+
+  async function waitForPendingAttention(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => engine.get(runId)?.pendingAttention !== undefined);
+    return engine.get(runId)!.pendingAttention!;
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  it('reports an approval request as durable Run attention with a human-readable reason and reflects waiting_approval on the Run', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionParams: { command: 'rm -rf node_modules' } });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    expect(pending).toMatchObject({ kind: 'approval', reason: expect.stringContaining('rm -rf node_modules') });
+    expect(engine.get(started.id)?.status).toBe('waiting_approval');
+    store.close();
+  });
+
+  it('resumes the Attempt exactly once: approving lets it continue to completion, and a second resolution of the same request is refused', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    const resolved = await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    expect(resolved.pendingAttention).toBeUndefined();
+
+    await expect(engine.resolveAttention(started.id, pending.id, { kind: 'approve' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+
+    const settled = await waitForSettled(engine, started.id);
+    expect(settled.status).toBe('completed_unverified');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const resolvedEvents = settled.attempt.events.filter((event) => event.kind === 'attention-resolved');
+    expect(resolvedEvents).toHaveLength(1);
+    expect(resolvedEvents[0]).toMatchObject({ kind: 'attention-resolved', attentionId: pending.id, decision: 'approved' });
+    store.close();
+  });
+
+  it('never drops or collides an event the runtime pushes right after resolution — the resolver and the adapter mint sequence numbers independently and must never race', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    const settled = await waitForSettled(engine, started.id);
+
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const sequences = settled.attempt.events.map((event) => event.sequence);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b)); // strictly ordered, no re-shuffling
+    expect(new Set(sequences).size).toBe(sequences.length); // no two events share a sequence number
+    // The fixture's post-approval turn (a fresh agent message, usage, and
+    // turn/completed) must all still be present — proving nothing the
+    // adapter pushed immediately after the decision was silently dropped
+    // by a sequence-number collision with the attention-resolved event.
+    expect(settled.attempt.events).toContainEqual(
+      expect.objectContaining({ kind: 'message', text: 'Continued after the pending attention request was resolved.' }),
+    );
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({ kind: 'completion', outcome: 'success' }));
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'unverified' });
+    store.close();
+  });
+
+  it('relays a denial to the runtime and never lets a denied request be resolved again', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'deny' });
+
+    expect(fake.attentionResponses).toEqual([{ decision: 'denied' }]);
+    await expect(engine.resolveAttention(started.id, pending.id, { kind: 'deny' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+    await waitForSettled(engine, started.id);
+    store.close();
+  });
+
+  it('relays clarifying input to the runtime without ever changing the frozen spec or envelope (AC5)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request', attentionMethod: 'thread/requestClarification' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+    expect(pending.kind).toBe('input');
+    const frozenSpec = started.spec;
+    const frozenEnvelope = started.envelope;
+
+    const resolved = await engine.resolveAttention(started.id, pending.id, { kind: 'input', value: 'Use TypeScript strict mode.' });
+
+    expect(fake.attentionResponses).toEqual([{ value: 'Use TypeScript strict mode.' }]);
+    expect(resolved.spec).toEqual(frozenSpec);
+    expect(resolved.envelope).toEqual(frozenEnvelope);
+    const settled = await waitForSettled(engine, started.id);
+    expect(settled.spec).toEqual(frozenSpec);
+    expect(settled.envelope).toEqual(frozenEnvelope);
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(
+      expect.objectContaining({ kind: 'attention-resolved', decision: 'provided', input: 'Use TypeScript strict mode.' }),
+    );
+    store.close();
+  });
+
+  it('refuses to resolve an approval request with input, and an input request with approve/deny', async () => {
+    const approvalFake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store: approvalStore, repository: approvalRepo, engine: approvalEngine } = setUp(approvalFake.spawn);
+    const approvalRun = await submitPrepareAndStart(approvalEngine, approvalRepo);
+    const approvalPending = await waitForPendingAttention(approvalEngine, approvalRun.id);
+
+    await expect(approvalEngine.resolveAttention(approvalRun.id, approvalPending.id, { kind: 'input', value: 'nope' }))
+      .rejects.toThrow(InvalidRunStateError);
+    await approvalEngine.resolveAttention(approvalRun.id, approvalPending.id, { kind: 'approve' });
+    await waitForSettled(approvalEngine, approvalRun.id);
+    approvalStore.close();
+
+    const inputFake = createFakeCodexAppServer({ behavior: 'attention-request', attentionMethod: 'thread/requestClarification' });
+    const { store: inputStore, repository: inputRepo, engine: inputEngine } = setUp(inputFake.spawn);
+    const inputRun = await submitPrepareAndStart(inputEngine, inputRepo);
+    const inputPending = await waitForPendingAttention(inputEngine, inputRun.id);
+
+    await expect(inputEngine.resolveAttention(inputRun.id, inputPending.id, { kind: 'approve' }))
+      .rejects.toThrow(InvalidRunStateError);
+    await inputEngine.resolveAttention(inputRun.id, inputPending.id, { kind: 'input', value: 'ok' });
+    await waitForSettled(inputEngine, inputRun.id);
+    inputStore.close();
+  });
+
+  it('rejects resolving attention for an unknown Run and a mismatched attentionId', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'attention-request' });
+    const { store, repository, engine } = setUp(fake.spawn);
+    const started = await submitPrepareAndStart(engine, repository);
+    const pending = await waitForPendingAttention(engine, started.id);
+
+    await expect(engine.resolveAttention('does-not-exist', pending.id, { kind: 'approve' })).rejects.toThrow(RunNotFoundError);
+    await expect(engine.resolveAttention(started.id, 'wrong-attention-id', { kind: 'approve' }))
+      .rejects.toThrow(RunAttentionNotPendingError);
+
+    await engine.resolveAttention(started.id, pending.id, { kind: 'approve' });
+    await waitForSettled(engine, started.id);
+    store.close();
+  });
+});
+
+describe('DurableWorkEngine verification and repair (ticket 08)', () => {
+  function setUp(
+    runtimeAdapters: ConstructorParameters<typeof DurableWorkEngine>[3],
+    verificationGateRunner?: VerificationGateRunner,
+  ) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters, verificationGateRunner);
+    return { store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  function attemptStartCount(run: WorkRun): number {
+    if (run.attempt.state === 'idle') return 0;
+    return run.attempt.events.filter((event) => event.kind === 'lifecycle' && event.phase === 'attempt-started').length;
+  }
+
+  function codexAdapter(fake: ReturnType<typeof createFakeCodexAppServer>) {
+    return { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+  }
+
+  it('resolves required gates from the frozen Repository policy and reaches completed with durable command-and-result evidence once they pass (AC1/AC4)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async (gate) => ({ passed: true, exitCode: 0, evidence: `ok: ${gate.command}` });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'tests', command: 'npm test' }] });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', gate: 'tests', command: 'npm test', required: true, passed: true, exitCode: 0, evidence: 'ok: npm test',
+    }));
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'verified', repairAttempts: 0 });
+    store.close();
+  });
+
+  it('runs the requester\'s supplemental checks alongside required gates, never in place of them (AC3)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const seen: string[] = [];
+    const gateRunner: VerificationGateRunner = async (gate) => {
+      seen.push(gate.command);
+      return { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: ['npm run lint'] },
+    });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(seen).toEqual(['npm test', 'npm run lint']);
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', gate: 'npm run lint', required: false, passed: true,
+    }));
+    store.close();
+  });
+
+  it('hands concise failure evidence back to the same runtime and re-verifies once a repair round fixes the failing gate (AC5)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let call = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      call += 1;
+      return call === 1 ? { passed: false, exitCode: 1, evidence: 'expected 2 to equal 3' } : { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'verified', repairAttempts: 1 });
+    // A second 'attempt-started' lifecycle event proves the same runtime ran
+    // a fresh repair round in the same worktree, not that nothing happened.
+    expect(attemptStartCount(settled)).toBe(2);
+    expect(settled.attempt.events).toContainEqual(expect.objectContaining({
+      kind: 'verification-check', passed: false, evidence: 'expected 2 to equal 3',
+    }));
+    store.close();
+  });
+
+  it('produces failed_verification once repairs are exhausted, distinct from a runtime failure or a cancellation (AC6)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    expect(settled.status).not.toBe('failed');
+    expect(settled.status).not.toBe('cancelled');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({
+      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: MAX_VERIFICATION_REPAIR_ATTEMPTS,
+    });
+    expect(attemptStartCount(settled)).toBe(MAX_VERIFICATION_REPAIR_ATTEMPTS + 1);
+    store.close();
+  });
+
+  it('produces completed_unverified for an explicit no-verification declaration, never plain success (AC7)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake));
+    // registerGitRepository already declares no-verification by default.
+    const prepared = await submitAndPrepare(engine, repository);
+    expect(prepared.verificationPolicy).toEqual({ state: 'declared-unverified' });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.at(-1)).toMatchObject({ kind: 'verification-outcome', outcome: 'unverified', repairAttempts: 0 });
+    store.close();
+  });
+
+  it('blocks missing verification configuration before creating a worktree or spending runtime tokens', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    // Deliberately no setRepositoryVerificationPolicy call — no admin
+    // approval exists for this Repository at all.
+    const repository: RunRepository = { id: repoPath, name: path.basename(repoPath), path: repoPath };
+    store.upsertRepo(repository);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(store, runsRoot, stubRuntimeReadinessSource(), codexAdapter(fake));
+    const submitted = await engine.submit({ ...workSpec(), repository, requestedBaseReference: 'main' });
+
+    await expect(engine.prepare(submitted.id)).rejects.toThrow('No verification policy is configured');
+    expect(engine.get(submitted.id)?.attempt.state).toBe('idle');
+    expect(fs.existsSync(path.join(runsRoot, submitted.id))).toBe(false);
+    expect(fake.envs).toHaveLength(0);
+    store.close();
+  });
+
+  it('never lets a later change to the Repository\'s approved policy affect an already-frozen Run — "hostile configuration change" (AC1/AC2)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const seen: string[] = [];
+    const gateRunner: VerificationGateRunner = async (gate) => {
+      seen.push(gate.command);
+      return { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'original', command: 'echo original' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'original', command: 'echo original' }] });
+
+    // A later (or hostile) change to the Repository's approved policy — even
+    // weakening it to no-verification — must never reach a Run whose policy
+    // was already frozen at prepare() time.
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'no-verification' });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(prepared.verificationPolicy).toEqual({ state: 'ready', requiredGates: [{ name: 'original', command: 'echo original' }] });
+    expect(seen).toEqual(['echo original']);
+    expect(settled.status).toBe('completed');
+    store.close();
+  });
+
+  it('stops the repair loop the moment a cancellation is observed, never fabricating a verification outcome afterward (AC9: cancellation)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let checkCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      checkCalls += 1;
+      if (runId && engineHandle) await engineHandle.cancel(runId);
+      return { passed: false, exitCode: 1, evidence: 'still broken' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'cancelled');
+    // Give the in-flight verification loop's own cancellation check a chance
+    // to observe it and return, rather than racing the assertions below.
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+
+    expect(checkCalls).toBe(1);
+    const run = engine.get(prepared.id)!;
+    expect(run.status).toBe('cancelled');
+    if (run.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(run.attempt.events.some((event) => event.kind === 'verification-outcome')).toBe(false);
+    expect(attemptStartCount(run)).toBe(1);
+    store.close();
+  });
+
+  it('kills a hung required gate after its timeout and reports it as a failing gate, eventually reaching failed_verification (AC9: timeout)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), createShellVerificationGateRunner(50));
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'hang', command: 'sleep 5' }] });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const checks = settled.attempt.events.filter((event) => event.kind === 'verification-check');
+    expect(checks.length).toBeGreaterThan(0);
+    for (const check of checks) {
+      expect(check).toMatchObject({ passed: false, evidence: expect.stringContaining('Timed out after 50ms') });
+    }
+    store.close();
+  }, 15000);
+});
+
+describe('DurableWorkEngine budgets and safe controls (ticket 09)', () => {
+  /**
+   * A `codex app-server` double that completes the handshake and then goes
+   * silent forever — no further notification, no exit — standing in for a
+   * runtime that is genuinely hung. `killed` flips true only if `kill()` is
+   * actually called, which is how these tests prove a hard limit or a
+   * cancellation really stopped the live process rather than just changing
+   * what the Run's status reads.
+   */
+  function hangingCodexSpawn(): { spawn: CodexProcessSpawner; killed: { value: boolean } } {
+    const killed = { value: false };
+    const spawn: CodexProcessSpawner = (_executable, _args, _options) => {
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(() => {
+        // Never resolves on its own — only kill() below ends this double's story.
+      });
+      let buffer = '';
+      stdin.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8');
+        let index = buffer.indexOf('\n');
+        while (index >= 0) {
+          const line = buffer.slice(0, index).trim();
+          buffer = buffer.slice(index + 1);
+          index = buffer.indexOf('\n');
+          if (!line) continue;
+          const message = JSON.parse(line) as { id?: number; method?: string };
+          if (message.method === 'initialize') {
+            stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} })}\n`);
+          } else if (message.method === 'thread/start') {
+            stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-hang-1' } } })}\n`);
+          }
+          // turn/start deliberately gets no response at all — the Attempt
+          // hangs with nothing further, exactly like a wedged provider.
+        }
+      });
+      return {
+        stdin, stdout, stderr, exited, kill: () => { killed.value = true; stdout.end(); },
+      } satisfies CodexAttemptProcess;
+    };
+    return { spawn, killed };
+  }
+
+  function setUp(
+    runtimeAdapters: ConstructorParameters<typeof DurableWorkEngine>[3],
+    verificationGateRunner?: VerificationGateRunner,
+    clock?: ConstructorParameters<typeof DurableWorkEngine>[5],
+  ) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const engine = new DurableWorkEngine(
+      store, runsRoot, stubRuntimeReadinessSource(), runtimeAdapters, verificationGateRunner, clock,
+    );
+    return { store, repository, runsRoot, engine };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  function attemptStartCount(run: WorkRun): number {
+    if (run.attempt.state === 'idle') return 0;
+    return run.attempt.events.filter((event) => event.kind === 'lifecycle' && event.phase === 'attempt-started').length;
+  }
+
+  function codexAdapter(fake: ReturnType<typeof createFakeCodexAppServer>) {
+    return { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+  }
+
+  it('kills a hanging Attempt once its wall-clock budget elapses, reaching failed_budget with durable evidence (AC1/AC3/AC7)', async () => {
+    const { spawn, killed } = hangingCodexSpawn();
+    const clock = createFakeClock();
+    const { store, repository, engine } = setUp(
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }) },
+      undefined,
+      clock,
+    );
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxWallClockMs: 5000 } });
+
+    await engine.start(prepared.id);
+    await clock.advance(5000);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'failed_budget');
+
+    expect(killed.value).toBe(true);
+    const run = engine.get(prepared.id)!;
+    if (run.attempt.state !== 'failed') throw new Error('expected failed');
+    expect(run.attempt.reason).toContain('maxWallClockMs');
+    expect(run.attempt.events.at(-1)).toMatchObject({
+      kind: 'budget-exceeded', limit: 'maxWallClockMs', configured: 5000, observed: 5000,
+    });
+    store.close();
+  });
+
+  it('never fires the wall-clock budget before it actually elapses', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const clock = createFakeClock();
+    const { store, repository, engine } = setUp(codexAdapter(fake), undefined, clock);
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxWallClockMs: 60_000 } });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    store.close();
+  });
+
+  it('stops runtime authority immediately on cancel — the live process is killed rather than left to run to completion (AC5)', async () => {
+    const { spawn, killed } = hangingCodexSpawn();
+    const { store, repository, engine } = setUp({
+      codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }),
+    });
+    const prepared = await submitAndPrepare(engine, repository);
+
+    const started = await engine.start(prepared.id);
+    expect(started.status).toBe('running');
+    // Give the fake process's handshake a chance to land durably before cancelling.
+    await vi.waitUntil(() => {
+      const run = engine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'idle' && run.attempt.events.length > 0;
+    });
+
+    const cancelled = await engine.cancel(prepared.id);
+
+    expect(cancelled.status).toBe('cancelled');
+    await vi.waitUntil(() => killed.value === true);
+    expect(killed.value).toBe(true);
+    // Cancellation preserves the worktree, events, and result history — it
+    // is only ever a status change plus stopping the live process; nothing
+    // in the durable event log is rewritten.
+    const run = engine.get(prepared.id)!;
+    expect(run.status).toBe('cancelled');
+    store.close();
+  });
+
+  it('honors budget.maxRepairAttempts instead of the default repair-cycle ceiling (AC1: Attempt count / repair cycles)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+      budget: { maxRepairAttempts: 1 },
+    });
+    expect(MAX_VERIFICATION_REPAIR_ATTEMPTS).not.toBe(1); // the test is only meaningful if this differs from the default
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    expect(settled.attempt.events.at(-1)).toMatchObject({
+      kind: 'verification-outcome', outcome: 'failed_verification', repairAttempts: 1,
+    });
+    expect(attemptStartCount(settled)).toBe(2); // initial round + exactly one repair round
+    store.close();
+  });
+
+  it('pauses at the next safe boundary — distinguishing requested from effective — and resumes to completion (AC4)', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && engineHandle) {
+        const requested = await engineHandle.pause(runId);
+        expect(requested.status).toBe('pause_requested');
+      }
+      return gateCalls === 1
+        ? { passed: false, exitCode: 1, evidence: 'not fixed yet' }
+        : { passed: true, exitCode: 0, evidence: 'ok' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'paused');
+
+    const paused = engine.get(prepared.id)!;
+    expect(paused.status).toBe('paused');
+    // Paused before the repair round starts — the effective pause is a real
+    // safe boundary, not merely "the request landed somewhere."
+    expect(attemptStartCount(paused)).toBe(1);
+    expect(gateCalls).toBe(1);
+
+    const resumed = await engine.resume(prepared.id);
+    expect(resumed.status).not.toBe('paused');
+    expect(resumed.status).not.toBe('pause_requested');
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(gateCalls).toBe(2);
+    expect(attemptStartCount(settled)).toBe(2);
+    if (settled.attempt.state === 'idle') throw new Error('expected a started Attempt');
+    const kinds = settled.attempt.events.map((event) => event.kind);
+    expect(kinds).toContain('pause-requested');
+    expect(kinds).toContain('paused');
+    expect(kinds).toContain('resumed');
+    store.close();
+  });
+
+  it('rejects pausing a Run with no live Attempt, and resuming a Run that was never paused', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const { store, repository, engine } = setUp(codexAdapter(fake));
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await expect(engine.pause(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await expect(engine.resume(prepared.id)).rejects.toThrow(InvalidRunStateError);
+    await expect(engine.pause('does-not-exist')).rejects.toThrow(RunNotFoundError);
+    store.close();
+  });
+
+  it('lets a cancellation end a paused Attempt rather than hanging forever waiting for a resume that never comes', async () => {
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    let runId: string | undefined;
+    let engineHandle: DurableWorkEngine | undefined;
+    let gateCalls = 0;
+    const gateRunner: VerificationGateRunner = async () => {
+      gateCalls += 1;
+      if (gateCalls === 1 && runId && engineHandle) await engineHandle.pause(runId);
+      return { passed: false, exitCode: 1, evidence: 'still broken' };
+    };
+    const { store, repository, engine } = setUp(codexAdapter(fake), gateRunner);
+    engineHandle = engine;
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, {
+      verificationIntent: { required: false, commands: [] },
+    });
+    runId = prepared.id;
+
+    await engine.start(prepared.id);
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'paused');
+
+    const cancelled = await engine.cancel(prepared.id);
+    expect(cancelled.status).toBe('cancelled');
+    await vi.waitUntil(() => engine.get(prepared.id)?.status === 'cancelled');
+
+    // Never resumed — the cancel alone ended it, proving the abort signal
+    // reaches an Attempt that is blocked at a paused safe boundary.
+    expect(gateCalls).toBe(1);
+    store.close();
+  }, 10_000);
+
+  it('keeps the frozen budget intact and a cancellation durable after a restart (AC6)', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const { spawn, killed } = hangingCodexSpawn();
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await firstEngine.prepare((await firstEngine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', budget: { maxWallClockMs: 3_600_000, maxRepairAttempts: 1 },
+    })).id);
+    await firstEngine.start(prepared.id);
+    await vi.waitUntil(() => {
+      const run = firstEngine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'idle' && run.attempt.events.length > 0;
+    });
+    await firstEngine.cancel(prepared.id);
+    await vi.waitUntil(() => killed.value === true);
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id)!;
+
+    // The frozen budget — including ticket 09's own maxRepairAttempts — is
+    // never reset by a restart; it is simply the already-durable WorkSpec.
+    expect(reopened.spec.budget).toEqual({ maxWallClockMs: 3_600_000, maxRepairAttempts: 1 });
+    expect(reopened.status).toBe('cancelled');
+    reopenedStore.close();
+  });
+});
+
+describe('DurableWorkEngine local commit delivery (ticket 10)', () => {
+  function setUp(verificationGateRunner?: VerificationGateRunner) {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const store = new Store(':memory:');
+    const repository = registerGitRepository(store, repoPath);
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const engine = new DurableWorkEngine(
+      store,
+      runsRoot,
+      stubRuntimeReadinessSource(),
+      { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) },
+      verificationGateRunner,
+    );
+    return {
+      store, repository, runsRoot, engine,
+    };
+  }
+
+  async function submitAndPrepare(engine: DurableWorkEngine, repository: RunRepository, overrides: Partial<WorkSpec> = {}) {
+    const submitted = await engine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', verificationIntent: { required: false, commands: [] }, ...overrides,
+    });
+    return engine.prepare(submitted.id);
+  }
+
+  async function waitForSettled(engine: DurableWorkEngine, runId: string) {
+    await vi.waitUntil(() => {
+      const run = engine.get(runId);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    return engine.get(runId)!;
+  }
+
+  const trivialRequiredGate = { kind: 'required' as const, gates: [{ name: 'ok', command: 'true' }] };
+
+  it('applies a verified Run commit to the selected Repository checkout when explicitly requested', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    const result = deriveRunResult(settled);
+    expect(result?.delivery).toMatchObject({ outcome: 'applied', repositoryPath: repository.path, branch: 'main' });
+    expect(git(repository.path, 'rev-parse', 'HEAD')).toBe(result?.commit?.sha);
+    store.close();
+  });
+
+  it('keeps a verified commit recoverable when uncommitted work collides with it, then applies it on retry', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+    // The same path the Run commit delivers — the one shape of dirt a
+    // fast-forward would actually destroy.
+    fs.writeFileSync(path.join(repository.path, 'delivered.txt'), 'mine\n');
+
+    await engine.start(prepared.id);
+    const blocked = await waitForSettled(engine, prepared.id);
+    expect(deriveRunResult(blocked)?.delivery).toMatchObject({ outcome: 'blocked' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('mine\n');
+
+    fs.unlinkSync(path.join(repository.path, 'delivered.txt'));
+    const applied = await engine.apply(prepared.id);
+    expect(deriveRunResult(applied)?.delivery).toMatchObject({ outcome: 'applied' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    store.close();
+  });
+
+  it('delivers a verified commit past uncommitted work the Run never touches', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'apply-to-repository' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'delivered.txt'), 'delivered\n');
+    fs.writeFileSync(path.join(repository.path, 'local.txt'), 'mine\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(deriveRunResult(settled)?.delivery).toMatchObject({ outcome: 'applied' });
+    expect(fs.readFileSync(path.join(repository.path, 'delivered.txt'), 'utf8')).toBe('delivered\n');
+    expect(fs.readFileSync(path.join(repository.path, 'local.txt'), 'utf8')).toBe('mine\n');
+    store.close();
+  });
+
+  it('retries verification against preserved work without rerunning the runtime', async () => {
+    let gatesPassed = false;
+    const gateRunner: VerificationGateRunner = async () => ({
+      passed: gatesPassed, exitCode: gatesPassed ? 0 : 1, evidence: gatesPassed ? 'ok' : 'not yet',
+    });
+    const { store, repository, engine } = setUp(gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxRepairAttempts: 1 } });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'fixed.txt'), 'ready\n');
+
+    await engine.start(prepared.id);
+    const failed = await waitForSettled(engine, prepared.id);
+    expect(failed.status).toBe('failed_verification');
+    const runtimeStarts = failed.attempt.state === 'idle' ? 0 : failed.attempt.events.filter((event) => (
+      event.kind === 'lifecycle' && event.phase === 'attempt-started'
+    )).length;
+
+    gatesPassed = true;
+    const verified = await engine.reverify(prepared.id);
+    expect(verified.status).toBe('completed');
+    expect(deriveRunResult(verified)?.commit).toBeDefined();
+    const startsAfterRetry = verified.attempt.state === 'idle' ? 0 : verified.attempt.events.filter((event) => (
+      event.kind === 'lifecycle' && event.phase === 'attempt-started'
+    )).length;
+    expect(startsAfterRetry).toBe(runtimeStarts);
+    store.close();
+  });
+
+  it('creates a local commit with AgentDeck identity and metadata, and the Run result reflects it, once verification passes (AC1/AC2/AC4)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const commitEvent = settled.attempt.events.find((event) => event.kind === 'commit-created');
+    expect(commitEvent).toMatchObject({ changedFiles: ['new-file.txt'], signed: false });
+    expect(git(prepared.preparation.worktreePath!, 'log', '-1', '--format=%an <%ae>')).toBe('AgentDeck <noreply@agentdeck.local>');
+    expect(git(prepared.preparation.worktreePath!, 'log', '-1', '--format=%B')).toContain(`AgentDeck-Run: ${prepared.id}`);
+
+    const result = deriveRunResult(settled);
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
+    expect(result?.commit).toMatchObject({ signed: false });
+    store.close();
+  });
+
+  it('delivers a local commit for an explicitly unverified Repository while preserving the unverified outcome', async () => {
+    const { store, repository, engine } = setUp();
+    // registerGitRepository defaults to a no-verification policy.
+    const prepared = await submitAndPrepare(engine, repository);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed_unverified');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(true);
+    expect(fs.existsSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'))).toBe(true);
+    store.close();
+  });
+
+  it('never attempts a commit once repairs are exhausted — a failed_verification Run stays uncommitted (AC1/AC7)', async () => {
+    const gateRunner: VerificationGateRunner = async () => ({ passed: false, exitCode: 1, evidence: 'still broken' });
+    const { store, repository, engine } = setUp(gateRunner);
+    store.setRepositoryVerificationPolicy(repository.id, { kind: 'required', gates: [{ name: 'tests', command: 'npm test' }] });
+    const prepared = await submitAndPrepare(engine, repository, { budget: { maxRepairAttempts: 1 } });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('failed_verification');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(false);
+    const result = deriveRunResult(settled);
+    expect(result?.commit).toBeUndefined();
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
+    store.close();
+  });
+
+  it('never attempts a commit for a Run whose requester asked only for a working tree', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository, { requestedDeliveryResult: 'working-tree' });
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created')).toBe(false);
+    expect(fs.existsSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'))).toBe(true);
+    store.close();
+  });
+
+  it('reports no-changes honestly — a verified Run that changed nothing gets no commit and an empty result, never a fabricated one (AC8: empty diff)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    expect(settled.attempt.events.some((event) => event.kind === 'commit-created' || event.kind === 'commit-failed')).toBe(false);
+    const result = deriveRunResult(settled);
+    expect(result?.changedFiles).toEqual([]);
+    expect(result?.commit).toBeUndefined();
+    store.close();
+  });
+
+  it('records a failed delivery commit durably without hiding the Run\'s own verified status (AC3/AC8: commit failure)', async () => {
+    const { store, repository, engine } = setUp();
+    store.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const prepared = await submitAndPrepare(engine, repository);
+    const worktreePath = prepared.preparation.worktreePath!;
+    fs.writeFileSync(path.join(worktreePath, 'new-file.txt'), 'hello\n');
+    // Linked worktrees share hooks with the Repository they came from —
+    // there is no separate hooks/ directory per worktree.
+    fs.writeFileSync(path.join(repository.path, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+
+    await engine.start(prepared.id);
+    const settled = await waitForSettled(engine, prepared.id);
+
+    expect(settled.status).toBe('completed');
+    if (settled.attempt.state !== 'completed') throw new Error('expected completed');
+    const failedEvent = settled.attempt.events.find((event) => event.kind === 'commit-failed');
+    expect(failedEvent).toBeDefined();
+    const result = deriveRunResult(settled);
+    expect(result?.outcome).toBe('completed');
+    expect(result?.commit).toBeUndefined();
+    expect(result?.recoveryNotes).toBeTruthy();
+    store.close();
+  });
+
+  it('keeps a created commit and its Run result durable across a restart (AC8: restart)', async () => {
+    const root = tempDir();
+    const repoPath = path.join(root, 'repo');
+    initGitRepo(repoPath);
+    const dbPath = path.join(root, 'agentdeck.db');
+    const runsRoot = path.join(root, 'runs');
+    const fake = createFakeCodexAppServer({ behavior: 'success' });
+    const adapters = { codex: createCodexAttemptAdapter({ resolveExecutable: () => '/usr/bin/fake-codex', spawn: fake.spawn }) };
+
+    const firstStore = new Store(dbPath);
+    const repository = registerGitRepository(firstStore, repoPath);
+    firstStore.setRepositoryVerificationPolicy(repository.id, trivialRequiredGate);
+    const firstEngine = new DurableWorkEngine(firstStore, runsRoot, stubRuntimeReadinessSource(), adapters);
+    const prepared = await firstEngine.prepare((await firstEngine.submit({
+      ...workSpec(), repository, requestedBaseReference: 'main', verificationIntent: { required: false, commands: [] },
+    })).id);
+    fs.writeFileSync(path.join(prepared.preparation.worktreePath!, 'new-file.txt'), 'hello\n');
+    await firstEngine.start(prepared.id);
+    await vi.waitUntil(() => {
+      const run = firstEngine.get(prepared.id);
+      return run !== undefined && run.attempt.state !== 'running' && run.attempt.state !== 'idle';
+    }, { timeout: 20_000 });
+    const beforeRestart = firstEngine.get(prepared.id)!;
+    expect(beforeRestart.status).toBe('completed');
+    firstStore.close();
+
+    const reopenedStore = new Store(dbPath);
+    const reopened = new DurableWorkEngine(reopenedStore, runsRoot).get(prepared.id)!;
+
+    expect(reopened.status).toBe('completed');
+    const result = deriveRunResult(reopened);
+    expect(result?.commit).toBeDefined();
+    expect(result?.changedFiles).toEqual(['new-file.txt']);
+    reopenedStore.close();
+  });
+});

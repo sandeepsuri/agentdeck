@@ -1,23 +1,8 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Session } from '../../types.js';
-import { TOKEN_HEADER } from '../../protocol.js';
-import { MobileWorkspace, ReflowPane, nextReflowText, sendToMobileSession } from './MobileWorkspace.js';
-
-type FetchArgs = [RequestInfo | URL, RequestInit | undefined];
-
-function fakeLocalStorage(initial: Record<string, string> = {}): Storage {
-  const store = new Map(Object.entries(initial));
-  return {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => { store.set(key, value); },
-    removeItem: (key: string) => { store.delete(key); },
-    clear: () => store.clear(),
-    key: () => null,
-    get length() { return store.size; },
-  };
-}
+import { MobileWorkspace, ReflowPane, nextReflowText } from './MobileWorkspace.js';
 
 const session: Session = {
   id: 'sess-1',
@@ -85,36 +70,8 @@ describe('ReflowPane (renders reflowed text from a reflow_text frame)', () => {
   });
 });
 
-describe('sendToMobileSession (composer → POST /api/sessions/:id/send via apiFetch)', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('POSTs to /api/sessions/:id/send through apiFetch, carrying the tailnet token header', async () => {
-    vi.stubGlobal('localStorage', fakeLocalStorage({ 'agentdeck.connection.token': 'phone-token' }));
-    const fetchMock = vi.fn<(...args: FetchArgs) => Promise<Response>>(async () => new Response(JSON.stringify({ delivered: 'typed' })));
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await sendToMobileSession(session, 'hello from the phone');
-
-    expect(result).toEqual({ delivered: 'typed' });
-    const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe(`/api/sessions/${session.id}/send`);
-    expect(init?.method).toBe('POST');
-    expect(JSON.parse(String(init?.body))).toEqual({ text: 'hello from the phone' });
-    expect(init?.headers).toMatchObject({ [TOKEN_HEADER]: 'phone-token' });
-  });
-
-  it('throws with the server-provided error when the send fails', async () => {
-    vi.stubGlobal('localStorage', fakeLocalStorage());
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'session has ended' }), { status: 409 })));
-
-    await expect(sendToMobileSession(session, 'hi')).rejects.toThrow('session has ended');
-  });
-});
-
 describe('MobileWorkspace (static render)', () => {
-  it('shows a session picker instead of the composer when no session is selected', () => {
+  it('shows the managed-session drawer and an empty state instead of the composer when no session is selected', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -124,11 +81,13 @@ describe('MobileWorkspace (static render)', () => {
       wsReady: false,
     }));
     expect(html).toContain('Select a session');
+    expect(html).toContain('Managed sessions');
+    expect(html).toContain('Open sessions');
     expect(html).toContain(session.id);
     expect(html).not.toContain('Message the agent');
   });
 
-  it('renders the composer for a live session and hides it for an ended one', () => {
+  it('offers shared chat for both live and ended sessions', () => {
     const live = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -137,7 +96,9 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(live).toContain('Message the agent');
+    expect(live).toContain('Message everyone');
+    expect(live).toContain('Mention @agent');
+    expect(live).toContain('Session view');
 
     const ended = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
@@ -147,10 +108,10 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(ended).not.toContain('Message the agent');
+    expect(ended).toContain('Message everyone');
   });
 
-  it('renders ticket 14\'s control keys for a live session', () => {
+  it('keeps terminal controls out of shared chat', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -159,11 +120,11 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(html).toContain('mobile-control-keys');
-    expect(html).toContain('Ctrl-C');
+    expect(html).not.toContain('mobile-control-keys');
+    expect(html).toContain('>Terminal<');
   });
 
-  it('renders [1] Yes and [2] No actions while the agent is waiting for input', () => {
+  it('keeps agent input out of ordinary chat while waiting for input', () => {
     const html = renderToStaticMarkup(createElement(MobileWorkspace, {
       onError: () => undefined,
       onSelect: () => undefined,
@@ -172,8 +133,56 @@ describe('MobileWorkspace (static render)', () => {
       ws: null,
       wsReady: true,
     }));
-    expect(html).toContain('[1] Yes');
-    expect(html).toContain('[2] No');
+    expect(html).not.toContain('[1] Yes');
+    expect(html).toContain('Message everyone');
+  });
+
+  it('shows nothing Run-attention-related when the queue is empty (default prop)', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+    }));
+    expect(html).not.toContain('mobile-run-attention-card');
+  });
+
+  it('renders an approval-kind Run attention card with Approve/Deny, independent of any selected session', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: null,
+      sessions: [],
+      ws: null,
+      wsReady: false,
+      runAttention: [{
+        runId: 'run-1', attentionId: 'attention-1', objective: 'Fix the flaky test', kind: 'approval',
+        reason: 'Approve command: rm -rf node_modules', requestedAt: '2026-09-01T00:00:00.000Z',
+      }],
+    }));
+
+    expect(html).toContain('Run approval needed');
+    expect(html).toContain('Fix the flaky test');
+    expect(html).toContain('Approve command: rm -rf node_modules');
+    expect(html).toContain('Approve');
+    expect(html).toContain('Deny');
+  });
+
+  it('renders an input-kind Run attention card with a text field instead of Approve/Deny', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined,
+      onSelect: () => undefined,
+      session: null,
+      sessions: [],
+      ws: null,
+      wsReady: false,
+      runAttention: [{
+        runId: 'run-1', attentionId: 'attention-1', objective: 'Fix the flaky test', kind: 'input',
+        reason: 'What test framework should this use?', requestedAt: '2026-09-01T00:00:00.000Z',
+      }],
+    }));
+
+    expect(html).toContain('Run input needed');
+    expect(html).toContain('What test framework should this use?');
+    expect(html).toContain('Clarifying input');
+    expect(html).not.toContain('Run approval needed');
   });
 
   it('filters external sessions and refuses to render a stale external selection', () => {
@@ -189,5 +198,35 @@ describe('MobileWorkspace (static render)', () => {
     expect(html).toContain(session.id);
     expect(html).not.toContain(externalSession.id);
     expect(html).not.toContain('Message the agent');
+  });
+
+  // The dispatch itself. Everything above this point is the admin-phone tree,
+  // which a resolved collaborator device must never see: it is built around
+  // Sessions, and app.ts refuses that device GET /api/sessions outright.
+  it('renders the session tree for the ordinary admin phone (no collaboratorPrincipal)', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+    }));
+    expect(html).toContain('Select a session');
+    expect(html).not.toContain('Your repositories');
+  });
+
+  it('renders the repo-scoped Collaborator workspace, never the session tree, for a resolved collaborator device', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+      collaboratorPrincipal: { id: 'collab-1', displayName: 'Alice' },
+    }));
+    expect(html).toContain('Your repositories');
+    expect(html).toContain('Signed in as Alice');
+    expect(html).not.toContain('Select a session');
+    expect(html).not.toContain('Managed sessions');
+  });
+
+  it('shows a collaborator device with no granted Repositories where to go, rather than an empty session drawer', () => {
+    const html = renderToStaticMarkup(createElement(MobileWorkspace, {
+      onError: () => undefined, onSelect: () => undefined, session: null, sessions: [], ws: null, wsReady: false,
+      collaboratorPrincipal: { id: 'collab-1', displayName: 'Alice' },
+    }));
+    expect(html).toContain('No Repositories have been granted to you');
   });
 });

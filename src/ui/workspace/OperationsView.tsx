@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { AgentMessage, Conflict, Repo, Session } from '../../types.js';
+import type { AgentMessage, Conflict, DiscoveryStatus, Repo, Session } from '../../types.js';
 import { apiFetch } from '../apiFetch.js';
 import { ElapsedTime, SparkBars, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
@@ -15,8 +15,10 @@ interface Props {
   selected: Session | null;
   events: AgentMessage[];
   conflicts: Conflict[];
+  discoveryStatus: DiscoveryStatus | null;
   onSelect: (session: Session) => void;
   onOpenTerminal: (session: Session) => void;
+  onRefreshDiscovery: () => void;
 }
 
 function useRepoChanges(repoPath: string | undefined) {
@@ -71,28 +73,30 @@ function ExpandedOperation({ session, events, onOpenTerminal }: {
       <header className="operation-card-header">
         <StatusLamp pulse={session.status === 'waiting_input' || session.status === 'working'} status={session.status} />
         <strong>{sessionLabel(session)}</strong>
-        {session.status === 'waiting_input' && <span className="input-required-tag">Input required</span>}
         <span className="operation-meta">{session.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} · PID {session.pid ?? '—'} · {session.tty ?? 'PTY'}</span>
         <StatusBadge status={session.status} />
       </header>
-      <div className="operation-card-grid">
-        <Trace events={events} session={session} />
-        <div className="operation-tree">
-          <div className="micro-heading">Working tree · {changes.length} files</div>
-          {changes.length === 0 && <div className="trace-empty">Working tree clean</div>}
-          {changes.slice(0, 4).map((file) => (
-            <div className="tree-file" key={file.path}>
-              <span title={file.path}>{file.path}</span>
-              <small><em>+{file.additions}</em> <i>−{file.deletions}</i></small>
-            </div>
-          ))}
+      <details className="operation-card-detail">
+        <summary>Show technical detail</summary>
+        <div className="operation-card-grid">
+          <Trace events={events} session={session} />
+          <div className="operation-tree">
+            <div className="micro-heading">Working tree · {changes.length} files</div>
+            {changes.length === 0 && <div className="trace-empty">Working tree clean</div>}
+            {changes.slice(0, 4).map((file) => (
+              <div className="tree-file" key={file.path}>
+                <span title={file.path}>{file.path}</span>
+                <small><em>+{file.additions}</em> <i>−{file.deletions}</i></small>
+              </div>
+            ))}
+          </div>
+          <div className="operation-gauges">
+            <Metric label="Activity" value={relativeTime(session.lastActivityAt)} seed={4} />
+            <Metric label="Elapsed" value={<ElapsedTime startedAt={session.startedAt} />} seed={6} />
+            <Metric label="Files" value={`+${additions} −${deletions}`} seed={8} />
+          </div>
         </div>
-        <div className="operation-gauges">
-          <Metric label="Activity" value={relativeTime(session.lastActivityAt)} seed={4} />
-          <Metric label="Elapsed" value={<ElapsedTime startedAt={session.startedAt} />} seed={6} />
-          <Metric label="Files" value={`+${additions} −${deletions}`} seed={8} />
-        </div>
-      </div>
+      </details>
       {session.status === 'waiting_input' && (
         <div className="attention-banner">
           <span className="attention-icon">△</span>
@@ -113,7 +117,11 @@ function Metric({ label, value, seed }: { label: string; value: ReactNode; seed:
   );
 }
 
-export function OperationsView({ sessions, repos, selected, events, conflicts, onSelect, onOpenTerminal }: Props) {
+function RescanButton({ polling, onRefresh }: { polling: boolean; onRefresh: () => void }) {
+  return <button className="button" disabled={polling} onClick={onRefresh} type="button">{polling ? 'Scanning terminals…' : 'Rescan terminals'}</button>;
+}
+
+export function OperationsView({ sessions, repos, selected, events, conflicts, discoveryStatus, onSelect, onOpenTerminal, onRefreshDiscovery }: Props) {
   const groups = useMemo(() => {
     const byRepo = new Map<string, Session[]>();
     for (const session of sessions) {
@@ -129,9 +137,9 @@ export function OperationsView({ sessions, repos, selected, events, conflicts, o
 
   return (
     <section className="workspace-scroll operations-view">
-      <div className="view-heading">
-        <h1>Operations</h1>
-        <span>{sessions.filter((session) => !['completed', 'exited'].includes(session.status)).length} active processes across {groups.length} repositories</span>
+      <div className="view-heading operations-heading">
+        <span className="view-heading-copy"><h1>Operations</h1><span>{sessions.filter((session) => !['completed', 'exited'].includes(session.status)).length} active processes across {groups.length} repositories</span></span>
+        <RescanButton onRefresh={onRefreshDiscovery} polling={Boolean(discoveryStatus?.polling)} />
       </div>
       {groups.map((group) => {
         const repoConflicts = conflicts.filter((conflict) => conflict.repoId === group.path);
@@ -157,7 +165,7 @@ export function OperationsView({ sessions, repos, selected, events, conflicts, o
           </section>
         );
       })}
-      {groups.length === 0 && <div className="empty-workspace"><strong>No sessions are running</strong><span>Launch an agent or rescan your terminals to populate Operations.</span></div>}
+      {groups.length === 0 && <div className="empty-workspace"><strong>No sessions are running</strong><span>Launch an agent or rescan your terminals to populate Operations.</span><RescanButton onRefresh={onRefreshDiscovery} polling={Boolean(discoveryStatus?.polling)} /></div>}
     </section>
   );
 }

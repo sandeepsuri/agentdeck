@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  RUNTIME_CAPABILITY_LABELS,
+  type RuntimeReadinessReport,
+  type RuntimeReadinessStatus,
+} from '../../sessions/runtime-readiness-contract.js';
 import type { AgentType, Repo, Session } from '../../types.js';
 import { apiFetch } from '../apiFetch.js';
+import './LaunchModal.css';
 
 interface EnvRow { key: string; value: string }
 type PermissionMode = 'default' | 'acceptEdits' | 'plan';
@@ -21,6 +27,12 @@ const PERMISSIONS: { value: PermissionMode; label: string; icon: string; descrip
   { value: 'acceptEdits', label: 'Auto-edit', icon: '✎', description: 'Edit files without asking' },
   { value: 'plan', label: 'Plan', icon: '☰', description: 'Plan first, wait for approval' },
 ];
+
+const READINESS_LABELS: Record<RuntimeReadinessStatus, string> = {
+  managed: 'Managed runs ready',
+  'compatibility-only': 'Compatibility sessions only',
+  unavailable: 'Unavailable',
+};
 
 function parseEnvFile(contents: string): EnvRow[] {
   return contents.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#') && line.includes('=')).map((line) => {
@@ -43,9 +55,24 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadinessReport | null>(null);
+  const [readinessFailed, setReadinessFailed] = useState(false);
   const envFileRef = useRef<HTMLInputElement | null>(null);
   const cwd = workspaceMode === 'repo' ? repoPath : freePath.trim();
   const selectedRepo = repos.find((repo) => repo.path === repoPath);
+  const selectedRuntimeReadiness = runtimeReadiness?.runtimes.find((item) => item.runtime === agent);
+
+  useEffect(() => {
+    let disposed = false;
+    apiFetch('/api/runtime-readiness')
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Readiness check failed (${response.status})`);
+        return response.json() as Promise<RuntimeReadinessReport>;
+      })
+      .then((body) => { if (!disposed) setRuntimeReadiness(body); })
+      .catch(() => { if (!disposed) setReadinessFailed(true); });
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -121,7 +148,15 @@ export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
             <fieldset>
               <legend>01 · Agent</legend>
               <div className="agent-options">
-                {(['claude', 'codex'] as const).map((option) => <button className={agent === option ? 'is-selected' : ''} key={option} onClick={() => setAgent(option)} type="button"><span>{option === 'claude' ? '⚡' : '✦'}</span><strong>{option === 'claude' ? 'Claude Code' : 'Codex CLI'}<small>{option} · {option === 'claude' ? 'anthropic' : 'openai'}</small></strong></button>)}
+                {(['claude', 'codex'] as const).map((option) => {
+                  const readiness = runtimeReadiness?.runtimes.find((item) => item.runtime === option);
+                  return <button className={agent === option ? 'is-selected' : ''} data-runtime-status={readiness?.status ?? 'checking'} key={option} onClick={() => setAgent(option)} type="button"><span>{option === 'claude' ? '⚡' : '✦'}</span><strong>{option === 'claude' ? 'Claude Code' : 'Codex CLI'}<small>{option} · {option === 'claude' ? 'anthropic' : 'openai'}</small><em>{readiness ? READINESS_LABELS[readiness.status] : readinessFailed ? 'Readiness unavailable' : 'Checking readiness…'}</em></strong></button>;
+                })}
+              </div>
+              <div aria-live="polite" className={`runtime-readiness-detail status-${selectedRuntimeReadiness?.status ?? 'checking'}`}>
+                <strong>{selectedRuntimeReadiness ? READINESS_LABELS[selectedRuntimeReadiness.status] : readinessFailed ? 'Readiness unavailable' : 'Checking managed-run readiness…'}</strong>
+                <p>{selectedRuntimeReadiness?.reason ?? (readinessFailed ? 'AgentDeck could not inspect this runtime. Existing Session launch remains available.' : 'Inspecting the installed CLI without starting a Run.')}</p>
+                {selectedRuntimeReadiness && selectedRuntimeReadiness.capabilities.length > 0 && <div className="runtime-capabilities">{selectedRuntimeReadiness.capabilities.map((item) => <span className={item.supported ? 'is-supported' : 'is-missing'} key={item.capability}><i>{item.supported ? '✓' : '×'}</i><b>{RUNTIME_CAPABILITY_LABELS[item.capability]}</b>{item.reason && <small>{item.reason}</small>}</span>)}</div>}
               </div>
             </fieldset>
 

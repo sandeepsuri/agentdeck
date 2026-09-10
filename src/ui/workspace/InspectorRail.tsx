@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentMessage, Conflict, Session } from '../../types.js';
 import type { Model } from '../../sessions/model-catalog.js';
 import { apiFetch } from '../apiFetch.js';
@@ -22,17 +22,31 @@ function Meta({ label, value, mono = true }: { label: string; value: string; mon
 function MessageSelected({ session, onError }: { session: Session; onError: (message: string) => void }) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(false);
+  const sessionIdRef = useRef(session.id);
+  sessionIdRef.current = session.id;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   const send = async () => {
     if (!text.trim() || busy) return;
+    const sessionId = session.id;
     setBusy(true);
     try {
-      const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/send`, {
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: text.trim() }),
       });
       const body = await response.json() as { error?: string };
+      if (!mountedRef.current || sessionIdRef.current !== sessionId) return;
       if (!response.ok) onError(body.error ?? 'Message failed.'); else setText('');
-    } catch { onError('Message failed.'); }
-    setBusy(false);
+    } catch {
+      if (mountedRef.current && sessionIdRef.current === sessionId) onError('Message failed.');
+    } finally {
+      if (mountedRef.current && sessionIdRef.current === sessionId) setBusy(false);
+    }
   };
   return (
     <div className="rail-message-box">
@@ -182,13 +196,16 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
           <>
             <Meta label="Agent" value={selected.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} />
             <div className="inspector-meta"><span>State</span><StatusBadge status={selected.status} /></div>
-            <Meta label="PID" value={String(selected.pid ?? '—')} />
-            <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
             <Meta label="Directory" value={selected.cwd} />
             <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
             {isEndedSession(selected) && selected.endedAt && (
               <Meta label="Ended" value={new Date(selected.endedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} />
             )}
+            <details className="rail-technical-detail">
+              <summary>Technical detail</summary>
+              <Meta label="PID" value={String(selected.pid ?? '—')} />
+              <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
+            </details>
             <div className="inspector-section-label inner">Runtime</div>
             <div className="runtime-rail-metric"><span>Activity · <ElapsedTime startedAt={selected.startedAt} /></span><SparkBars count={24} seed={7} /></div>
             <div className="runtime-rail-metric"><span>Session events · {events.filter((event) => event.sessionId === selected.id || event.repo === repoPathOf(selected)).length}</span><SparkBars count={24} seed={9} /></div>
@@ -234,10 +251,13 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
         <>
           <Meta label="Agent" value={selected.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} />
           <Meta label="Origin" value={selected.origin} />
-          <Meta label="PID" value={String(selected.pid ?? '—')} />
-          <Meta label="TTY" value={selected.tty ?? '—'} />
           <Meta label="Worktree" value={selected.cwd.split('/').pop() ?? selected.cwd} />
           <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
+          <details className="rail-technical-detail">
+            <summary>Technical detail</summary>
+            <Meta label="PID" value={String(selected.pid ?? '—')} />
+            <Meta label="TTY" value={selected.tty ?? '—'} />
+          </details>
           <button className="button open-terminal-button" onClick={() => onView('terminal')} type="button"><span>&gt;_</span> Open in terminal</button>
         </>
       ) : <div className="rail-empty">Select a session to inspect it.</div>}
@@ -257,7 +277,7 @@ export function InspectorRail({ view, selected, events, conflicts, onView, onAct
           process left to receive it (ticket 04). */}
       {selected && (isEndedSession(selected)
         ? <div className="rail-empty">This session has ended — it can no longer receive messages.</div>
-        : <MessageSelected onError={onError} session={selected} />)}
+        : <MessageSelected key={selected.id} onError={onError} session={selected} />)}
     </aside>
   );
 }

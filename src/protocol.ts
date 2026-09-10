@@ -50,6 +50,11 @@ export interface VsCodeTerminalFrame {
   processId: number;
 }
 
+/** Ticket 07: the same three decisions the REST /api/runs/:id/attention/:attentionId/{approve,deny,input} routes accept, over WS instead. */
+export type RunAttentionResolveFrame =
+  | { t: 'run_attention_resolve'; runId: string; attentionId: string; decision: 'approve' | 'deny' }
+  | { t: 'run_attention_resolve'; runId: string; attentionId: string; decision: 'input'; value: string };
+
 export type ClientFrame =
   | { t: 'attach'; sessionId: string }
   | { t: 'input'; sessionId: string; data: string }
@@ -57,7 +62,8 @@ export type ClientFrame =
   | { t: 'vscode_register'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_terminals'; windowId: string; terminals: VsCodeTerminalFrame[] }
   | { t: 'vscode_result'; requestId: string; ok: boolean; error?: string }
-  | { t: 'ui_presence'; visible: boolean };
+  | { t: 'ui_presence'; visible: boolean }
+  | RunAttentionResolveFrame;
 
 export type ServerFrame =
   | { t: 'replay'; sessionId: string; data: string }
@@ -132,6 +138,21 @@ export function parseClientFrame(raw: string): ClientFrame | null {
         : null;
     case 'ui_presence':
       return typeof f.visible === 'boolean' ? { t: 'ui_presence', visible: f.visible } : null;
+    case 'run_attention_resolve': {
+      if (typeof f.runId !== 'string' || f.runId.length === 0 || f.runId.length > MAX_ID_LENGTH) return null;
+      if (typeof f.attentionId !== 'string' || f.attentionId.length === 0 || f.attentionId.length > MAX_ID_LENGTH) return null;
+      if (f.decision === 'approve' || f.decision === 'deny') {
+        return {
+          t: 'run_attention_resolve', runId: f.runId, attentionId: f.attentionId, decision: f.decision,
+        };
+      }
+      if (f.decision === 'input' && typeof f.value === 'string' && f.value.length > 0 && f.value.length <= MAX_INPUT_LENGTH) {
+        return {
+          t: 'run_attention_resolve', runId: f.runId, attentionId: f.attentionId, decision: 'input', value: f.value,
+        };
+      }
+      return null;
+    }
     default:
       return null;
   }

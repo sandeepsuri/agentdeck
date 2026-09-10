@@ -69,6 +69,153 @@ export interface Session {
   agentSessionId?: string;
 }
 
+/**
+ * The Collaborator-safe projection of a Session, produced by
+ * server/collaborator-session-view.ts. Declared here, beside Session, so the
+ * mobile client can import the shape it actually receives rather than the
+ * admin-shaped Session it does not.
+ *
+ * Everything that describes the operator's machine rather than the work is
+ * absent by construction: cwd, worktreePath, pid, tty, terminalApp,
+ * tmuxTarget, backend, launchSpec, and the agent's own CLI session id.
+ */
+export interface CollaboratorSession {
+  id: string;
+  origin: SessionOrigin;
+  agent: AgentType;
+  name?: string;
+  /** The granted Repository this Session belongs to — the field every grant check is made against. */
+  repoId: string;
+  branch?: string;
+  status: SessionStatus;
+  statusSource: StatusSource;
+  startedAt: string;
+  lastActivityAt: string;
+  endedAt?: string;
+}
+
+/** One turn of a Session's conversation as a Collaborator sees it — never the raw bus row. */
+export interface CollaboratorSessionMessage {
+  ts: string;
+  /** Who said it: 'human' for anything sent through AgentDeck's composer, 'agent' for the session's own output. */
+  author: 'human' | 'agent';
+  /** 'done' marks a completion summary, 'message' ordinary conversation. */
+  event: 'message' | 'done';
+  text: string;
+}
+
+export type ChatAuthorKind = 'human' | 'agent';
+/** Where a posted message goes: 'chat' means every participant sees it and the agent never does; 'agent' means it was (or will be) delivered to the runtime too. */
+export type ChatAudience = 'chat' | 'agent';
+/** The outcome of attempting to deliver an audience:'agent' message — see docs/specs/shared-session-chat.md's "Delivery and simultaneous use". */
+export type ChatDeliveryState = 'sent' | 'queued' | 'not_sent';
+
+/**
+ * One entry in a Session's shared chat feed (server/session-conversation.ts),
+ * attributed to a real sender rather than collapsed into "human" — the
+ * redesign this type exists for: a Session shared by several collaborators
+ * previously reduced every human message to "You" (CollaboratorSessionMessage
+ * above), regardless of who actually sent it.
+ */
+export interface SessionChatMessage {
+  id: string;
+  ts: string;
+  authorKind: ChatAuthorKind;
+  /** A named collaborator's or the local admin's Principal id — absent for the legacy shared-token path and for the agent's own turns, never guessed. */
+  principalId?: string;
+  displayName: string;
+  /** The message exactly as its author wrote it — an @agent mention is never stripped from what other participants see, only from the delivery payload. */
+  text: string;
+  /** Present on human rows only. */
+  audience?: ChatAudience;
+  /** Present on agent rows only — 'done' marks a completion summary, 'message' ordinary conversation. */
+  event?: 'message' | 'done';
+  /** Present only on a human row addressed to the agent (audience: 'agent'). */
+  delivery?: ChatDeliveryState;
+  /** Present only when delivery is 'not_sent' — reader-facing, never an admin instruction. */
+  deliveryReason?: string;
+}
+
+export interface SessionInteractionChoice {
+  id: string;
+  label: string;
+  description?: string;
+  questionId?: string;
+  multiple?: boolean;
+}
+
+export type SessionInteractionResponse =
+  | { kind: 'answer'; answers: Record<string, string[]> }
+  | { kind: 'approval'; decision: 'approve' | 'deny' };
+
+export interface SessionInteraction {
+  id: string;
+  kind: 'question' | 'approval';
+  question: string;
+  choices: SessionInteractionChoice[];
+  context?: string;
+  allowsFreeText: boolean;
+  requestedAt: string;
+  status: 'pending' | 'resolved' | 'expired';
+  response?: SessionInteractionResponse;
+  responderPrincipalId?: string;
+  responderDisplayName?: string;
+  resolvedAt?: string;
+  canRespond: boolean;
+  unavailableReason?: string;
+}
+
+export type SessionProcessingState =
+  | 'delivery_pending'
+  | 'working'
+  | 'waiting_answer'
+  | 'waiting_approval'
+  | 'finished'
+  | 'failed'
+  | 'disconnected'
+  | 'idle';
+
+export interface SessionInteractionsView {
+  providerSupport: 'supported' | 'unavailable';
+  providerReason?: string;
+  processingState: SessionProcessingState;
+  processingReason?: string;
+  interactions: SessionInteraction[];
+}
+
+/**
+ * One durably posted, plain-text Task/Run comment (server/run-feedback.ts,
+ * docs/specs/run-feedback-review.md, B07) — deliberately parallel to
+ * SessionChatMessage above but independent of it: keyed by Task rather than
+ * Session, and with no runtime delivery, mention parsing, or agent-turn
+ * half at all. Never routed to a runtime. Ticket 71 (B09): a review
+ * decision IS built on this same row (via `reviewDecision` below),
+ * deliberately — see work-engine/run-review.ts's own header for why.
+ */
+export interface RunFeedbackEntry {
+  id: string;
+  taskId: string;
+  runId: string;
+  sequence: number;
+  postedAt: string;
+  /** A named collaborator's or the local admin's Principal id — absent for the legacy shared-token path, never guessed. */
+  principalId?: string;
+  displayName: string;
+  text: string;
+  /** Ticket 71 (B09): present only when this entry is a review decision, not an ordinary comment — the same durable row, one more field. Never a second table. */
+  reviewDecision?: ReviewDecision;
+}
+
+/** Ticket 71 (B09): the two decisions a reviewer can tag onto a RunFeedbackEntry — one canonical alias, reused by the store, server, and UI layers rather than each retyping this same literal union. */
+export type ReviewDecision = 'changes_requested' | 'reviewed';
+
+/** Whether a Collaborator's composer can reach this Session, and why not when it cannot. */
+export interface CollaboratorSessionCapabilities {
+  send: 'managed' | 'queued' | 'unavailable';
+  /** Present only when `send` is 'unavailable' — reader-facing, never an admin instruction. */
+  reason?: string;
+}
+
 export interface LaunchSpec {
   agent: AgentType;
   cwd: string;
@@ -97,6 +244,8 @@ export interface Repo {
 export interface Task {
   id: string;
   title: string;
+  objective?: string;
+  acceptanceCriteria?: string[];
   repoId?: string;
   status: 'todo' | 'in_progress' | 'blocked' | 'done';
   dependsOn?: string[]; // task ids — readiness signalling
@@ -117,7 +266,8 @@ export interface AgentMessage {
     | 'done'
     | 'message'
     | 'session_start'
-    | 'session_end';
+    | 'session_end'
+    | 'failed';
   task?: string;
   status?: SessionStatus;
   files?: string[]; // paths being modified (claims)
@@ -149,10 +299,24 @@ export interface AttentionItem {
   branch?: string;
 }
 
+/** Ticket 07: a managed Run's runtime approval/input request awaiting an operator decision. */
+export type RunAttentionKind = 'approval' | 'input';
+
+export interface RunAttentionItem {
+  runId: string;
+  /** The stable correlation every resolve command (REST, WS, local UI, mobile UI) references — see work-engine/types.ts's RunAttentionRequest.id. */
+  attentionId: string;
+  objective: string;
+  kind: RunAttentionKind;
+  reason: string;
+  requestedAt: string;
+}
+
 export interface CompanionSnapshot {
   sessions: Session[];
   attention: AttentionItem[];
   agents: CompanionAgent[];
+  runAttention: RunAttentionItem[];
   uiVisible: boolean;
 }
 

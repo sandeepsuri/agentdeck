@@ -7,10 +7,17 @@ import type { Repo } from '../types.js';
 
 const execFileAsync = promisify(execFile);
 
-export async function git(cwd: string, args: string[]): Promise<string> {
+export interface GitOptions {
+  /** Overrides the process environment `git` runs with — e.g. work-engine/commit.ts's author/committer identity env vars. Defaults to the current process's own. */
+  readonly env?: NodeJS.ProcessEnv;
+  readonly timeoutMs?: number;
+}
+
+export async function git(cwd: string, args: string[], options: GitOptions = {}): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
-    timeout: 10_000,
+    timeout: options.timeoutMs ?? 10_000,
+    ...(options.env ? { env: options.env } : {}),
   });
   return stdout.trim();
 }

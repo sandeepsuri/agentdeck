@@ -14,7 +14,47 @@ import { TOKEN_HEADER, TOKEN_QUERY_PARAM } from '../protocol.js';
 
 export type ConnectionKind = 'local' | 'remote' | 'denied';
 export type Capability = 'view' | 'compose' | 'control-keys' | 'raw-write';
-export interface TrustResult { kind: ConnectionKind; capabilities: Set<Capability> }
+
+/** Ticket 11 AC3: the named Principal and device a remote request's bearer token resolved to, when it matched a collaborator's device credential rather than the single shared tailnet token. */
+export interface RemoteDevice {
+  readonly id: string;
+  /** Ticket 12 AC2: the human-readable device label recorded on every RunActivity row this device's actions produce — never just an opaque device id. */
+  readonly label: string;
+  readonly principal: { readonly id: string; readonly displayName: string };
+  /** Repository ids this Principal may view (ticket 11 AC4) and, together with grantedProfileIds, launch and guide Runs on (ticket 12 AC1) — routes filter by this, never by capabilities alone. */
+  readonly grantedRepositoryIds: readonly string[];
+  /** Ticket 12 AC1: admin-approved Profile ids this Principal may submit a Run against. */
+  readonly grantedProfileIds: readonly string[];
+}
+
+export interface TrustResult {
+  kind: ConnectionKind;
+  capabilities: Set<Capability>;
+  /** Set only for a remote connection authenticated via a named collaborator's device credential — undefined for local and for the legacy shared-token path (see classify()'s `deviceLookup` opt). */
+  device?: RemoteDevice;
+}
+
+/**
+ * Ticket 12 AC1/AC7: index.ts (REST) and ws.ts (WebSocket) both need to
+ * turn a resolved `RemoteDevice` into the work-engine/types.ts `RunActor`
+ * shape DurableWorkEngine's mutating methods accept, so the exact same
+ * policy enforcement applies regardless of transport. Defined structurally
+ * here (not importing work-engine/types.ts's RunActor type) to keep this
+ * module's own dependency graph minimal, same reasoning as the header
+ * comment above — TS's structural typing still makes the result directly
+ * assignable at both call sites.
+ */
+export function toRunActor(device: RemoteDevice): {
+  principal: { id: string; displayName: string };
+  device: { id: string; label: string };
+  grants: { repositoryIds: readonly string[]; profileIds: readonly string[] };
+} {
+  return {
+    principal: device.principal,
+    device: { id: device.id, label: device.label },
+    grants: { repositoryIds: device.grantedRepositoryIds, profileIds: device.grantedProfileIds },
+  };
+}
 
 // Re-exported from protocol.ts (not defined here) so the browser bundle can
 // import these two constants (src/ui/connection.ts) without pulling
@@ -104,7 +144,18 @@ function tokensMatch(a: string | undefined, b: string | undefined): boolean {
  */
 export function classify(
   input: { host?: string; origin?: string; token?: string },
-  opts: { remoteHosts?: readonly string[]; token?: string },
+  opts: {
+    remoteHosts?: readonly string[];
+    token?: string;
+    /**
+     * Ticket 11: resolves a bearer token against named collaborators' device
+     * credentials (collaborators/service.ts's CollaboratorService.resolveDevice),
+     * tried only when the token didn't already match the legacy shared
+     * `opts.token`. Omitted by every existing caller/test, so the shared-token
+     * path above is completely unchanged when this isn't passed.
+     */
+    deviceLookup?: (token: string) => RemoteDevice | undefined;
+  },
 ): TrustResult {
   const denied: TrustResult = { kind: 'denied', capabilities: new Set() };
 
@@ -118,8 +169,12 @@ export function classify(
     // Missing/wrong token (or no token configured yet) is "remote, no
     // capabilities" — this is the state the client's token-entry screen
     // needs to detect (GET /api/connection), not a hard denial.
-    const authenticated = Boolean(opts.token) && tokensMatch(input.token, opts.token);
-    return { kind: 'remote', capabilities: authenticated ? new Set(REMOTE_CAPABILITIES) : new Set() };
+    if (Boolean(opts.token) && tokensMatch(input.token, opts.token)) {
+      return { kind: 'remote', capabilities: new Set(REMOTE_CAPABILITIES) };
+    }
+    const device = input.token ? opts.deviceLookup?.(input.token) : undefined;
+    if (device) return { kind: 'remote', capabilities: new Set(REMOTE_CAPABILITIES), device };
+    return { kind: 'remote', capabilities: new Set() };
   }
 
   return denied;

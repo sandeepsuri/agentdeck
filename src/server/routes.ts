@@ -1,6 +1,7 @@
 // REST routes (T4): session CRUD/lifecycle. Terminal I/O goes over /ws.
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
 import type { AgentDeckConfig } from '../config.js';
@@ -14,12 +15,19 @@ import {
 } from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
+import {
+  createRuntimeReadinessSource,
+  publicRuntimeReadinessReport,
+  type RuntimeReadinessSource,
+} from '../sessions/runtime-readiness.js';
 import type { Store } from '../store/index.js';
 import { AutomationDeniedError, type TerminalRegistry } from '../discovery/terminals/index.js';
-import type { AgentType, LaunchSpec } from '../types.js';
+import type { AgentType, ChatDeliveryState, LaunchSpec, Session } from '../types.js';
 import type { CoordinationService } from '../coordination/service.js';
 import { deriveClaims } from '../coordination/status.js';
-import { deriveAttentionItems, deriveCompanionAgents } from '../attention.js';
+import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
+import type { RepositoryVerificationPolicy, WorkEngine } from '../work-engine/types.js';
+import type { CollaboratorService } from '../collaborators/service.js';
 import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
@@ -27,9 +35,17 @@ import { deriveConflicts } from '../conflicts/derive.js';
 import { appendAgentMessage, appendInboxMessage, parseBusLines } from '../coordination/bus.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { DiscoveryPoller } from '../discovery/poller.js';
+import {
+  collaboratorSendCapability, collaboratorSession, collaboratorSessionMessages,
+} from './collaborator-session-view.js';
+import { parseMention } from '../mentions.js';
+import { mergeConversation, resolveSenderIdentity } from './session-conversation.js';
 import { publicSession } from './security.js';
 import { classify, TOKEN_HEADER } from './connection-trust.js';
 import { containsDisallowedControlBytes } from './remote-input.js';
+import {
+  parseClaudeInteraction, projectSessionInteractions, validateInteractionResponse,
+} from './session-interactions.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
@@ -195,22 +211,69 @@ export interface RouteContext {
   publish?: GitPublishService;
   /** Ticket 12: the runtime-fetched, allowlist-filtered, cached model catalog. Undefined only in tests that don't exercise it — GET /api/models degrades to an empty list rather than erroring. */
   modelCatalog?: ModelCatalog;
+  /** Capability-only probe used by GET /api/runtime-readiness. It never starts a managed Run. */
+  runtimeReadiness?: RuntimeReadinessSource;
   /** Injectable for tests, like installVsCode above — defaults to the real config.json writer (owner-only 0600 file). Never routed through Store; the API key must never reach SQLite. */
   saveConfig?: (patch: Partial<AgentDeckConfig>) => void;
   /** Ticket 05: the detected Tailscale hostname and IP, feeding classify() for GET /api/connection. Empty/undefined when no tailnet interface was found. */
   remoteHosts?: readonly string[];
+  /** Ticket 07: feeds GET /api/companion's runAttention field. Undefined only in tests that don't exercise Runs — it degrades to an empty runAttention list rather than erroring. */
+  workEngine?: WorkEngine;
+  /** Ticket 11: feeds requestTrust's deviceLookup, so a collaborator device's request resolves to its Principal and grants. Undefined only in tests that don't exercise collaborators. */
+  collaborators?: CollaboratorService;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
+  const runtimeReadiness = ctx.runtimeReadiness ?? createRuntimeReadinessSource();
   const requestTrust = (req: FastifyRequest) => classify(
     {
       host: req.headers.host,
       origin: req.headers.origin,
       token: req.headers[TOKEN_HEADER] as string | undefined,
     },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken },
+    {
+      remoteHosts: ctx.remoteHosts,
+      token: ctx.config.tailscaleToken,
+      deviceLookup: ctx.collaborators?.resolveDevice,
+    },
   );
+
+  /**
+   * The Session half of "strictly repo-scoped". A collaborator device's
+   * Repository grant is the only thing that authorizes reading or messaging
+   * a Session, and a Session is scopable only through `repoId` -- one with
+   * none (a bare `agentdeck` shell started outside any Repository) can never
+   * be reached by a collaborator, which is why the type guard narrows
+   * `repoId` to a string rather than defaulting it.
+   *
+   * Returns undefined for local and legacy shared-token remote connections,
+   * meaning "unscoped, behave exactly as before this existed" -- the same
+   * shape scopeRepos and work-routes.ts's resolveScope already use, so all
+   * three read the same way.
+   */
+  const sessionGrant = (req: FastifyRequest) => requestTrust(req).device?.grantedRepositoryIds;
+  const isGrantedSession = (
+    session: Session,
+    granted: readonly string[],
+  ): session is Session & { repoId: string } => session.repoId !== undefined && granted.includes(session.repoId);
+
+  /**
+   * A Session outside the grant answers 404, never 403 -- the same choice
+   * work-routes.ts:96 makes for an ungranted Run, so a collaborator cannot
+   * use the difference between "forbidden" and "absent" to probe for
+   * Repositories they were never granted.
+   */
+  const requireGrantedSession = (req: FastifyRequest, reply: FastifyReply, id: string) => {
+    const session = manager.getSession(id);
+    if (!session) { reply.code(404).send({ error: 'no such session' }); return undefined; }
+    const granted = sessionGrant(req);
+    if (granted && !isGrantedSession(session, granted)) {
+      reply.code(404).send({ error: 'no such session' });
+      return undefined;
+    }
+    return session;
+  };
 
   // Ticket 05: how the client discovers "you're remote, please enter a
   // token" in the first place. Deliberately exempt from the token gate in
@@ -219,11 +282,35 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // whether to show the token-entry screen.
   app.get('/api/connection', async (req) => {
     const trust = requestTrust(req);
-    return { kind: trust.kind, capabilities: [...trust.capabilities] };
+    // Ticket 12 AC6: lets the client tell "I'm a named collaborator" apart
+    // from "I'm the admin's own phone on the legacy shared token" (same
+    // `kind: 'remote'`, same capabilities) so the mobile UI knows whether
+    // to offer launching/guiding Runs at all — never anything more
+    // sensitive than the id/displayName this device's own resolveDevice()
+    // already hands back on exchange.
+    const principal = trust.device?.principal;
+    return principal
+      ? { kind: trust.kind, capabilities: [...trust.capabilities], principal }
+      : { kind: trust.kind, capabilities: [...trust.capabilities] };
   });
+
+  app.get('/api/runtime-readiness', async () => publicRuntimeReadinessReport(await runtimeReadiness.get()));
 
   app.get('/api/sessions', async (req) => {
     const sessions = manager.listSessions();
+    // A collaborator device is scoped by grant rather than by origin. The
+    // origin filter below exists because the legacy shared-token remote path
+    // can neither attach to nor safely message an external session; a
+    // collaborator reaches a Session only through the message-list routes,
+    // which work for an external hook-backed session exactly as they do for
+    // a managed one -- so restricting them to 'managed' would hide the very
+    // agents an assigned Repository is most likely to have running.
+    const granted = sessionGrant(req);
+    if (granted) {
+      return sessions
+        .filter((session): session is Session & { repoId: string } => isGrantedSession(session, granted))
+        .map(collaboratorSession);
+    }
     return (requestTrust(req).kind === 'remote'
       ? sessions.filter((session) => session.origin === 'managed')
       : sessions).map(publicSession);
@@ -236,6 +323,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       sessions,
       attention,
       agents: deriveCompanionAgents(sessions, events, attention),
+      runAttention: deriveRunAttentionItems(ctx.workEngine?.list() ?? []),
       uiVisible: false,
     };
   });
@@ -251,6 +339,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.get('/api/settings', async () => ({
     defaultModel: ctx.store?.getSetting<string>(DEFAULT_MODEL_SETTING_KEY),
     openaiKeyConfigured: Boolean(ctx.config.openaiApiKey),
+    // Ticket 05: feature gate for the structured Codex Attempt UI — set in
+    // config.json only (see AgentDeckConfig), never through this route.
+    structuredAttemptsEnabled: Boolean(ctx.config.structuredAttemptsEnabled),
   }));
 
   app.patch('/api/settings', async (req, reply) => {
@@ -323,15 +414,84 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return session ? publicSession(session) : reply.code(404).send({ error: 'no such session' });
   });
 
-  app.get('/api/repos', async () => {
+  // Ticket 11 AC4: a collaborator device connection only sees the
+  // Repositories the admin granted it (trust.device.grantedRepositoryIds) —
+  // local and legacy-shared-token remote connections are unrestricted,
+  // exactly as before this ticket.
+  //
+  // A granted Repository is also narrowed, not merely filtered: `path` is an
+  // absolute location on the operator's machine, and `worktrees`/`dirtyFiles`
+  // describe work that has nothing to do with any Run. A Repository is a
+  // collaborator's primary navigation object now, so its payload is on the
+  // critical path rather than incidental to a one-off form. Dropping `path`
+  // is only safe because DurableWorkEngine.submit() resolves a
+  // grant-carrying actor's Repository from the store by id rather than
+  // trusting the submitted spec — see the comment there.
+  const scopeRepos = (repos: Awaited<ReturnType<typeof scanRepos>>, req: FastifyRequest) => {
+    const grantedRepositoryIds = requestTrust(req).device?.grantedRepositoryIds;
+    if (!grantedRepositoryIds) return repos;
+    return repos
+      .filter((repo) => grantedRepositoryIds.includes(repo.id))
+      .map((repo) => ({ id: repo.id, name: repo.name, ...(repo.currentBranch ? { currentBranch: repo.currentBranch } : {}) }));
+  };
+  app.get('/api/repos', async (req) => {
     if (!ctx.store) return [];
     try {
       const repos = await scanRepos(ctx.config.projectsDir, ctx.store);
       await ctx.coordination?.syncRepos(repos);
-      return repos;
+      return scopeRepos(repos, req);
     } catch {
-      return ctx.store.listRepos();
+      return scopeRepos(ctx.store.listRepos(), req);
     }
+  });
+
+  // Repository-owned verification is configured by the local admin before
+  // a Run can consume model time. These routes are intentionally absent from
+  // both remote allowlists in app.ts.
+  app.get('/api/repos/verification-policy', async (req, reply) => {
+    if (!ctx.store) return reply.code(503).send({ error: 'repository storage is unavailable' });
+    const { repoId } = req.query as { repoId?: unknown };
+    if (typeof repoId !== 'string' || !ctx.store.listRepos().some((repo) => repo.id === repoId)) {
+      return reply.code(404).send({ error: 'no such repository' });
+    }
+    return { policy: ctx.store.getRepositoryVerificationPolicy(repoId) ?? null };
+  });
+
+  app.put('/api/repos/verification-policy', async (req, reply) => {
+    if (!ctx.store) return reply.code(503).send({ error: 'repository storage is unavailable' });
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      return reply.code(400).send({ error: 'body must be a JSON object' });
+    }
+    const { repoId, policy } = req.body as { repoId?: unknown; policy?: unknown };
+    if (typeof repoId !== 'string' || !ctx.store.listRepos().some((repo) => repo.id === repoId)) {
+      return reply.code(404).send({ error: 'no such repository' });
+    }
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+      return reply.code(400).send({ error: 'policy must be required gates or an explicit no-verification declaration' });
+    }
+    const candidate = policy as { kind?: unknown; gates?: unknown };
+    let parsed: RepositoryVerificationPolicy;
+    if (candidate.kind === 'no-verification') {
+      parsed = { kind: 'no-verification' };
+    } else if (candidate.kind === 'required' && Array.isArray(candidate.gates) && candidate.gates.length > 0
+      && candidate.gates.length <= 100 && candidate.gates.every((gate) => {
+        if (!gate || typeof gate !== 'object') return false;
+        const { name, command } = gate as { name?: unknown; command?: unknown };
+        return typeof name === 'string' && name.trim().length > 0 && name.length <= 200
+          && typeof command === 'string' && command.trim().length > 0 && command.length <= 4096;
+      })) {
+      parsed = {
+        kind: 'required',
+        gates: candidate.gates.map((gate) => {
+          const { name, command } = gate as { name: string; command: string };
+          return { name: name.trim(), command: command.trim() };
+        }),
+      };
+    } else {
+      return reply.code(400).send({ error: 'required verification must include at least one valid gate' });
+    }
+    ctx.store.setRepositoryVerificationPolicy(repoId, parsed);
+    return { policy: parsed };
   });
 
   app.post('/api/launch/preflight', async (req, reply) => {
@@ -628,6 +788,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return { ok: true }; // the row is kept, marked ended
   });
 
+  // Permanently removes a session from history. Managed-only (external
+  // sessions have no stored transcript of AgentDeck's own to clean up, and
+  // reappear on the next discovery poll regardless) and live-only-blocked —
+  // an active session cannot be deleted out from under itself.
+  app.delete('/api/sessions/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (session.origin !== 'managed') {
+      return reply.code(400).send({ error: 'only managed sessions can be deleted' });
+    }
+    if (manager.isLive(id)) return reply.code(400).send({ error: 'session is still running' });
+    try {
+      await manager.deleteSession(id);
+      return { ok: true };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // Ticket 09: reopening an ended managed session. There is no WS path for
   // this — attach/replay only serve a live transcript snapshot, and an
   // ended session has no live PTY behind it — so a REST read of the
@@ -718,11 +898,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.get('/api/sessions/:id/messages', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const granted = sessionGrant(req);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const messages = await readBusTail(repoPath);
-    return messages.filter((message) => {
+    const selected = messages.filter((message) => {
       if (message.agent.startsWith('dashboard:')) {
         return message.agent === `dashboard:${session.id}` && message.event === 'message';
       }
@@ -731,12 +912,198 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return belongsToSession && (message.event === 'done' || message.event === 'message')
         && typeof message.message === 'string' && message.message.trim().length > 0;
     }).slice(-100);
+    // A bus row's `repo` is an absolute path and its `agent` embeds the agent
+    // CLI's own session id, so a collaborator device gets the narrowed
+    // conversation rather than the rows themselves.
+    return granted ? collaboratorSessionMessages(session, selected) : selected;
+  });
+
+  // The shared session chat (docs/specs/shared-session-chat.md): every human
+  // post this Session has durably recorded, attributed to who actually sent
+  // it, merged with the agent's own bus turns. Read-only counterpart to
+  // POST .../chat below; unlike /messages above it survives runtime exit and
+  // never collapses two different senders into "human".
+  app.get('/api/sessions/:id/chat', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const busMessages = await readBusTail(repoPath);
+    const humanMessages = ctx.store?.listSessionChatMessages(session.id) ?? [];
+    return mergeConversation(session, humanMessages, busMessages);
+  });
+
+  app.post('/api/provider/claude/interactions', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    if (!ctx.store) return reply.code(503).send({ error: 'interaction persistence is unavailable' });
+    const parsed = parseClaudeInteraction(req.body, manager.listSessions());
+    if (!parsed) return reply.code(404).send({ error: 'no matching Claude Session or unsupported hook request' });
+    const stored = ctx.store.upsertSessionInteraction(parsed);
+    return reply.code(201).send({ id: stored.id, status: stored.status });
+  });
+
+  app.get('/api/provider/claude/interactions/:requestId', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.provider !== 'claude') return reply.code(404).send({ error: 'no such provider request' });
+    return { status: stored.status, ...(stored.response ? { response: stored.response } : {}) };
+  });
+
+  app.post('/api/provider/claude/interactions/:requestId/acknowledge', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.provider !== 'claude') return reply.code(404).send({ error: 'no such provider request' });
+    ctx.store?.acknowledgeSessionInteractionResponse(requestId, new Date().toISOString());
+    return reply.code(204).send();
+  });
+
+  app.post('/api/provider/claude/interactions/:requestId/expire', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    ctx.store?.expireSessionInteraction(requestId);
+    return reply.code(204).send();
+  });
+
+  app.get('/api/sessions/:id/interactions', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const rows = ctx.store?.listSessionInteractions(id) ?? [];
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const events = await readBusTail(repoPath);
+    const chatMessages = ctx.store?.listSessionChatMessages(id) ?? [];
+    return projectSessionInteractions(session, rows, requestTrust(req).device === undefined, repoHasClaudeHooks(repoPath), events, chatMessages);
+  });
+
+  app.post('/api/sessions/:id/interactions/:requestId/respond', async (req, reply) => {
+    const { id, requestId } = req.params as { id: string; requestId: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.sessionId !== session.id) return reply.code(404).send({ error: 'no such pending request' });
+    const trust = requestTrust(req);
+    const safeInteraction = (value: typeof stored) => projectSessionInteractions(
+      session, [value], trust.device === undefined, true,
+    ).interactions[0];
+    if (stored.status !== 'pending') return reply.code(409).send({ error: 'This request has already been answered or is no longer active.', interaction: safeInteraction(stored) });
+    if (stored.kind === 'approval' && trust.device !== undefined) {
+      return reply.code(403).send({ error: 'An authorized local admin must approve or deny this request.' });
+    }
+    let response;
+    try {
+      response = validateInteractionResponse(stored, req.body);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+    const sender = resolveSenderIdentity(trust);
+    const won = ctx.store?.resolveSessionInteraction(requestId, {
+      response, principalId: sender.principalId, displayName: sender.displayName, resolvedAt: new Date().toISOString(),
+    });
+    const current = ctx.store?.getSessionInteraction(requestId);
+    if (!won || !current) return reply.code(409).send({ error: 'Another participant answered this request first.', ...(current ? { interaction: safeInteraction(current) } : {}) });
+    return safeInteraction(current);
+  });
+
+  app.post('/api/sessions/:id/chat', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const body = req.body as { text?: unknown } | null;
+    const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    if (!text) return reply.code(400).send({ error: 'text is required' });
+    if (text.length > MAX_MESSAGE_LENGTH) return reply.code(400).send({ error: 'text is too long' });
+
+    const trust = requestTrust(req);
+    const collaborator = trust.device !== undefined;
+    // Same protection as /send: the legacy shared tailnet token can neither
+    // attach to nor safely message an external session.
+    if (!collaborator && trust.kind === 'remote' && session.origin !== 'managed') {
+      return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
+    if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
+      return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
+    }
+
+    // Ordinary chat is stored and shown to every participant, never sent
+    // anywhere else -- see the mention parser's own module comment for why
+    // this decision is made once, the same way, for both the preview and
+    // enforcement. Only an explicit @agent mention crosses into `audience:
+    // 'agent'` below, and a mention with nothing left to ask is rejected
+    // outright rather than silently delivered as an empty prompt.
+    const mention = parseMention(text);
+    if (mention.mentioned && !mention.agentPayload) {
+      return reply.code(400).send({ error: 'Add a message for the agent.' });
+    }
+
+    const { principalId, displayName } = resolveSenderIdentity(trust);
+    const ts = new Date().toISOString();
+    const messageId = randomUUID();
+
+    if (!mention.mentioned) {
+      const stored = ctx.store?.appendSessionChatMessage({
+        id: messageId, sessionId: session.id, ts, principalId, displayName, text, audience: 'chat',
+      });
+      return reply.code(201).send(stored ?? {
+        id: messageId, ts, authorKind: 'human', principalId, displayName, text, audience: 'chat',
+      });
+    }
+
+    // audience: 'agent' -- only the two collaborator-safe delivery paths
+    // (never the terminal-automation branch /send offers the admin, which
+    // scripts the operator's own foreground terminal app) so this route
+    // behaves identically for a named collaborator and the local admin.
+    const capability = collaboratorSendCapability(session);
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const agentPayload = `${displayName}: ${mention.agentPayload}`;
+    let delivery: ChatDeliveryState;
+    let deliveryReason: string | undefined;
+
+    if (capability.send === 'managed') {
+      if (!manager.isLive(id)) {
+        delivery = 'not_sent';
+        deliveryReason = 'This agent is not running.';
+      } else {
+        manager.write(id, agentPayload);
+        // both agent TUIs debounce paste-then-submit
+        setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
+        delivery = 'sent';
+      }
+    } else if (capability.send === 'queued') {
+      await appendInboxMessage(repoPath, { ts, to: session.agentSessionId!, text: agentPayload });
+      delivery = 'queued';
+    } else {
+      delivery = 'not_sent';
+      deliveryReason = capability.reason;
+    }
+
+    // The bus row is what existing hook/scrollback tooling still reads --
+    // recorded only once delivery actually reached the runtime, exactly
+    // when /send would have recorded it, so nothing downstream regresses.
+    if (delivery === 'sent' || delivery === 'queued') {
+      await appendAgentMessage(repoPath, {
+        ts, agent: `dashboard:${session.id}`, repo: repoPath, event: 'message', message: text, sessionId: session.id,
+      });
+    }
+
+    const stored = ctx.store?.appendSessionChatMessage({
+      id: messageId, sessionId: session.id, ts, principalId, displayName, text, audience: 'agent', delivery, deliveryReason,
+    });
+    return reply.code(201).send(stored ?? {
+      id: messageId, ts, authorKind: 'human', principalId, displayName, text, audience: 'agent', delivery, deliveryReason,
+    });
   });
 
   app.get('/api/sessions/:id/capabilities', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    // A collaborator device never reaches the terminal-automation path (see
+    // POST /send below), so reporting 'terminal'/'vscode' here would promise
+    // a composer that the send route then refuses. It is told what it can
+    // actually use, and why not when the answer is nothing.
+    if (sessionGrant(req) || (req.query as { mode?: string }).mode === 'chat') return collaboratorSendCapability(session);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const replyCapture = session.agent === 'claude'
       ? repoHasClaudeHooks(repoPath)
@@ -755,8 +1122,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.post('/api/sessions/:id/send', async (req, reply) => {
     const { id } = req.params as { id: string };
-    const session = manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
     const body = req.body as { text?: unknown } | null;
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
     if (!text) return reply.code(400).send({ error: 'text is required' });
@@ -770,8 +1137,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // Local connections are unaffected; a valid remote token authenticates
     // the connection, it doesn't grant it raw-write.
     const trust = requestTrust(req);
-    if (trust.kind === 'remote' && session.origin !== 'managed') {
+    // A collaborator device is scoped by grant, not by origin, and reaches
+    // this route through exactly two paths -- the managed PTY write below
+    // (still control-byte-filtered, since a collaborator holds no
+    // 'raw-write' capability) and the hook inbox queue for an external
+    // Claude session. What it must never reach is the terminal-automation
+    // branch further down, which scripts the operator's own foreground
+    // terminal app; falling past it to the queued path is both safer and,
+    // for a hook-backed session, functionally the same delivery.
+    const collaborator = trust.device !== undefined;
+    if (!collaborator && trust.kind === 'remote' && session.origin !== 'managed') {
       return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
+    }
+    if (collaborator) {
+      const capability = collaboratorSendCapability(session);
+      if (capability.send === 'unavailable') return reply.code(400).send({ error: capability.reason });
     }
     if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
       return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
@@ -792,7 +1172,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return { delivered: 'typed' };
     }
 
-    if (session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
+    if (!collaborator && session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
       try {
         await ctx.terminals.sendText(session, text);
         await recordSend();

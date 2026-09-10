@@ -1,0 +1,11 @@
+// Re-export only. The Attempt narrative moved to
+// work-engine/attempt-narrative.ts when the server needed it too: a
+// Collaborator is served a narrated Run (server/collaborator-run-view.ts)
+// rather than the raw event log, because the raw log's `tool-activity`
+// summaries are the exact shell commands a runtime ran. Nothing about the
+// module changed -- only its address -- so RunWorkspace.tsx and every other
+// UI caller keeps importing it from here.
+export {
+  describeActivity, describeCommand, describeOutcome, formatTokenCount, summarizeAttempt,
+  type ActivityStatus, type ActivityStep, type AttemptSummary,
+} from '../../work-engine/attempt-narrative.js';

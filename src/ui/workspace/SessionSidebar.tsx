@@ -1,14 +1,58 @@
 import type { DiscoveryStatus, Repo, Session } from '../../types.js';
+import type { WorkRun } from '../../work-engine/types.js';
 import { SparkBars, StatusBadge, isEndedSession, sessionLabel } from './model.js';
+import { formatRunLabel, isTerminalRunStatus } from './runModel.js';
 
 interface Props {
   sessions: Session[];
+  runs?: WorkRun[];
   repos: Repo[];
   selectedId: string | null;
+  selectedRunId?: string | null;
   discoveryStatus: DiscoveryStatus | null;
   onSelect: (session: Session) => void;
+  onSelectRun?: (run: WorkRun) => void;
+  onDeleteRun?: (run: WorkRun) => void;
+  onSubmitRun?: () => void;
   onLaunch: () => void;
   onRefreshDiscovery: () => void;
+}
+
+/** Exported for reuse by TasksView (ticket 48): the same row, delete confirmation, and terminal-status gating, so a Run reached by browsing Tasks deletes exactly the way one reached from this sidebar always has. */
+export function RunRow({ run, selected, onSelect, onDelete }: {
+  run: WorkRun;
+  selected: boolean;
+  onSelect: () => void;
+  onDelete?: (run: WorkRun) => void;
+}) {
+  const canDelete = isTerminalRunStatus(run.status) && Boolean(onDelete);
+  return (
+    <div className={`work-run-row${selected ? ' is-selected' : ''}`} data-run-id={run.id}>
+      <button className="work-run-select" onClick={onSelect} type="button">
+        <span className="work-run-glyph">RUN</span>
+        <span className="work-run-content">
+          <strong title={run.spec.objective}>{run.spec.objective}</strong>
+          <small>{run.spec.repository.name} · {run.spec.requestedBaseReference}</small>
+        </span>
+        <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
+      </button>
+      {canDelete && (
+        <button
+          aria-label="Delete run"
+          className="row-delete-button"
+          onClick={() => {
+            if (window.confirm(`Delete this Run permanently? "${run.spec.objective}" and its full history will be removed. This cannot be undone.`)) {
+              onDelete?.(run);
+            }
+          }}
+          title="Delete run"
+          type="button"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
 }
 
 function SessionRow({ session, index, selected, onSelect }: {
@@ -47,10 +91,15 @@ function SessionRow({ session, index, selected, onSelect }: {
 
 export function SessionSidebar({
   sessions,
+  runs = [],
   repos,
   selectedId,
+  selectedRunId = null,
   discoveryStatus,
   onSelect,
+  onSelectRun,
+  onDeleteRun,
+  onSubmitRun,
   onLaunch,
   onRefreshDiscovery,
 }: Props) {
@@ -69,6 +118,20 @@ export function SessionSidebar({
       </div>
 
       <div className="session-list">
+        <div className="sidebar-section-label sidebar-runs-label">
+          <span>Runs</span><span>{runs.length}</span>
+        </div>
+        {runs.map((run) => (
+          <RunRow
+            key={run.id}
+            onDelete={onDeleteRun}
+            onSelect={() => onSelectRun?.(run)}
+            run={run}
+            selected={run.id === selectedRunId}
+          />
+        ))}
+        {runs.length === 0 && <div className="sidebar-empty">No work runs</div>}
+
         <div className="sidebar-section-label">
           <span>Managed</span><span>{managed.length}</span>
         </div>
@@ -104,9 +167,12 @@ export function SessionSidebar({
 
       <div className="sidebar-footer-meta">
         <span>{repos.length} repositories</span>
-        <span>{sessions.length} sessions</span>
+        <span>{runs.length} runs · {sessions.length} sessions</span>
       </div>
-      <button className="new-session-button" onClick={onLaunch} type="button">＋ New session</button>
+      <div className="sidebar-create-actions">
+        {onSubmitRun && <button className="new-run-button" onClick={onSubmitRun} type="button">＋ New run</button>}
+        <button className="new-session-button" onClick={onLaunch} type="button">＋ New session</button>
+      </div>
     </aside>
   );
 }

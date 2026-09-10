@@ -13,10 +13,12 @@ import type { SessionManager } from '../sessions/manager.js';
 import type { VsCodeBridge } from '../discovery/terminals/vscode.js';
 import type { CompanionSnapshot } from '../types.js';
 import { parseClientFrame, type ServerFrame } from '../protocol.js';
-import { classify, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
+import { classify, toRunActor, TOKEN_QUERY_PARAM, type TrustResult } from './connection-trust.js';
 import { publicSession } from './security.js';
 import { isAllowedRemoteInput } from './remote-input.js';
 import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
+import type { WorkEngine } from '../work-engine/types.js';
+import type { CollaboratorService } from '../collaborators/service.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -49,6 +51,10 @@ export function attachWs(
   vscode?: VsCodeBridge,
   companionSnapshot?: () => Omit<CompanionSnapshot, 'uiVisible'>,
   trust: { remoteHosts?: readonly string[]; token?: string } = {},
+  /** Ticket 07: the same one policy path REST reaches (work-routes.ts) — see the 'run_attention_resolve' case below. Undefined only in tests that don't exercise Runs over WS. */
+  workEngine?: WorkEngine,
+  /** Ticket 11: resolves a collaborator device's bearer token for the upgrade's classify() call, and its onRevoke hook terminates any already-open socket for a device the instant it's revoked (AC5) — undefined only in tests that don't exercise collaborators. */
+  collaborators?: CollaboratorService,
 ): WebSocketServer {
   // noServer: true because there are now potentially two underlying
   // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
@@ -86,7 +92,7 @@ export function attachWs(
       // header.
       const result = classify(
         { host: req.headers.host, origin: req.headers.origin, token },
-        trust,
+        { ...trust, deviceLookup: collaborators?.resolveDevice },
       );
       const allowed = result.kind === 'local' || (result.kind === 'remote' && result.capabilities.size > 0);
       if (!allowed) {
@@ -99,6 +105,16 @@ export function attachWs(
       });
     });
   }
+
+  // AC5: a device revoked while it holds an open socket is disconnected
+  // immediately, not merely blocked on its next reconnect — every other
+  // socket (this device's own REST calls have no equivalent long-lived
+  // state to invalidate) is untouched.
+  collaborators?.onRevoke((deviceId: string) => {
+    for (const client of wss.clients) {
+      if (getConnectionTrust(client)?.device?.id === deviceId) client.terminate();
+    }
+  });
 
   // socket → sessionIds it is viewing
   const viewing = new Map<WebSocket, Set<string>>();
@@ -126,6 +142,16 @@ export function attachWs(
   // only matters if that invariant is ever broken by a future change.
   // Denied connections never reach here at all (rejected at upgrade).
   const isLocalSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.kind === 'local';
+  // Ticket 11 AC4: a named collaborator's device is authenticated (so it
+  // may hold an open socket — AC5 needs something for revocation to
+  // terminate) but grants no raw *session* terminal capability over WS —
+  // 'attach' below stays refused for it, the same boundary app.ts's
+  // onRequest hook draws for REST (isCollaboratorViewRoute never includes
+  // a session route). Run *guidance* ('run_attention_resolve') is
+  // different: ticket 12 lets a collaborator device reach it too, gated by
+  // its own RunActor grants inside DurableWorkEngine.resolveAttention()
+  // (see that case below) rather than an unscoped socket-level allow here.
+  const isCollaboratorSocket = (ws: WebSocket): boolean => getConnectionTrust(ws)?.device !== undefined;
   const isUiVisible = () => [...uiPresence.values()].some(Boolean);
   const broadcastPresence = () => {
     const visible = isUiVisible();
@@ -164,10 +190,19 @@ export function attachWs(
   });
 
   // Local sockets see the global list; remote sockets see managed sessions only.
+  //
+  // Ticket 15: a collaborator device is excluded from both session broadcasts
+  // below, the same boundary 'attach' already draws for it (see
+  // isCollaboratorSocket's comment above and the 'attach' case). Without this
+  // it received a live 'session_update' for every managed Session on the
+  // machine -- publicSession only strips launchSpec, so cwd, worktreePath,
+  // repoId, and title crossed out for Repositories that device was never
+  // granted, while app.ts refuses it GET /api/sessions outright. The two
+  // boundaries have to agree, and REST's is the correct one.
   manager.on('session_update', (session) => {
     if (session.origin === 'managed') managedSessionIds.add(session.id);
     for (const ws of wss.clients) {
-      if (isLocalSocket(ws) || session.origin === 'managed') {
+      if (isLocalSocket(ws) || (session.origin === 'managed' && !isCollaboratorSocket(ws))) {
         send(ws, { t: 'session_update', session: publicSession(session) });
       }
     }
@@ -181,7 +216,7 @@ export function attachWs(
     }
     const wasManaged = managedSessionIds.delete(sessionId);
     for (const ws of wss.clients) {
-      if (isLocalSocket(ws) || wasManaged) send(ws, { t: 'session_removed', sessionId });
+      if (isLocalSocket(ws) || (wasManaged && !isCollaboratorSocket(ws))) send(ws, { t: 'session_removed', sessionId });
     }
     broadcastCompanionSnapshot();
   });
@@ -223,6 +258,7 @@ export function attachWs(
       if (!frame) return;
       switch (frame.t) {
         case 'attach': {
+          if (isCollaboratorSocket(ws)) return;
           const session = manager.getSession(frame.sessionId);
           if (!session || (!isLocalSocket(ws) && session.origin !== 'managed')) return;
           const sessionIds = viewing.get(ws) ?? new Set<string>();
@@ -289,6 +325,36 @@ export function attachWs(
           broadcastPresence();
           broadcastCompanionSnapshot();
           break;
+        case 'run_attention_resolve': {
+          // Ticket 07 AC2: the same DurableWorkEngine.resolveAttention()
+          // REST reaches (work-routes.ts) — fire-and-forget, same shape as
+          // 'input' above; a rejection (already resolved, wrong kind, no
+          // such Run) surfaces on the next Run read rather than an error
+          // frame back to the client, since there's no dedicated Run push
+          // channel yet (local/mobile UI polls GET /api/runs* instead).
+          // 'compose' is granted to every local socket and every
+          // authenticated remote one (connection-trust.ts) — a missing
+          // trust entry (should never happen post-upgrade) fails safe by
+          // withholding it, same direction as the 'input' case's raw-write
+          // check above.
+          if (!workEngine) break;
+          const hasCompose = getConnectionTrust(ws)?.capabilities.has('compose') ?? false;
+          if (!hasCompose) break;
+          const decision = frame.decision === 'input' ? { kind: 'input' as const, value: frame.value } : { kind: frame.decision };
+          // Ticket 12 AC1/AC7: a resolved collaborator device's RunActor
+          // (with grants) reaches the exact same
+          // DurableWorkEngine.resolveAttention() policy enforcement REST
+          // does (work-routes.ts) — a Run outside its grants is refused
+          // there, not here; this socket never decides that itself.
+          // Undefined for local and the legacy shared-token path, exactly
+          // like every other actor-accepting call site.
+          const device = getConnectionTrust(ws)?.device;
+          const args: Parameters<typeof workEngine.resolveAttention> = device
+            ? [frame.runId, frame.attentionId, decision, toRunActor(device)]
+            : [frame.runId, frame.attentionId, decision];
+          workEngine.resolveAttention(...args).catch(() => undefined);
+          break;
+        }
       }
     });
     ws.on('close', () => {

@@ -1,0 +1,254 @@
+// Turns an Attempt's durable event log into something a person can read.
+//
+// The log itself stays raw and factual — a `tool-activity` event carries the
+// exact command Codex ran (work-engine/runtimes/codex.ts). That is the right
+// record to keep, but it is not a report: a Run that summarized a repository
+// showed twenty rows of `/bin/zsh -lc "pwd && rg --files -g '!*node_modules*'
+// …"`, each listed twice, and no answer. This module is the presentation
+// layer for that log.
+//
+// It lives in work-engine/ rather than ui/ (where it began) because the
+// server narrates a Run too: server/collaborator-run-view.ts sends a
+// Collaborator these derived labels instead of the raw events, since a
+// `tool-activity` summary is the literal command a runtime ran. ui/workspace/
+// attemptActivity.ts re-exports it for the desktop callers.
+//
+// Wording is derived here rather than stored on the event on purpose:
+// improving a phrase later improves every past Run too, and the raw command is
+// always one "Show technical detail" toggle away, so a heuristic that guesses
+// wrong is recoverable rather than misleading.
+import type { ActivityStatus, AttemptEvent, AttemptUsageAmount } from './types.js';
+
+// Re-exported (not defined) here: the Collaborator projection shapes in
+// types.ts name it too, and types.ts cannot import this module back.
+export type { ActivityStatus };
+
+export interface ActivityStep {
+  /** A sentence describing what happened, for a reader who does not read shell. */
+  readonly label: string;
+  /** The raw fact behind the label — the exact command or path — shown only on demand. */
+  readonly detail?: string;
+  readonly status: ActivityStatus;
+  /** The event that produced this step, for a stable React key. */
+  readonly sequence: number;
+  /**
+   * The producing event's own `at`, verbatim — the actual moment this step
+   * reached its current status, not a display-formatted value. Ticket 53:
+   * a step that started and later completed carries the completing event's
+   * `at`, matching how its label/status already reflect that later event.
+   * Left unset only when the underlying event itself carries none.
+   */
+  readonly at?: string;
+}
+
+export interface AttemptSummary {
+  /** The assistant's own prose — the Attempt's answer. The last one wins: earlier messages are narration along the way. */
+  readonly answer?: string;
+  readonly steps: readonly ActivityStep[];
+  readonly outcome?: { readonly kind: 'success' | 'no-changes' | 'failure'; readonly detail?: string };
+  readonly usage?: { readonly inputTokens: AttemptUsageAmount; readonly outputTokens: AttemptUsageAmount };
+}
+
+/** Segments a shell one-liner into its individual commands, so `pwd && rg --files | sed -n` can be judged by the part that matters. */
+function splitSegments(command: string): string[] {
+  return command.split(/\s*(?:&&|\|\||[|;])\s*/).map((part) => part.trim()).filter(Boolean);
+}
+
+/**
+ * Unwraps `/bin/zsh -lc "…"` / `/bin/bash -c '…'`, which is how Codex sends
+ * nearly every command and is pure noise to a reader.
+ */
+function unwrapShell(command: string): string {
+  const match = command.match(/^\S*\/?(?:ba|z|fi|)sh\s+-[a-z]*c\s+(.*)$/s);
+  if (!match) return command.trim();
+  const body = match[1]!.trim();
+  const quote = body[0];
+  if ((quote === '"' || quote === "'") && body.endsWith(quote) && body.length > 1) {
+    return body.slice(1, -1).trim();
+  }
+  return body;
+}
+
+/** Commands that only set the stage — never what a step is "about". */
+const INCIDENTAL = /^(?:pwd|true|cd\s+\S+|export\s+\S+|set\s+[-\S]+|echo\s+\S+)(?:\s+|$)/;
+
+/**
+ * Drops stage-setting commands from the front of a segment. Codex often glues
+ * them on — `pwd find . -maxdepth 2 -type f` — and the step is about the
+ * `find`, not the `pwd`.
+ */
+function stripIncidental(segment: string): string {
+  let current = segment.trim();
+  for (let guard = 0; guard < 4; guard += 1) {
+    const stripped = current.replace(INCIDENTAL, '').trim();
+    // Nothing left means the segment was *only* stage-setting (a bare `pwd`):
+    // it is not a step, so it drops out rather than becoming one.
+    if (stripped.length === 0) return '';
+    if (stripped === current) break;
+    current = stripped;
+  }
+  return current;
+}
+
+/** A path-shaped argument: not a flag, not a `sed` range, and carrying a '.' or '/' the way a real filename does. */
+function fileArguments(segment: string): string[] {
+  const tokens = segment.split(/\s+/).slice(1);
+  return tokens.filter((token) => !token.startsWith('-')
+    && /[A-Za-z]/.test(token)
+    && /[./]/.test(token)
+    && !/^['"]/.test(token));
+}
+
+function listFiles(files: readonly string[]): string {
+  const shown = files.slice(0, 3).map((file) => file.replace(/^['"]|['"]$/g, ''));
+  if (shown.length === 0) return '';
+  const extra = files.length - shown.length;
+  return `${shown.join(', ')}${extra > 0 ? ` and ${extra} more` : ''}`;
+}
+
+/**
+ * A sentence for one shell command.
+ *
+ * Deliberately conservative: anything unrecognized becomes "Ran a command"
+ * rather than a confident guess. A vague-but-true label costs a click on the
+ * detail toggle; a wrong one costs trust.
+ */
+export function describeCommand(raw: string): string {
+  const segments = splitSegments(unwrapShell(raw)).map(stripIncidental).filter(Boolean);
+  const segment = segments[0];
+  if (!segment) return 'Ran a command';
+
+  const tokens = segment.split(/\s+/);
+  // `npx tsc --noEmit` is about tsc; the runner in front says nothing.
+  const [name = '', ...rest] = /^(?:npx|pnpx|bunx|command|env)$/.test(tokens[0] ?? '') ? tokens.slice(1) : tokens;
+  const binary = name.split('/').pop() ?? name;
+  const argv = rest.join(' ');
+
+  if (/^(?:rg|grep|ag|ack)$/.test(binary)) {
+    return /--files\b/.test(argv) ? 'Searched the repository for source files' : 'Searched the repository';
+  }
+  if (/^(?:sed|cat|head|tail|bat)$/.test(binary)) {
+    const files = listFiles(fileArguments(segment));
+    return files ? `Read ${files}` : 'Read part of a file';
+  }
+  if (/^(?:find|ls|tree)$/.test(binary)) return 'Listed files in the repository';
+  if (binary === 'wc') return 'Counted lines in the repository';
+  if (binary === 'git') {
+    if (/^\s*(?:status|log|diff|show|branch)\b/.test(argv)) return 'Checked recent git history';
+    return 'Ran a git command';
+  }
+  if (/^(?:npm|pnpm|yarn|bun)$/.test(binary)) {
+    if (/\b(?:test|vitest|jest)\b/.test(argv)) return 'Ran the tests';
+    if (/\bbuild\b/.test(argv)) return 'Built the project';
+    if (/\b(?:install|ci)\b/.test(argv)) return 'Installed dependencies';
+    if (/\b(?:lint|typecheck|tsc)\b/.test(argv)) return 'Checked the project for errors';
+    return 'Ran a project script';
+  }
+  if (/^(?:vitest|jest|pytest|mocha)$/.test(binary)) return 'Ran the tests';
+  if (/^(?:tsc|eslint)$/.test(binary)) return 'Checked the project for errors';
+  if (/^(?:mkdir|touch|mv|cp|rm)$/.test(binary)) return 'Changed files in the worktree';
+  if (/^(?:apply_patch|patch)$/.test(binary)) return 'Edited files in the worktree';
+  return 'Ran a command';
+}
+
+/** A sentence for one tool-activity event, by the kind of item it came from. */
+export function describeActivity(tool: string, detail?: string): string {
+  switch (tool) {
+    case 'commandExecution':
+      return detail ? describeCommand(detail) : 'Ran a command';
+    case 'fileChange':
+      return detail ? `Edited ${listFiles(detail.split(/\s+/))}` : 'Edited files in the worktree';
+    case 'webSearch':
+      return detail ? `Searched the web for “${detail}”` : 'Searched the web';
+    case 'mcpToolCall':
+    case 'dynamicToolCall':
+      return detail ? `Used the ${detail} tool` : 'Used a tool';
+    case 'imageView':
+      return detail ? `Looked at ${detail}` : 'Looked at an image';
+    case 'webFetch':
+      return detail ? `Read ${detail}` : 'Read a web page';
+    default:
+      // A tool type this build has no wording for yet: say plainly that
+      // something happened rather than inventing a description of it.
+      return detail ? `Ran a step (${detail})` : 'Ran a step';
+  }
+}
+
+/** Identity of a step across its started/completed pair — the events carry no item id, so the tool and its detail are what pair them. */
+function stepKey(tool: string, detail: string | undefined): string {
+  return `${tool} ${detail ?? ''}`;
+}
+
+/**
+ * Folds an Attempt's events into what the panel shows: the answer, one row per
+ * step (not one per start *and* finish), the outcome, and the latest usage.
+ */
+export function summarizeAttempt(events: readonly AttemptEvent[]): AttemptSummary {
+  const steps: ActivityStep[] = [];
+  const stepIndex = new Map<string, number>();
+  let answer: string | undefined;
+  let outcome: AttemptSummary['outcome'];
+  let usage: AttemptSummary['usage'];
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'message': {
+        if (event.text.trim().length === 0) break;
+        answer = event.text;
+        steps.push({ label: 'Wrote its answer', status: 'completed', sequence: event.sequence, at: event.at });
+        break;
+      }
+      case 'tool-activity': {
+        const key = stepKey(event.tool, event.summary);
+        const existing = stepIndex.get(key);
+        const step: ActivityStep = {
+          label: describeActivity(event.tool, event.summary),
+          ...(event.summary ? { detail: event.summary } : {}),
+          status: event.status,
+          // Keep the first sequence so a completing step does not jump down
+          // the list past steps that started after it.
+          sequence: existing === undefined ? event.sequence : steps[existing]!.sequence,
+          // Unlike sequence, `at` DOES move to the latest event — it reports
+          // when the step reached the status/label shown, not when it began.
+          at: event.at,
+        };
+        if (existing === undefined) {
+          stepIndex.set(key, steps.length);
+          steps.push(step);
+        } else {
+          steps[existing] = step;
+        }
+        break;
+      }
+      case 'usage':
+        usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
+        break;
+      case 'attention-requested':
+        steps.push({ label: event.reason, status: 'started', sequence: event.sequence, at: event.at });
+        break;
+      case 'completion':
+        outcome = { kind: event.outcome === 'no-changes' ? 'no-changes' : 'success', ...(event.summary ? { detail: event.summary } : {}) };
+        break;
+      case 'failure':
+        outcome = { kind: 'failure', detail: event.reason };
+        break;
+      default:
+        // Lifecycle and attention-resolved events are bookkeeping, not steps.
+        break;
+    }
+  }
+
+  return { ...(answer ? { answer } : {}), steps, ...(outcome ? { outcome } : {}), ...(usage ? { usage } : {}) };
+}
+
+export function formatTokenCount(amount: AttemptUsageAmount): string {
+  return amount === 'unknown' ? 'unknown' : amount.toLocaleString('en-US');
+}
+
+/** The one-line verdict under the steps. Never says "successfully" for a Run that failed. */
+export function describeOutcome(outcome: AttemptSummary['outcome']): string | undefined {
+  if (!outcome) return undefined;
+  if (outcome.kind === 'failure') return `Didn't finish — ${outcome.detail ?? 'the Run failed.'}`;
+  if (outcome.kind === 'no-changes') return 'Completed without changing any files';
+  return 'Completed successfully';
+}

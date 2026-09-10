@@ -300,6 +300,37 @@ describe('SessionManager + PtyBackend', () => {
   });
 });
 
+describe('SessionManager.deleteSession', () => {
+  it('refuses to delete a still-live session', async () => {
+    const { manager } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'sleep 30'] }));
+    await expect(manager.deleteSession(s.id)).rejects.toThrow(/still running/);
+    expect(manager.getSession(s.id)).toBeDefined();
+  });
+
+  it('removes the row, its on-disk transcript directory, and emits session_removed for an ended session', async () => {
+    const { manager, store, sessionsDir } = makeManager();
+    const s = await manager.launch(spec({ extraArgs: ['-c', 'echo delete-me'] }));
+    await waitFor(() => manager.getSession(s.id)?.status === 'exited');
+    await waitFor(() => fs.existsSync(path.join(sessionsDir, s.id, 'scrollback.txt')));
+
+    const removed = vi.fn();
+    manager.on('session_removed', removed);
+
+    await manager.deleteSession(s.id);
+
+    expect(manager.getSession(s.id)).toBeUndefined();
+    expect(store.getSession(s.id)).toBeUndefined();
+    expect(fs.existsSync(path.join(sessionsDir, s.id))).toBe(false);
+    expect(removed).toHaveBeenCalledWith(s.id);
+  });
+
+  it('is a no-op safe to call for an id that no longer exists', async () => {
+    const { manager } = makeManager();
+    await expect(manager.deleteSession('no-such-session')).resolves.toBeUndefined();
+  });
+});
+
 // ticket 11: SessionManager.summarize() / readSummary(). A fake Summarizer
 // is injected throughout — the real `claude -p` subprocess adapter is never
 // invoked in tests (see summarizer.test.ts, which covers that adapter with

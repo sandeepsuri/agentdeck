@@ -14,6 +14,8 @@ describe('hook config merging', () => {
     const parsed = JSON.parse(installed) as { hooks: Record<string, unknown[]>; untouched: { yes: boolean } };
     expect(JSON.stringify(parsed)).toContain('existing-hook');
     expect(parsed.hooks.Notification).toHaveLength(1);
+    expect(parsed.hooks.PermissionRequest).toHaveLength(1);
+    expect(JSON.stringify(parsed.hooks.PermissionRequest)).toContain('"timeout":600');
     expect(parsed.hooks.PostToolUse).toHaveLength(1);
     expect(parsed.hooks.UserPromptSubmit).toHaveLength(1);
     expect(parsed.untouched).toEqual({ yes: true });

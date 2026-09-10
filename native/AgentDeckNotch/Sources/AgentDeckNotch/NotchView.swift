@@ -194,12 +194,15 @@ struct DashboardPanel: View {
         VStack(spacing: 0) {
             DashboardHeader(store: store)
             Rectangle().fill(ADPalette.hairline).frame(height: 0.5)
-            if store.repoGroups.isEmpty {
+            if store.repoGroups.isEmpty && store.runAttention.isEmpty {
                 EmptyAgentsView(connected: store.connected)
                     .frame(maxHeight: .infinity)
             } else {
                 ScrollView {
                     VStack(spacing: 8) {
+                        if !store.runAttention.isEmpty {
+                            RunAttentionSection(store: store)
+                        }
                         ForEach(store.repoGroups) { group in
                             RepoGroupView(store: store, group: group)
                         }
@@ -211,6 +214,88 @@ struct DashboardPanel: View {
             DashboardFooter(store: store)
         }
         .background(Color.black)
+    }
+}
+
+/// Ticket 07: managed Run attention — kept visually and structurally
+/// distinct from RepoGroupView/AgentRow (Session attention) rather than
+/// merged into the same list, so this addition can never regress how
+/// Session attention renders (AC6).
+private struct RunAttentionSection: View {
+    @ObservedObject var store: CompanionStore
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.shield")
+                    .font(.system(size: 12))
+                Text("Run Attention")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Spacer()
+                Text("\(store.runAttention.count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .foregroundStyle(ADPalette.waiting)
+            .frame(height: 28)
+            .padding(.horizontal, 4)
+
+            ForEach(store.runAttention) { item in
+                RunAttentionRow(store: store, item: item)
+            }
+        }
+    }
+}
+
+private struct RunAttentionRow: View {
+    @ObservedObject var store: CompanionStore
+    let item: RunAttentionItem
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(ADPalette.waiting.opacity(0.07))
+            RoundedRectangle(cornerRadius: 99)
+                .fill(ADPalette.waiting)
+                .frame(width: 3)
+                .padding(.vertical, 8)
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.objective)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(ADPalette.text)
+                        .lineLimit(1)
+                    Text(item.reason)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.white.opacity(0.48))
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+
+                Text(item.kind == .approval ? "APPROVAL" : "INPUT")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .tracking(0.4)
+                    .foregroundStyle(ADPalette.waiting)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background(ADPalette.waiting.opacity(0.16))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .fixedSize()
+
+                Button("Open Run") { store.openRun(item.runId) }
+                    .buttonStyle(OpenSessionButtonStyle())
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 14)
+            .padding(.vertical, 9)
+        }
+        .frame(height: 56)
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { store.openRun(item.runId) }
     }
 }
 

@@ -53,5 +53,11 @@ export function mapHookPayload(value: unknown): AgentMessage | null {
       attention: 'reply',
     };
   }
+  if (event === 'StopFailure') {
+    return {
+      ts, agent, repo: cwd, event: 'failed',
+      message: text(payload.error) ?? text(payload.message) ?? 'Claude Code stopped because of an error.',
+    };
+  }
   return null;
 }

@@ -4,13 +4,14 @@
 // one per live session and asks it to append/snapshot, but doesn't buffer.
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { defaultDataDir } from '../config.js';
 import type { Store } from '../store/index.js';
 import type { AgentMessage, AgentType, LaunchSpec, Session, SessionStatus } from '../types.js';
 import { TERMINAL_COLS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
-import { readScrollback, SessionTranscript, type Unsubscribe } from './transcript.js';
+import { readScrollback, sessionDir, SessionTranscript, type Unsubscribe } from './transcript.js';
 import { readSummary, writeSummary } from './summary.js';
 import { ClaudeCliSummarizer, type Summarizer, type SummarizeOptions } from './summarizer.js';
 import { DEFAULT_MODEL_SETTING_KEY } from './model-catalog.js';
@@ -498,6 +499,25 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   /** Stored wrap-up summary for a session; undefined if none has been generated (yet). */
   async readSummary(sessionId: string): Promise<string | undefined> {
     return readSummary(this.opts.sessionsDir, sessionId);
+  }
+
+  /**
+   * Permanently removes an ended managed session: its row, and its stored
+   * raw.log/scrollback.txt/summary.md directory. Refuses a still-live
+   * session — there is nothing to clean up on disk yet, and the process
+   * itself would keep writing to a directory this just deleted. Reuses
+   * session_removed, the same event discovery already emits when an
+   * external session disappears (server/index.ts's `remove` callback), so
+   * every viewer (WS-connected UI, wake-lock recompute) drops it exactly
+   * the same way.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    if (this.isLive(sessionId)) throw new Error(`session ${sessionId} is still running`);
+    await fsp.rm(sessionDir(this.opts.sessionsDir, sessionId), { recursive: true, force: true });
+    this.store.deleteSession(sessionId);
+    this.launchSpecs.delete(sessionId);
+    this.hookSignals.delete(sessionId);
+    this.emit('session_removed', sessionId);
   }
 
   /** Stop every live session (server shutdown). Resolves only once every session's output is compacted. */

@@ -89,10 +89,33 @@ struct CompanionAgent: Codable, Identifiable, Equatable {
     let attentionId: String?
 }
 
+/// Ticket 07: mirrors src/types.ts's RunAttentionKind exactly — a managed
+/// Run's runtime approval/input request awaiting an operator decision.
+enum RunAttentionKind: String, Codable, CaseIterable {
+    case approval
+    case input
+}
+
+/// Mirrors src/types.ts's RunAttentionItem — the same minimal, remote-safe
+/// shape GET /api/runs/attention and the WS companion_snapshot both carry
+/// (never the Repository path, budget, or full spec). `attentionId` is the
+/// stable correlation the companion hands back to AgentDeck to resolve it
+/// (openRun deep-links there; this build never resolves it itself).
+struct RunAttentionItem: Codable, Identifiable, Equatable {
+    let runId: String
+    let attentionId: String
+    let objective: String
+    let kind: RunAttentionKind
+    let reason: String
+    let requestedAt: String
+    var id: String { attentionId }
+}
+
 struct CompanionSnapshot: Codable, Equatable {
     let sessions: [AgentSession]
     let attention: [AttentionItem]
     let agents: [CompanionAgent]
+    let runAttention: [RunAttentionItem]
     let uiVisible: Bool
 }
 
@@ -143,14 +166,19 @@ enum NotchGeometry {
     static let expandedWidth: CGFloat = 604
     static let maximumBodyHeight: CGFloat = 680
 
-    static func bodyHeight(groups: Int, agents: Int) -> CGFloat {
+    /// `runAttentionCount` defaults to 0 so every pre-ticket-07 call site
+    /// (and testExpandedBodyHeightIsContentDrivenAndCapped, which asserts
+    /// exact heights with the 2-argument form) keeps its existing behavior
+    /// unchanged.
+    static func bodyHeight(groups: Int, agents: Int, runAttentionCount: Int = 0) -> CGFloat {
         let header: CGFloat = 62
         let groupHeaders = CGFloat(groups) * 34
         let rows = CGFloat(agents) * 76
         let rowGaps = CGFloat(max(0, agents - groups)) * 6
+        let runAttentionRows = CGFloat(runAttentionCount) * 56
         let footer: CGFloat = 44
         let padding: CGFloat = 14
-        return min(maximumBodyHeight, max(180, header + groupHeaders + rows + rowGaps + footer + padding))
+        return min(maximumBodyHeight, max(180, header + groupHeaders + rows + rowGaps + runAttentionRows + footer + padding))
     }
 }
 
