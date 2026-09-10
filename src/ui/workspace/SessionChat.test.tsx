@@ -63,7 +63,7 @@ describe('admin shared session chat', () => {
     expect(host.textContent).toContain('Admin');
     expect(host.textContent).toContain('Can someone check this issue?');
     await submit('@agent investigate the API issue');
-    expect(host.textContent).toContain('Sent to agent');
+    expect(host.textContent).toContain('Sent to terminal · awaiting provider activity');
     const posts = fetcher.mock.calls.filter(([, init]) => init?.method === 'POST');
     expect(posts.map(([url]) => url)).toEqual(['/api/sessions/session-1/chat', '/api/sessions/session-1/chat']);
     expect(posts.map(([, init]) => JSON.parse(String(init?.body)).text)).toEqual(['Can someone check this issue?', '@agent investigate the API issue']);
@@ -119,5 +119,64 @@ describe('admin shared session chat', () => {
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'session-2' }));
+  });
+});
+
+describe('shared agent requests and processing state', () => {
+  it('shows a Claude question and answers the correlated request from chat', async () => {
+    const interaction = {
+      id: 'request-1', kind: 'question', question: 'Which package manager?', requestedAt: '2026-09-01T00:00:03Z',
+      choices: [{ id: 'npm', label: 'npm', questionId: 'Which package manager?' }, { id: 'pnpm', label: 'pnpm', questionId: 'Which package manager?' }],
+      allowsFreeText: true, status: 'pending', canRespond: true,
+    };
+    const fetcher = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes('/capabilities')) return json({ send: 'managed' });
+      if (target.endsWith('/interactions') && !init?.method) return json({ providerSupport: 'supported', processingState: 'waiting_answer', interactions: [interaction] });
+      if (target.includes('/interactions/request-1/respond')) return json({ ...interaction, status: 'resolved', canRespond: false, responderDisplayName: 'Admin', response: { kind: 'answer', answers: { 'Which package manager?': ['pnpm'] } } });
+      return json([]);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    await render({ ...session, agent: 'claude' });
+    expect(host.textContent).toContain('Waiting for your answer');
+    expect(host.textContent).toContain('Which package manager?');
+    const pnpm = [...host.querySelectorAll('label')].find((label) => label.textContent?.startsWith('pnpm'))!.querySelector('input')!;
+    await act(async () => pnpm.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    const answerForm = pnpm.closest('form')!;
+    await act(async () => answerForm.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions/session-1/interactions/request-1/respond', expect.objectContaining({ method: 'POST' }));
+    expect(host.textContent).toContain('Answered by Admin');
+  });
+
+  it('explains that a collaborator cannot act on an admin-only approval', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      const target = String(url);
+      if (target.includes('/capabilities')) return json({ send: 'managed' });
+      if (target.endsWith('/interactions')) return json({ providerSupport: 'supported', processingState: 'waiting_approval', interactions: [{
+        id: 'approval-1', kind: 'approval', question: 'Claude Code wants approval to use Bash.', context: 'npm test',
+        choices: [{ id: 'approve', label: 'Approve' }, { id: 'deny', label: 'Deny' }], allowsFreeText: false,
+        requestedAt: '2026-09-01T00:00:03Z', status: 'pending', canRespond: false,
+        unavailableReason: 'An authorized local admin must approve or deny this request.',
+      }] });
+      return json([]);
+    }));
+    await render({ ...session, agent: 'claude' }, true);
+    expect(host.textContent).toContain('Waiting for approval');
+    expect(host.textContent).toContain('authorized local admin');
+    expect([...host.querySelectorAll('button')].some((button) => button.textContent === 'Approve')).toBe(false);
+  });
+
+  it('keeps ordinary chat from manufacturing a working state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      const target = String(url);
+      if (target.includes('/capabilities')) return json({ send: 'managed' });
+      if (target.endsWith('/interactions')) return json({ providerSupport: 'supported', processingState: 'idle', interactions: [] });
+      if (init?.method === 'POST') return json(message('9', 'hello everyone', 'Admin'));
+      return json([]);
+    }));
+    await render({ ...session, agent: 'claude' });
+    await submit('hello everyone');
+    expect(host.textContent).toContain('Ready');
+    expect(host.textContent).not.toContain('Claude is working');
   });
 });

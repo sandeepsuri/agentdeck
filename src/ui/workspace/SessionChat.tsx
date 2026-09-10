@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CollaboratorSession, CollaboratorSessionCapabilities, SessionChatMessage } from '../../types.js';
+import type {
+  CollaboratorSession, CollaboratorSessionCapabilities, SessionInteraction, SessionInteractionsView, SessionChatMessage,
+} from '../../types.js';
 import { parseMention } from '../../mentions.js';
-import { getSessionCapabilities, listChatMessages, postChatMessage } from '../collaboratorSessions.js';
+import {
+  getSessionCapabilities, getSessionInteractions, listChatMessages, postChatMessage, respondToSessionInteraction,
+} from '../collaboratorSessions.js';
 import { relativeTime } from './model.js';
 
 type ChatSession = Pick<CollaboratorSession, 'id' | 'agent' | 'name' | 'startedAt' | 'branch'>;
@@ -14,10 +18,67 @@ function agentLabel(session: ChatSession): string {
 
 function deliveryLabel(message: SessionChatMessage): string | null {
   if (message.audience !== 'agent') return null;
-  if (message.delivery === 'sent') return 'Sent to agent';
+  if (message.delivery === 'sent') return 'Sent to terminal · awaiting provider activity';
   if (message.delivery === 'queued') return 'Waiting for the agent’s next turn';
   if (message.delivery === 'not_sent') return `Not sent${message.deliveryReason ? ` — ${message.deliveryReason}` : ''}`;
   return null;
+}
+
+const processingLabels: Record<SessionInteractionsView['processingState'], string> = {
+  delivery_pending: 'Delivery pending', working: 'Working…', waiting_answer: 'Waiting for your answer',
+  waiting_approval: 'Waiting for approval', finished: 'Finished', failed: 'Failed', disconnected: 'Disconnected', idle: 'Ready',
+};
+
+function InteractionCard({ sessionId, interaction, onResolved, onError }: {
+  sessionId: string; interaction: SessionInteraction; onResolved: (value: SessionInteraction) => void; onError: (value: string) => void;
+}) {
+  const grouped = new Map<string, SessionInteraction['choices']>();
+  for (const choice of interaction.choices) {
+    const question = choice.questionId ?? interaction.question;
+    grouped.set(question, [...(grouped.get(question) ?? []), choice]);
+  }
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [hasFreeText, setHasFreeText] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const respond = async (body: { answers: Record<string, string[]>; freeText?: boolean } | { decision: 'approve' | 'deny' }) => {
+    setBusy(true);
+    try { onResolved(await respondToSessionInteraction(sessionId, interaction.id, body)); }
+    catch (error) { onError(error instanceof Error ? error.message : String(error)); }
+    finally { setBusy(false); }
+  };
+  return <li className={`session-interaction is-${interaction.kind}`}>
+    <strong>{interaction.kind === 'approval' ? 'Permission approval' : 'Agent question'}</strong>
+    <p>{interaction.question}</p>
+    {interaction.context && <pre>{interaction.context}</pre>}
+    {interaction.status === 'resolved' ? <small>
+      Answered by {interaction.responderDisplayName ?? 'an authorized participant'}
+      {interaction.response?.kind === 'approval' ? ` · ${interaction.response.decision === 'approve' ? 'Approved' : 'Denied'}` : ''}
+    </small> : interaction.canRespond ? interaction.kind === 'approval' ? <div className="mobile-agent-composer-actions">
+      <button disabled={busy} onClick={() => void respond({ decision: 'approve' })} type="button">Approve</button>
+      <button disabled={busy} onClick={() => void respond({ decision: 'deny' })} type="button">Deny</button>
+    </div> : <form onSubmit={(event) => { event.preventDefault(); void respond({ answers, ...(hasFreeText ? { freeText: true } : {}) }); }}>
+      {[...grouped].map(([question, choices]) => <fieldset key={question}>
+        <legend>{question}</legend>
+        {choices.map((choice) => <label key={`${question}:${choice.id}`}>
+          <input checked={answers[question]?.includes(choice.id) ?? false} name={`${interaction.id}:${question}`} onChange={() => setAnswers((current) => ({
+            ...current,
+            [question]: choice.multiple
+              ? (current[question]?.includes(choice.id) ? current[question]!.filter((value) => value !== choice.id) : [...(current[question] ?? []), choice.id])
+              : [choice.id],
+          }))} type={choice.multiple ? 'checkbox' : 'radio'} />
+          {choice.label}{choice.description ? ` — ${choice.description}` : ''}
+        </label>)}
+        {interaction.allowsFreeText && <label>Other answer
+          <input onChange={(event) => {
+            const value = event.target.value.trim();
+            setHasFreeText(Boolean(value));
+            setAnswers((current) => ({ ...current, [question]: value ? [value] : [] }));
+          }} type="text" />
+        </label>}
+      </fieldset>)}
+      <button disabled={busy || [...grouped.keys()].some((question) => !answers[question]?.length)} type="submit">{busy ? 'Sending…' : 'Send answer'}</button>
+    </form> : <small>{interaction.unavailableReason ?? 'This request can no longer be answered.'}</small>}
+  </li>;
 }
 
 /**
@@ -160,16 +221,22 @@ export function SessionChat({ session, principal, onError }: {
   const [messages, setMessages] = useState<SessionChatMessage[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  const [interactionView, setInteractionView] = useState<SessionInteractionsView | null>(null);
   const posted = useRef(new Map<string, SessionChatMessage>());
 
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
+    posted.current.clear();
+    setMessages([]);
+    setInteractionView(null);
+    setLoaded(false);
     const tick = async () => {
       try {
-        const [next, capability] = await Promise.all([
+        const [next, capability, interactions] = await Promise.all([
           listChatMessages(session.id),
           getSessionCapabilities(session.id).catch(() => null),
+          getSessionInteractions(session.id).catch(() => null),
         ]);
         if (disposed) return;
         // Keep successful posts visible if an older poll completes after POST.
@@ -178,6 +245,7 @@ export function SessionChat({ session, principal, onError }: {
         for (const [id, message] of posted.current) merged.set(id, message);
         setMessages([...merged.values()].sort((a, b) => a.ts.localeCompare(b.ts)).slice(-100));
         setCapabilities(capability);
+        if (interactions && !Array.isArray(interactions) && Array.isArray(interactions.interactions)) setInteractionView(interactions);
         setLoaded(true);
         setLoadError(false);
       } catch {
@@ -191,13 +259,30 @@ export function SessionChat({ session, principal, onError }: {
     return () => { disposed = true; clearTimeout(timer); };
   }, [session.id]);
 
+  const replaceInteraction = (next: SessionInteraction) => setInteractionView((current) => current ? {
+    ...current, processingState: 'delivery_pending',
+    interactions: current.interactions.map((item) => item.id === next.id ? next : item),
+  } : current);
+
   return <section aria-label="Shared session chat" className="session-chat">
     {loadError && <p role="status" className="mobile-agent-hint">Unable to refresh the conversation. Retrying…</p>}
+    {interactionView && <div className="session-processing" role="status">
+      {interactionView.processingState === 'working' ? `${session.agent === 'claude' ? 'Claude' : 'Codex'} is working…` : processingLabels[interactionView.processingState]}
+      {interactionView.processingReason ? ` — ${interactionView.processingReason}` : ''}
+    </div>}
+    {interactionView?.providerSupport === 'unavailable' && <p className="mobile-agent-hint">{interactionView.providerReason}</p>}
+    {interactionView && interactionView.interactions.length > 0 && <ol aria-label="Agent requests" className="session-interactions">
+      {interactionView.interactions.map((interaction) => <InteractionCard key={interaction.id} sessionId={session.id} interaction={interaction}
+        onError={onError} onResolved={replaceInteraction} />)}
+    </ol>}
     <AgentConversation session={session} principal={principal} messages={messages} loading={!loaded} />
     <ChatComposer sessionId={session.id} runtimeLabel={runtimeLabel(session)} capabilities={capabilities} onError={onError}
       onSent={(message) => {
         posted.current.set(message.id, message);
         setMessages((current) => [...current.filter((item) => item.id !== message.id), message].slice(-100));
+        if (message.audience === 'agent' && (message.delivery === 'sent' || message.delivery === 'queued')) {
+          setInteractionView((current) => current ? { ...current, processingState: 'delivery_pending' } : current);
+        }
       }} />
   </section>;
 }

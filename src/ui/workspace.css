@@ -768,6 +768,14 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .session-view-tabs [aria-pressed="true"] { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
 .session-chat { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
 .session-chat .mobile-request-composer { width: min(100%, 760px); box-sizing: border-box; align-self: center; }
+.session-processing { width: min(100%, 760px); box-sizing: border-box; align-self: center; padding: 8px 16px; color: var(--text-secondary); font-size: 12px; }
+.session-interactions { width: min(100%, 760px); max-height: 45%; box-sizing: border-box; align-self: center; overflow: auto; margin: 0; padding: 0 16px 12px; list-style: none; }
+.session-interaction { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-elevated); }
+.session-interaction.is-approval { border-color: var(--status-waiting); }
+.session-interaction p,.session-interaction pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.session-interaction fieldset { display: grid; gap: 7px; margin: 0; padding: 10px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); }
+.session-interaction label { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); }
+.session-interaction input[type="text"] { flex: 1; min-width: 0; }
 .session-terminal-panel { display: flex; flex: 1; min-height: 0; }
 .session-terminal-panel[hidden] { display: none; }
 

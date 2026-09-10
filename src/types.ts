@@ -136,6 +136,53 @@ export interface SessionChatMessage {
   deliveryReason?: string;
 }
 
+export interface SessionInteractionChoice {
+  id: string;
+  label: string;
+  description?: string;
+  questionId?: string;
+  multiple?: boolean;
+}
+
+export type SessionInteractionResponse =
+  | { kind: 'answer'; answers: Record<string, string[]> }
+  | { kind: 'approval'; decision: 'approve' | 'deny' };
+
+export interface SessionInteraction {
+  id: string;
+  kind: 'question' | 'approval';
+  question: string;
+  choices: SessionInteractionChoice[];
+  context?: string;
+  allowsFreeText: boolean;
+  requestedAt: string;
+  status: 'pending' | 'resolved' | 'expired';
+  response?: SessionInteractionResponse;
+  responderPrincipalId?: string;
+  responderDisplayName?: string;
+  resolvedAt?: string;
+  canRespond: boolean;
+  unavailableReason?: string;
+}
+
+export type SessionProcessingState =
+  | 'delivery_pending'
+  | 'working'
+  | 'waiting_answer'
+  | 'waiting_approval'
+  | 'finished'
+  | 'failed'
+  | 'disconnected'
+  | 'idle';
+
+export interface SessionInteractionsView {
+  providerSupport: 'supported' | 'unavailable';
+  providerReason?: string;
+  processingState: SessionProcessingState;
+  processingReason?: string;
+  interactions: SessionInteraction[];
+}
+
 /**
  * One durably posted, plain-text Task/Run comment (server/run-feedback.ts,
  * docs/specs/run-feedback-review.md, B07) — deliberately parallel to
@@ -219,7 +266,8 @@ export interface AgentMessage {
     | 'done'
     | 'message'
     | 'session_start'
-    | 'session_end';
+    | 'session_end'
+    | 'failed';
   task?: string;
   status?: SessionStatus;
   files?: string[]; // paths being modified (claims)

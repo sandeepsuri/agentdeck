@@ -5,7 +5,8 @@ import DatabaseCtor, { type Database } from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
-  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, ReviewDecision, Session, Task,
+  AgentMessage, AgentType, ChatAudience, ChatDeliveryState, Repo, ReviewDecision, Session,
+  SessionInteractionChoice, SessionInteractionResponse, Task,
 } from '../types.js';
 import { deriveOpenAttentionRequest, deriveRunStatus, projectAttemptState } from '../work-engine/attempt-projection.js';
 import type { AttemptEventEnvelope } from '../work-engine/durable-events.js';
@@ -275,6 +276,55 @@ function rowToSessionChatMessage(r: SessionChatMessageRow): StoredSessionChatMes
   return message;
 }
 
+interface SessionInteractionRow {
+  id: string; session_id: string; provider: string; provider_session_id: string; provider_request_id: string;
+  kind: string; question: string; choices: string; context: string | null; allows_free_text: number;
+  requested_at: string; status: string; response: string | null; response_delivered_at: string | null; responder_principal_id: string | null;
+  responder_display_name: string | null; resolved_at: string | null;
+}
+
+export interface StoredSessionInteraction {
+  id: string;
+  sessionId: string;
+  provider: 'claude' | 'codex';
+  providerSessionId: string;
+  providerRequestId: string;
+  kind: 'question' | 'approval';
+  question: string;
+  choices: SessionInteractionChoice[];
+  context?: string;
+  allowsFreeText: boolean;
+  requestedAt: string;
+  status: 'pending' | 'resolved' | 'expired';
+  response?: SessionInteractionResponse;
+  responseDeliveredAt?: string;
+  responderPrincipalId?: string;
+  responderDisplayName?: string;
+  resolvedAt?: string;
+}
+
+function rowToSessionInteraction(row: SessionInteractionRow): StoredSessionInteraction {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    provider: row.provider as StoredSessionInteraction['provider'],
+    providerSessionId: row.provider_session_id,
+    providerRequestId: row.provider_request_id,
+    kind: row.kind as StoredSessionInteraction['kind'],
+    question: row.question,
+    choices: JSON.parse(row.choices) as SessionInteractionChoice[],
+    ...(row.context !== null ? { context: row.context } : {}),
+    allowsFreeText: row.allows_free_text === 1,
+    requestedAt: row.requested_at,
+    status: row.status as StoredSessionInteraction['status'],
+    ...(row.response !== null ? { response: JSON.parse(row.response) as SessionInteractionResponse } : {}),
+    ...(row.response_delivered_at !== null ? { responseDeliveredAt: row.response_delivered_at } : {}),
+    ...(row.responder_principal_id !== null ? { responderPrincipalId: row.responder_principal_id } : {}),
+    ...(row.responder_display_name !== null ? { responderDisplayName: row.responder_display_name } : {}),
+    ...(row.resolved_at !== null ? { resolvedAt: row.resolved_at } : {}),
+  };
+}
+
 interface RunFeedbackRow {
   id: string; task_id: string; run_id: string; sequence: number; posted_at: string;
   principal_id: string | null; display_name: string; text: string; review_decision: string | null;
@@ -405,7 +455,11 @@ export class Store implements CollaboratorStore {
   }
 
   deleteSession(id: string): void {
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM session_interactions WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM session_chat_messages WHERE session_id = ?').run(id);
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+    })();
   }
 
   // -- tasks --
@@ -764,6 +818,50 @@ export class Store implements CollaboratorStore {
       .prepare('SELECT * FROM session_chat_messages WHERE session_id = ? ORDER BY sequence DESC LIMIT ?')
       .all(sessionId, limit) as SessionChatMessageRow[];
     return rows.reverse().map(rowToSessionChatMessage);
+  }
+
+  upsertSessionInteraction(input: Omit<StoredSessionInteraction, 'status' | 'response' | 'responderPrincipalId' | 'responderDisplayName' | 'resolvedAt'>): StoredSessionInteraction {
+    this.db.prepare(
+      `INSERT INTO session_interactions
+         (id, session_id, provider, provider_session_id, provider_request_id, kind, question, choices, context, allows_free_text, requested_at)
+       VALUES (@id, @sessionId, @provider, @providerSessionId, @providerRequestId, @kind, @question, @choices, @context, @allowsFreeText, @requestedAt)
+       ON CONFLICT(provider, provider_session_id, provider_request_id) DO NOTHING`,
+    ).run({ ...input, choices: JSON.stringify(input.choices), context: input.context ?? null, allowsFreeText: input.allowsFreeText ? 1 : 0 });
+    const row = this.db.prepare(
+      'SELECT * FROM session_interactions WHERE provider = ? AND provider_session_id = ? AND provider_request_id = ?',
+    ).get(input.provider, input.providerSessionId, input.providerRequestId) as SessionInteractionRow;
+    return rowToSessionInteraction(row);
+  }
+
+  getSessionInteraction(id: string): StoredSessionInteraction | undefined {
+    const row = this.db.prepare('SELECT * FROM session_interactions WHERE id = ?').get(id) as SessionInteractionRow | undefined;
+    return row ? rowToSessionInteraction(row) : undefined;
+  }
+
+  listSessionInteractions(sessionId: string): StoredSessionInteraction[] {
+    return (this.db.prepare('SELECT * FROM session_interactions WHERE session_id = ? ORDER BY requested_at, id')
+      .all(sessionId) as SessionInteractionRow[]).map(rowToSessionInteraction);
+  }
+
+  resolveSessionInteraction(id: string, input: {
+    response: SessionInteractionResponse; principalId?: string; displayName: string; resolvedAt: string;
+  }): boolean {
+    const result = this.db.prepare(
+      `UPDATE session_interactions SET status = 'resolved', response = @response,
+         responder_principal_id = @principalId, responder_display_name = @displayName, resolved_at = @resolvedAt
+       WHERE id = @id AND status = 'pending'`,
+    ).run({ id, response: JSON.stringify(input.response), principalId: input.principalId ?? null, displayName: input.displayName, resolvedAt: input.resolvedAt });
+    return result.changes === 1;
+  }
+
+  expireSessionInteraction(id: string): boolean {
+    return this.db.prepare("UPDATE session_interactions SET status = 'expired' WHERE id = ? AND status = 'pending'").run(id).changes === 1;
+  }
+
+  acknowledgeSessionInteractionResponse(id: string, deliveredAt: string): boolean {
+    return this.db.prepare(
+      "UPDATE session_interactions SET response_delivered_at = ? WHERE id = ? AND status = 'resolved' AND response_delivered_at IS NULL",
+    ).run(deliveredAt, id).changes === 1;
   }
 
   // -- run feedback (docs/specs/run-feedback-review.md, B07) --

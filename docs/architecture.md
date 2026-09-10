@@ -56,6 +56,16 @@ File and repository actions are limited to repositories already known to AgentDe
 
 Claude Code hooks and Codex notifications are normalized into shared session and coordination events. Repository-local JSONL files provide claims, progress, blockers, dependencies, and queued Claude messages. See [Coordination](coordination.md) for the event workflow.
 
+### Shared Session interactions
+
+Shared Session chat keeps provider questions and approvals in the existing Session; it never creates a Run or replacement Session. Claude repository hooks bridge structured `AskUserQuestion` (`PreToolUse`) and `PermissionRequest` events to durable `session_interactions` rows. Provider Session and request identities remain server-side. The waiting hook polls its exact request and separately acknowledges collection of the response, so resolving a row does not falsely imply provider delivery. Conditional resolution accepts only the first participant response, while refresh and reconnect recover the durable request, attribution, and delivery state.
+
+The loopback-only provider interface ingests, polls, acknowledges, and expires Claude requests under `/api/provider/claude/interactions`. Granted Admin and Collaborator views read safe projections from `GET /api/sessions/:id/interactions`; `POST /api/sessions/:id/interactions/:requestId/respond` validates an answer or decision against the exact pending request. Repository grants allow ordinary question answers, but do not confer approval authority: approvals remain restricted to an authorized local admin. Browser projections exclude provider identifiers, absolute paths, credentials, and raw hook payloads.
+
+Codex `notify` reports completed interactive terminal turns but does not expose app-server approvals or `requestUserInput` for a Session. Managed and external Codex Sessions therefore report the interaction control as unavailable. The structured Codex bridge used by Runs is intentionally not reused because Runs and Sessions have separate identity and lifecycle.
+
+Processing state is derived from persisted request/delivery acknowledgements plus structured provider and Session events. A chat POST records chat/terminal transport only: ordinary chat never starts a working indicator, and an agent-addressed message remains delivery-pending until later provider activity. Streaming silence is not completion.
+
 ### Native companion
 
 The companion is a Swift/SwiftUI macOS executable under `native/AgentDeckNotch/`. It receives live state from the loopback server and presents active agents and attention prompts around a MacBook notch or in a menu-bar fallback.

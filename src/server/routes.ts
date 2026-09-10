@@ -43,6 +43,9 @@ import { mergeConversation, resolveSenderIdentity } from './session-conversation
 import { publicSession } from './security.js';
 import { classify, TOKEN_HEADER } from './connection-trust.js';
 import { containsDisallowedControlBytes } from './remote-input.js';
+import {
+  parseClaudeInteraction, projectSessionInteractions, validateInteractionResponse,
+} from './session-interactions.js';
 
 const HOOK_PATH = path.resolve(import.meta.dirname, '../../bin/agentdeck-hook.mjs');
 const VSCODE_VSIX_PATH = path.resolve(import.meta.dirname, '../../dist/vscode/agentdeck-vscode-0.1.0.vsix');
@@ -928,6 +931,79 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const busMessages = await readBusTail(repoPath);
     const humanMessages = ctx.store?.listSessionChatMessages(session.id) ?? [];
     return mergeConversation(session, humanMessages, busMessages);
+  });
+
+  app.post('/api/provider/claude/interactions', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    if (!ctx.store) return reply.code(503).send({ error: 'interaction persistence is unavailable' });
+    const parsed = parseClaudeInteraction(req.body, manager.listSessions());
+    if (!parsed) return reply.code(404).send({ error: 'no matching Claude Session or unsupported hook request' });
+    const stored = ctx.store.upsertSessionInteraction(parsed);
+    return reply.code(201).send({ id: stored.id, status: stored.status });
+  });
+
+  app.get('/api/provider/claude/interactions/:requestId', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.provider !== 'claude') return reply.code(404).send({ error: 'no such provider request' });
+    return { status: stored.status, ...(stored.response ? { response: stored.response } : {}) };
+  });
+
+  app.post('/api/provider/claude/interactions/:requestId/acknowledge', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.provider !== 'claude') return reply.code(404).send({ error: 'no such provider request' });
+    ctx.store?.acknowledgeSessionInteractionResponse(requestId, new Date().toISOString());
+    return reply.code(204).send();
+  });
+
+  app.post('/api/provider/claude/interactions/:requestId/expire', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'provider hooks are loopback-only' });
+    const { requestId } = req.params as { requestId: string };
+    ctx.store?.expireSessionInteraction(requestId);
+    return reply.code(204).send();
+  });
+
+  app.get('/api/sessions/:id/interactions', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const rows = ctx.store?.listSessionInteractions(id) ?? [];
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    const events = await readBusTail(repoPath);
+    const chatMessages = ctx.store?.listSessionChatMessages(id) ?? [];
+    return projectSessionInteractions(session, rows, requestTrust(req).device === undefined, repoHasClaudeHooks(repoPath), events, chatMessages);
+  });
+
+  app.post('/api/sessions/:id/interactions/:requestId/respond', async (req, reply) => {
+    const { id, requestId } = req.params as { id: string; requestId: string };
+    const session = requireGrantedSession(req, reply, id);
+    if (!session) return reply;
+    const stored = ctx.store?.getSessionInteraction(requestId);
+    if (!stored || stored.sessionId !== session.id) return reply.code(404).send({ error: 'no such pending request' });
+    const trust = requestTrust(req);
+    const safeInteraction = (value: typeof stored) => projectSessionInteractions(
+      session, [value], trust.device === undefined, true,
+    ).interactions[0];
+    if (stored.status !== 'pending') return reply.code(409).send({ error: 'This request has already been answered or is no longer active.', interaction: safeInteraction(stored) });
+    if (stored.kind === 'approval' && trust.device !== undefined) {
+      return reply.code(403).send({ error: 'An authorized local admin must approve or deny this request.' });
+    }
+    let response;
+    try {
+      response = validateInteractionResponse(stored, req.body);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+    const sender = resolveSenderIdentity(trust);
+    const won = ctx.store?.resolveSessionInteraction(requestId, {
+      response, principalId: sender.principalId, displayName: sender.displayName, resolvedAt: new Date().toISOString(),
+    });
+    const current = ctx.store?.getSessionInteraction(requestId);
+    if (!won || !current) return reply.code(409).send({ error: 'Another participant answered this request first.', ...(current ? { interaction: safeInteraction(current) } : {}) });
+    return safeInteraction(current);
   });
 
   app.post('/api/sessions/:id/chat', async (req, reply) => {

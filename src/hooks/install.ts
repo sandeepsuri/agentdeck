@@ -4,8 +4,8 @@ import path from 'node:path';
 type Json = Record<string, unknown>;
 const MARKER = '# agentdeck-previous-notify:';
 
-function hook(command: string, matcher?: string): Json {
-  const item: Json = { hooks: [{ type: 'command', command }] };
+function hook(command: string, matcher?: string, timeout?: number): Json {
+  const item: Json = { hooks: [{ type: 'command', command, ...(timeout ? { timeout } : {}) }] };
   if (matcher) item.matcher = matcher;
   return item;
 }
@@ -13,12 +13,13 @@ function hook(command: string, matcher?: string): Json {
 export function mergeClaudeSettings(raw: string, command: string): string {
   const settings = raw.trim() ? JSON.parse(raw) as Json : {};
   const hooks = (settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {}) as Record<string, unknown[]>;
-  const add = (event: string, matcher?: string) => {
+  const add = (event: string, matcher?: string, timeout?: number) => {
     const list = hooks[event] ?? [];
-    if (!JSON.stringify(list).includes('agentdeck-hook')) list.push(hook(command, matcher));
+    if (!JSON.stringify(list).includes('agentdeck-hook')) list.push(hook(command, matcher, timeout));
     hooks[event] = list;
   };
-  add('Notification'); add('Stop'); add('PostToolUse', 'Edit|Write'); add('PreToolUse'); add('SessionStart'); add('UserPromptSubmit');
+  add('Notification'); add('Stop'); add('PostToolUse', 'Edit|Write'); add('PreToolUse', undefined, 600);
+  add('PermissionRequest', undefined, 600); add('SessionStart'); add('UserPromptSubmit'); add('StopFailure');
   settings.hooks = hooks;
   return `${JSON.stringify(settings, null, 2)}\n`;
 }

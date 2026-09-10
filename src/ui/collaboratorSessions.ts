@@ -14,6 +14,7 @@
 import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
 import type {
   CollaboratorSession, CollaboratorSessionCapabilities, CollaboratorSessionMessage, SessionChatMessage,
+  SessionInteraction, SessionInteractionsView,
 } from '../types.js';
 
 type SessionFetcher = (path: string, init?: RequestInit) => Promise<Response>;
@@ -98,4 +99,26 @@ export async function postChatMessage(
   const body = await response.json().catch(() => ({})) as Partial<SessionChatMessage> & { error?: string };
   if (!response.ok) throw new Error(body.error ?? 'Unable to send this message.');
   return body as SessionChatMessage;
+}
+
+export function getSessionInteractions(
+  sessionId: string,
+  fetcher: SessionFetcher = apiFetch,
+): Promise<SessionInteractionsView> {
+  return fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/interactions`)
+    .then((response) => responseJson<SessionInteractionsView>(response));
+}
+
+export async function respondToSessionInteraction(
+  sessionId: string,
+  requestId: string,
+  response: { answers: Record<string, string[]>; freeText?: boolean } | { decision: 'approve' | 'deny' },
+  fetcher: SessionFetcher = apiFetch,
+): Promise<SessionInteraction> {
+  const result = await fetcher(`/api/sessions/${encodeURIComponent(sessionId)}/interactions/${encodeURIComponent(requestId)}/respond`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(response),
+  });
+  const body = await result.json().catch(() => ({})) as Partial<SessionInteraction> & { error?: string };
+  if (!result.ok) throw new Error(body.error ?? 'Unable to answer this request.');
+  return body as SessionInteraction;
 }
