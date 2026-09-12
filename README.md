@@ -15,18 +15,22 @@ _All screenshot data is fictional._
 ## Key Features
 
 - Launch Claude Code and Codex sessions in managed browser terminals, or discover sessions already running in supported macOS terminals.
-- Monitor agent activity, approval prompts, replies, repository state, and conflicts across multiple projects.
+- Submit durable Runs with an objective, acceptance criteria, a budget, and verification requirements, then track them through Attempts with retry, pause, and resume.
+- Monitor agent activity, approval prompts, replies, repository state, and conflicts across multiple projects from a cross-repository Overview.
 - Review uncommitted or branch changes with unified and split diffs, staging controls, and editor actions.
-- Commit staged work and publish branches as draft or ready GitHub pull requests.
+- Leave feedback on a Run, mark it reviewed or request changes, and publish its delivery commit as a pushed branch or draft GitHub pull request.
 - Focus and message mapped Terminal.app, iTerm2, and VS Code integrated terminals.
 - Coordinate parallel work through file claims, progress events, blockers, task dependencies, and conflict warnings.
+- Invite collaborators with scoped repository and Profile access; they get a repository-first workspace to track Runs and Sessions and answer agent questions, without approval or publishing authority.
 - Keep active agents and attention prompts visible through the native MacBook notch or menu-bar companion.
 
 ## Shared session chat
 
 Sessions open to a shared conversation for admins, collaborators, and the active agent. Every message shows its sender. Ordinary messages stay in chat; include `@agent` to send a request to Codex or Claude, for example `@agent investigate the API issue`. Agent-directed posts show whether delivery succeeded, was queued, or could not be sent. Human chat remains available after the agent exits.
 
-Admins can switch to the **Terminal** tab for direct terminal access.
+When Claude asks a structured question or requests a permission approval, the request appears inline in chat as an answerable card instead of only in the terminal. Any participant with repository access can answer an ordinary question; approving or denying a permission request is restricted to an authorized local admin. Codex does not currently expose these structured requests over its `notify` hook, so its interaction control shows as unavailable.
+
+Admins can switch to the **Sessions** tab for direct terminal access.
 
 ## Getting Started
 
@@ -79,7 +83,7 @@ Repository discovery works without configuration and scans one directory level f
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) — workspace navigation, session management, code review, publishing, and configuration
+- [User guide](docs/user-guide.md) — workspace navigation, Runs, session management, code review, publishing, Profiles, and collaborator invitations
 - [Integrations](docs/integrations.md) — terminal focus, VS Code, Claude and Codex hooks, and GitHub CLI
 - [Coordination](docs/coordination.md) — claims, progress, blockers, dependencies, statuses, and conflict warnings
 - [Architecture](docs/architecture.md) — system components, local persistence, communication, and security boundaries
