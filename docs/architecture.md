@@ -24,7 +24,7 @@ The production server serves the built browser application and API on `127.0.0.1
 
 ### Browser workspace
 
-The interface is implemented with React, TypeScript, and Vite under `src/ui/`. It includes the Operations, Terminal, Changes, and Grid workspaces, the launch manifest, command palette, session rail, and inspector.
+The interface is implemented with React, TypeScript, and Vite under `src/ui/`. A local, loopback connection renders the Admin shell: the Overview, Tasks, Operations, Sessions, Changes, Grid, Signals, and History workspaces, plus the launch manifest, command palette, session rail, and inspector. Settings (General, Profiles, and Collaborators tabs) renders as an additional page in the same workspace stage rather than a modal. A remote connection instead renders a repository-first Collaborator workspace scoped to that device's grants; see [Runs and the Work Engine](#runs-and-the-work-engine) and the [user guide](user-guide.md#admin-and-collaborator-workspaces).
 
 The managed terminal uses xterm.js. REST requests handle application actions and queries, while a WebSocket connection carries terminal I/O and live session updates.
 
@@ -51,6 +51,18 @@ Terminal.app and iTerm2 adapters use macOS scripting for focus and direct input.
 The repository scanner inspects direct children of the configured projects directory and recognizes normal repositories and linked worktrees. Git services provide working-tree summaries, branch comparisons, file diffs, staging actions, local commits, pushes, and pull-request publishing.
 
 File and repository actions are limited to repositories already known to AgentDeck. Requested file paths are resolved and checked against their repository boundary.
+
+### Runs and the Work Engine
+
+The Work Engine under `src/work-engine/` executes Runs: durable objectives with their own identity and lifecycle, tracked independently of any Session or terminal process. A Run's immutable Work specification — objective, acceptance criteria, Repository, requested base reference, runtime preference, budget, verification intent, and requested delivery result — is either authored directly by an admin through the Run submission flow, or, for a collaborator, derived entirely from an admin-granted Profile rather than anything the collaborator submits.
+
+A Run advances through one or more Attempts, each a distinct runtime execution; retrying creates a new Attempt rather than reusing the previous one, and pause/resume act only at engine-controlled safe boundaries. A completed Run's outcome is captured as a durable Run result (delivery artifacts, verification evidence, approvals, usage, and recovery notes). Run feedback and review decisions (`reviewed` / `changes_requested`) are stored as plain, append-only entries rather than a mutable Run status, and the review UI derives its badge text from the latest entries.
+
+Companion Sessions are a read-only, admin-only correlation between a Run's prepared worktree and any Session that happens to already exist for it — advisory only, never persisted, and never implying that starting an Attempt created or owns that Session.
+
+Publication is a separate, explicit, admin-only action taken after a Run produces a delivery commit: it is never triggered automatically by Run completion. It pushes the branch and, optionally, opens a draft pull request, and it is persisted before execution so it settles as succeeded, failed, or ambiguous rather than being inferred after the fact. Publication is never available to a collaborator.
+
+A Run's static-HTML preview is served through a separate, ephemeral, loopback-only preview listener minted per request; it is never exposed to a remote or collaborator connection.
 
 ### Coordination and hooks
 
@@ -84,6 +96,8 @@ The current schema stores:
 
 - Session identity, process metadata, repository association, and status
 - Tasks and dependencies
+- Runs, Attempts, Work specifications, Run results, feedback, and review decisions
+- Profiles, Collaborators, Device credentials (hashed), and Publications
 - Discovered repositories and worktrees
 - Application settings
 - An archive of ingested coordination events
@@ -108,15 +122,15 @@ Higher-confidence hook and output signals take precedence over CPU inference. Co
 
 - HTTP and WebSocket listeners always bind `127.0.0.1`; optional remote listeners bind only the detected concrete Tailscale IPv4 address, never `0.0.0.0`.
 - Requests must use an allowed loopback host or either detected tailnet identity (MagicDNS hostname or raw IP), with the exact origin serving AgentDeck.
-- Remote REST and WebSocket requests require the owner-only token stored in `~/.agentdeck/config.json`; WebSocket upgrades are origin-checked separately.
-- Local connections retain all capabilities. Remote connections are limited to viewing managed sessions, composing messages, and the fixed control-key set. They cannot enumerate or attach to external sessions, use arbitrary raw writes, launch or administer sessions, change settings, or invoke repository and integration operations.
+- Remote REST and WebSocket requests require either the owner-only token stored in `~/.agentdeck/config.json` or an individually revocable, per-device Device credential minted by exchanging a one-time Invitation; WebSocket upgrades are origin-checked separately.
+- Local connections retain all capabilities. An authenticated collaborator device sees only the Repositories and Profiles an admin explicitly granted it: a scoped feed of Runs and Sessions, the ability to submit Runs derived from a granted Profile, chat participation, and answers to ordinary agent questions. It cannot enumerate or attach to external sessions, use arbitrary raw writes, view or change Settings, manage Collaborators or Profiles, approve or deny a permission request, or publish a Run's result — those remain admin-only regardless of grants.
 - Content Security Policy and defensive browser headers restrict the local UI.
 - Repository actions are limited to discovered repositories and constrained paths.
 - Database files are restricted to the current operating-system user.
 - Managed launch secrets are excluded from REST responses, WebSocket broadcasts, and persistence.
 - The VS Code helper accepts only loopback `ws://` or `wss://` server URLs.
 
-Claude Code and Codex continue to communicate with their respective providers according to their own configuration. Tailscale plus the AgentDeck token is the only supported remote boundary; do not place AgentDeck behind a public proxy.
+Claude Code and Codex continue to communicate with their respective providers according to their own configuration. Tailscale plus an owner token or collaborator Device credential is the only supported remote boundary; do not place AgentDeck behind a public proxy.
 
 ## Primary technologies
 
