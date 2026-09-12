@@ -143,7 +143,7 @@ describe('CollaboratorWorkspace navigation', () => {
     expect(host.textContent).toContain('Repository approval pending');
     expect(host.textContent).not.toContain('Needs your approval');
     await act(async () => { (host.querySelector('[data-run-id="mine-elsewhere"]') as HTMLButtonElement).click(); });
-    expect(host.querySelector('.mobile-conversation')).not.toBeNull();
+    expect(host.querySelector('.collab-run-detail')).not.toBeNull();
     expect(host.querySelector('[aria-label="Back to your requests"]')).not.toBeNull();
     await act(async () => { (host.querySelector('[aria-label="Back to your requests"]') as HTMLButtonElement).click(); });
     expect(host.querySelector('[data-run-id="mine-elsewhere"]')).not.toBeNull();
@@ -258,7 +258,7 @@ describe('CollaboratorWorkspace navigation', () => {
     await act(async () => { trigger.click(); });
     await act(async () => { setInputValue(host.querySelector('.command-palette input') as HTMLInputElement, 'flaky auth'); });
     await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
-    expect(host.querySelector('.mobile-conversation')).not.toBeNull();
+    expect(host.querySelector('.collab-run-detail')).not.toBeNull();
 
     await act(async () => { (host.querySelector('[aria-label="Search accessible work"]') as HTMLButtonElement).click(); });
     await act(async () => { setInputValue(host.querySelector('.command-palette input') as HTMLInputElement, 'claude'); });
@@ -385,7 +385,7 @@ describe('CollaboratorWorkspace Run conversation', () => {
     const tile = host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement;
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    const steps = [...host.querySelectorAll('.mobile-run-step')];
+    const steps = [...host.querySelectorAll('.run-attempt-step')];
     expect(steps).toHaveLength(2);
     const timed = steps[0]!.querySelector('time');
     expect(timed?.getAttribute('dateTime')).toBe('2026-09-01T00:04:00.000Z');
@@ -405,7 +405,7 @@ describe('CollaboratorWorkspace Run conversation', () => {
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
     expect(host.textContent).toContain('May I write to migrations/?');
-    const approve = [...host.querySelectorAll('.mobile-approval-actions button')]
+    const approve = [...host.querySelectorAll('.run-attention-actions button')]
       .find((button) => button.textContent === 'Approve') as HTMLButtonElement;
     await act(async () => { approve.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
@@ -545,7 +545,7 @@ describe('CollaboratorWorkspace Run detail tabs (presentation-only redesign slic
 
     // Still visible after switching tabs, and structurally outside both panels.
     expect(host.textContent).toContain('Approval needed');
-    const attentionSection = host.querySelector('.mobile-run-attention-card')!;
+    const attentionSection = host.querySelector('.run-attention-request')!;
     expect(tabPanel(host, 'overview').contains(attentionSection)).toBe(false);
     expect(tabPanel(host, 'updates').contains(attentionSection)).toBe(false);
   });
@@ -581,7 +581,7 @@ describe('CollaboratorWorkspace Run detail tabs (presentation-only redesign slic
     const host = await mount({ runs: [summary({ status: 'completed' })] });
     await act(async () => { (host.querySelector('[data-run-id="run-1"]') as HTMLButtonElement).click(); });
 
-    const note = tabPanel(host, 'overview').querySelector('.mobile-run-preview-note');
+    const note = tabPanel(host, 'overview').querySelector('.collab-run-preview-note');
     expect(note?.textContent).toContain('dist/index.html');
     expect(note?.textContent).not.toContain('dist/app.js');
     expect([...host.querySelectorAll('button')].some((button) => /open preview/i.test(button.textContent ?? ''))).toBe(false);
@@ -666,12 +666,21 @@ describe('CollaboratorWorkspace Run feedback (B07)', () => {
 });
 
 describe('CollaboratorWorkspace requesting work', () => {
+  // The composer now lives in a modal (RequestWorkModal.tsx) reached from
+  // the sidebar's "New request" action, rather than pinned to the bottom of
+  // a Repository's feed — opening it is a step every one of these tests
+  // needs before it can reach the form fields.
+  async function openRequestModal(host: HTMLElement) {
+    await act(async () => { (host.querySelector('[aria-label="Request new work"]') as HTMLButtonElement).click(); });
+  }
+
   async function fillAndSubmit(host: HTMLElement) {
+    await openRequestModal(host);
     await act(async () => {
       setInputValue(host.querySelector('textarea[aria-label="Objective"]') as HTMLTextAreaElement, 'Fix the flaky auth test');
       setInputValue(host.querySelector('textarea[aria-label="Acceptance criteria"]') as HTMLTextAreaElement, 'It passes ten times');
     });
-    const form = host.querySelector('.mobile-request-composer form') as HTMLFormElement;
+    const form = host.querySelector('.run-submission-modal form') as HTMLFormElement;
     await act(async () => { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
     // The chain is three awaited round trips; let each settle inside act so
     // the composer's own submitting/notice state updates are covered too.
@@ -741,6 +750,7 @@ describe('CollaboratorWorkspace requesting work', () => {
 
   it('explains that work cannot be requested when no Profile has been granted', async () => {
     const host = await mount({ profiles: [] });
+    await openRequestModal(host);
     expect(host.textContent).toContain('No Profiles have been granted to you yet');
     expect(host.querySelector('textarea[aria-label="Objective"]')).toBeNull();
   });

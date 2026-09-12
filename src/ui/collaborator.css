@@ -1,0 +1,106 @@
+/*
+ * The collaborator workspace's own rules — everything that is not already
+ * shared with the admin desktop shell (.admin-sidebar, .app-topbar,
+ * .operation-group, .overview-row, .run-workspace, .run-detail-tabs,
+ * .run-attention-request, .run-attempt-* all come from workspace.css/
+ * runs.css unchanged). This file only adds what the collaborator surface
+ * needs on top of that: the responsive sidebar-to-drawer behavior, and a
+ * handful of small notes/labels the admin desktop has no equivalent for.
+ *
+ * Loaded after theme.css/workspace.css/runs.css (main.tsx) so it can rely on
+ * every token and shared class already being defined.
+ */
+
+/* Sidebar: two-line repository rows (name + activity), kept distinct from
+   AdminSidebar's single-line destinations since a Repository also carries a
+   live "N active" fact the admin's view-level nav never needs to show. */
+.collab-nav-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.collab-nav-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 500; }
+.collab-nav-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 10.5px; }
+.admin-navigation button.is-active .collab-nav-copy strong { font-weight: 600; }
+
+.collab-sidebar-actions { grid-template-columns: 1fr; }
+
+.collab-sidebar-footer {
+  display: grid; grid-template-columns: 34px minmax(0,1fr); align-items: center; gap: 9px;
+  margin-top: 10px; padding: 12px 8px 2px; border-top: 1px solid var(--border-muted);
+}
+.collab-sidebar-footer > span:last-child { min-width: 0; }
+.collab-sidebar-footer strong, .collab-sidebar-footer small { display: block; }
+.collab-sidebar-footer strong { font-size: 11px; }
+.collab-sidebar-footer small { margin-top: 3px; color: var(--text-muted); font-size: 10px; }
+
+/* Topbar: a signed-in name next to Sign out, and the hamburger that opens
+   the sidebar-as-drawer below >=901px. Hidden by default; the responsive
+   block further down reveals it once the sidebar goes off-canvas. */
+.collab-signed-in { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
+.collab-menu-button {
+  display: none; width: 32px; height: 32px; flex: none; place-items: center;
+  border: 1px solid var(--border-muted); border-radius: var(--radius-sm);
+  background: var(--surface-elevated); color: var(--text-secondary); cursor: pointer;
+}
+.collab-menu-button:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.collab-menu-button .mobile-menu-icon { width: 15px; }
+.collab-menu-button .mobile-menu-icon i { width: 15px; height: 1.5px; }
+
+/* Content: a single view fills the stage directly — there is no persistent
+   terminal to keep mounted across view switches here, so (unlike the admin
+   desktop's layered .workspace-layer stack) each view mounts only while
+   active. */
+.collab-stage { display: flex; flex-direction: column; min-height: 0; }
+.collab-detail-scroll { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 22px clamp(20px,4vw,44px) 0; }
+.collab-detail-scroll > .run-workspace { margin-top: 0; margin-bottom: 26px; }
+.collab-detail-scroll > .session-chat { flex: 1; min-height: 0; }
+
+.collab-row.is-terminal { opacity: .72; }
+.collab-row-objective { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; line-height: 1.4; }
+.collab-row-blocked { color: var(--status-waiting) !important; }
+
+.collab-run-meta { display: block; margin: -14px 0 20px; color: var(--text-muted); font-size: 11px; }
+.collab-inline-notice { margin: 0 0 18px; padding: 11px 13px; border: 1px solid var(--status-waiting); border-radius: var(--radius-md); background: var(--status-waiting-bg); color: var(--text-primary); font-size: 12.5px; line-height: 1.5; }
+
+.collab-run-result-note { margin: 0 0 12px; color: var(--status-error); font-size: 12.5px; line-height: 1.5; }
+.collab-run-result-commit { margin: 0; font-size: 12.5px; }
+.collab-run-files { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+.collab-run-files code, .collab-run-result-commit code { font: 11px var(--font-mono); overflow-wrap: anywhere; }
+/* Ticket 70 (B10) is explicitly not authorized for this surface — eligibility text only, never a broken "open" action. */
+.collab-run-preview-note { margin: 16px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.collab-run-truncated { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 10.5px; }
+.collab-run-waiting { margin: 0; color: var(--text-muted); font-size: 12.5px; }
+
+.collab-request-empty { margin: 0; padding: 20px 24px; color: var(--text-muted); font-size: 12.5px; line-height: 1.6; text-align: center; }
+
+/* Sidebar-as-drawer: exactly one <aside> at every width — off-canvas here,
+   persistent in the default (>=901px) rule below. Same fixed/translateX
+   pattern as MobileWorkspace's own SessionDrawer, kept as a separate rule
+   set so the two never have to agree on a shared transform. */
+@media (max-width: 900px) {
+  .collab-menu-button { display: grid; }
+  .collab-sidebar {
+    position: fixed; z-index: 31; inset: 0 auto 0 0; width: min(86vw,320px);
+    padding: max(8px,env(safe-area-inset-top)) 10px max(10px,env(safe-area-inset-bottom));
+    box-shadow: 18px 0 40px rgba(0,0,0,.22);
+    transform: translateX(-105%); transition: transform .2s ease;
+  }
+  .collab-sidebar.is-open { transform: translateX(0); }
+  .collab-scrim {
+    position: fixed; z-index: 30; inset: 0; padding: 0; border: 0;
+    background: var(--overlay); cursor: default;
+  }
+  /* .jump-control/.topbar-context are shared with the admin desktop, so
+     every override here is scoped under .collab-shell — it must never bleed
+     into the admin's own topbar at a narrow *desktop* window. */
+  .collab-shell .jump-control strong, .collab-shell .jump-control kbd { display: none; }
+  .collab-shell .jump-control { flex: none; max-width: none; padding: 8px; }
+  .collab-signed-in { display: none; }
+  .collab-shell .topbar-context { width: auto; min-width: 0; }
+}
+
+@media (min-width: 901px) {
+  .collab-scrim { display: none; }
+}
+
+@media (max-width: 480px) {
+  .collab-shell .app-topbar { gap: 8px; padding-inline: 10px; }
+  .collab-detail-scroll { padding-inline: 14px; }
+}

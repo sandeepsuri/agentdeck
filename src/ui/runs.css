@@ -85,6 +85,10 @@
 .run-attempt-step.status-failed .run-step-mark { color: var(--status-error); }
 .run-attempt-step.status-started .run-step-mark { color: var(--text-muted); }
 .run-step-label { color: var(--text-primary); font-size: 13px; line-height: 1.5; }
+/* The collaborator narrative's per-step time (CollaboratorWorkspace.tsx) —
+   the admin's own AttemptReport has no equivalent, since raw Attempt events
+   already carry a timestamp the admin can see in "Show technical detail". */
+.run-step-time { color: var(--text-muted); font-size: 11px; }
 .run-attempt-step code { grid-column: 2; margin-top: 5px; padding: 6px 8px; border-radius: var(--radius-sm); background: var(--surface-code); color: var(--text-secondary); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
 .run-attempt-verdict { margin: 14px 0 0; color: var(--text-secondary); font-size: 12px; }
 .run-attempt-verdict.is-success { color: var(--status-working); }
@@ -185,3 +189,11 @@
    the data attribute RunWorkspace already sets, not an element of its own. */
 .run-attention-request::before { content: '?'; display: flex; align-items: center; justify-content: center; color: var(--status-waiting); font-size: 15px; font-weight: 700; }
 .run-attention-request[data-attention-kind="approval"]::before { content: '\2713'; }
+
+/* CollaboratorWorkspace's own Run detail page (.collab-run-detail on the same
+   .run-workspace article the admin desktop uses) needs a tighter margin/
+   padding at phone width than the admin's fixed 920px desktop page ever has
+   to handle. */
+@media (max-width: 480px) {
+  .collab-run-detail { width: 100%; margin: 0; padding: 18px; border-radius: 0; }
+}

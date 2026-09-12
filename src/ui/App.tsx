@@ -710,9 +710,17 @@ export function App() {
   // Mission Control grid, or inspector rail, none of which fit a phone
   // screen or apply to a connection that never receives raw PTY bytes. The
   // local/desktop path below this is otherwise completely untouched.
+  //
+  // A named collaborator (collaboratorPrincipal set) instead gets the same
+  // admin-style shell class as the desktop tree below — CollaboratorWorkspace
+  // (rendered inside MobileWorkspace) supplies its own sidebar/topbar/content
+  // structure now (parent issue #37's redesign pass), so it needs the
+  // .agentdeck-shell flex-column ancestor that shell expects. The admin's own
+  // phone, on the legacy shared token with no Principal, keeps the
+  // .mobile-shell it always had.
   if (connectionKind === 'remote') {
     return (
-      <div className="mobile-shell">
+      <div className={collaboratorPrincipal ? 'agentdeck-shell collab-shell' : 'mobile-shell'}>
         {error && <div className="global-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">×</button></div>}
         <MobileWorkspace
           appearanceControl={<ThemeControl />}

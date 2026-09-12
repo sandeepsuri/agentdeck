@@ -499,19 +499,28 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 }
 
 @media (max-width: 820px) {
+  /* :not(.collab-sidebar): the collaborator sidebar is already off-canvas
+     (see collaborator.css's own <=900px rule) rather than icon-only at this
+     width, so it keeps its full-width labels instead of collapsing to
+     glyphs — a 320px drawer full of unlabeled icons would be unreadable. */
   :root { --sidebar-width: 68px; --inspector-width: 228px; }
-  .admin-sidebar { padding-inline: 8px; }
-  .admin-sidebar-brand { justify-content: center; margin-inline: 0; }
-  .admin-sidebar-brand strong, .admin-nav-label, .admin-navigation button > span:not(.admin-nav-glyph), .admin-navigation button small, .admin-sidebar-attention > button > span:last-child, .admin-sidebar-actions strong { display: none; }
-  .admin-navigation button { justify-content: center; padding-inline: 0; }
-  .admin-nav-glyph { width: 28px; font-size: 14px; }
-  .admin-nav-group + .admin-nav-group { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-muted); }
-  .admin-sidebar-actions { grid-template-columns: 1fr; }
-  .admin-sidebar-actions button { font-size: 16px; }
-  .admin-sidebar-attention { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 10px; }
-  .attention-compact-count { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 999px; background: var(--status-waiting-bg); color: var(--status-waiting); font-size: 10px; font-weight: 700; }
-  .admin-sidebar-attention > button { width: 36px; min-height: 28px; display: grid; grid-template-columns: 1fr; place-items: center; padding: 4px; }
-  .admin-sidebar-attention > button .attention-dot { margin: 0; }
+  .admin-sidebar:not(.collab-sidebar) { padding-inline: 8px; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-brand { justify-content: center; margin-inline: 0; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-brand strong,
+  .admin-sidebar:not(.collab-sidebar) .admin-nav-label,
+  .admin-sidebar:not(.collab-sidebar) .admin-navigation button > span:not(.admin-nav-glyph),
+  .admin-sidebar:not(.collab-sidebar) .admin-navigation button small,
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-attention > button > span:last-child,
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-actions strong { display: none; }
+  .admin-sidebar:not(.collab-sidebar) .admin-navigation button { justify-content: center; padding-inline: 0; }
+  .admin-sidebar:not(.collab-sidebar) .admin-nav-glyph { width: 28px; font-size: 14px; }
+  .admin-sidebar:not(.collab-sidebar) .admin-nav-group + .admin-nav-group { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-muted); }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-actions { grid-template-columns: 1fr; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-actions button { font-size: 16px; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-attention { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 10px; }
+  .admin-sidebar:not(.collab-sidebar) .attention-compact-count { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 999px; background: var(--status-waiting-bg); color: var(--status-waiting); font-size: 10px; font-weight: 700; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-attention > button { width: 36px; min-height: 28px; display: grid; grid-template-columns: 1fr; place-items: center; padding: 4px; }
+  .admin-sidebar:not(.collab-sidebar) .admin-sidebar-attention > button .attention-dot { margin: 0; }
   .topbar-context { width: 116px; min-width: 90px; }
   .jump-control { min-width: 80px; }
   .jump-control strong { display: none; }
@@ -535,11 +544,6 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-topbar-copy > strong { width: 100%; overflow: hidden; font-size: 15px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .mobile-topbar-copy > small { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }
 .mobile-topbar-spacer { width: 44px; height: 44px; }
-.mobile-topbar-actions { justify-self: end; display: flex; align-items: center; }
-.mobile-topbar-actions .theme-control { z-index: 1; }
-.mobile-topbar-actions .top-icon-button { width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent; font-size: 17px; }
-.mobile-topbar-actions .top-icon-button:hover { background: var(--surface-hover); color: var(--text-primary); }
-.mobile-topbar-actions .theme-menu { position: fixed; top: calc(max(8px,env(safe-area-inset-top)) + 56px); right: 8px; }
 
 .mobile-agent-mark { position: relative; width: 28px; height: 28px; flex: none; display: block; }
 .mobile-agent-mark::before { content: ''; position: absolute; top: 18%; left: 4%; width: 62%; height: 62%; background: var(--action-primary); opacity: .55; border-radius: 25%; transform: rotate(-12deg); }
@@ -639,86 +643,18 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-drawer-footer strong { font-size: 11px; }
 .mobile-drawer-footer small { margin-top: 3px; color: var(--text-muted); font-size: 10px; }
 
-/* The Collaborator workspace (ui/workspace/CollaboratorWorkspace.tsx): the
-   Repository drawer, a Repository's Run feed, one Run's conversation, and the
-   composer at the bottom of both. Same rhythm as the mobile rules above --
-   44px touch targets, a min(100%,760px) centred column, is-* modifiers. */
-
-.mobile-repo-row { width: 100%; min-height: 62px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid transparent; border-radius: var(--radius-lg); background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
-.mobile-repo-row:hover { background: var(--surface-hover); }
-.mobile-repo-row.is-selected { border-color: var(--border-muted); background: var(--surface-selected); }
-.mobile-repo-count { min-width: 24px; height: 24px; display: grid; place-items: center; padding: 0 7px; border-radius: 12px; background: var(--action-primary); color: var(--text-on-action); font: 600 10px var(--font-mono); }
-
-/* One rule per RunStatus (work-engine/types.ts) -- unmatched statuses fall
-   back to the neutral base, so a status added later degrades rather than
-   disappears. */
-.mobile-run-dot { width: 8px; height: 8px; flex: none; display: inline-block; margin-right: 7px; border-radius: 50%; background: var(--status-idle); }
-.mobile-run-dot.status-queued,.mobile-run-dot.status-preparing { background: var(--status-starting); }
-.mobile-run-dot.status-running,.mobile-run-dot.status-verifying,.mobile-run-dot.status-reviewing { background: var(--status-working); }
-.mobile-run-dot.status-waiting_approval,.mobile-run-dot.status-waiting_input,.mobile-run-dot.status-waiting_dependency,
-.mobile-run-dot.status-paused,.mobile-run-dot.status-pause_requested { background: var(--status-waiting); }
-.mobile-run-dot.status-completed,.mobile-run-dot.status-completed_unverified { background: var(--status-completed); }
-.mobile-run-dot.status-failed,.mobile-run-dot.status-failed_verification,.mobile-run-dot.status-failed_budget { background: var(--status-error); }
-.mobile-run-dot.status-cancelled { background: var(--status-exited); }
-
-.mobile-run-list { width: min(100%,760px); min-height: 0; flex: 1; align-self: center; display: grid; gap: 8px; align-content: start; overflow-y: auto; padding: 14px 14px 20px; overscroll-behavior: contain; }
-.mobile-run-list-empty { margin: 8px 0; padding: 20px 16px; border: 1px dashed var(--border-muted); border-radius: var(--radius-lg); color: var(--text-muted); line-height: 1.5; text-align: center; }
-.mobile-run-tile { width: 100%; display: grid; gap: 7px; padding: 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); color: var(--text-primary); text-align: left; cursor: pointer; }
-.mobile-run-tile:hover { background: var(--surface-hover); }
-.mobile-run-tile.is-terminal { opacity: .72; }
-.mobile-run-tile-head { min-width: 0; display: flex; align-items: baseline; }
-.mobile-run-tile-head strong { min-width: 0; overflow: hidden; font-size: 13.5px; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.mobile-run-tile-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.mobile-run-tile-meta small { color: var(--text-muted); font-size: 11px; }
-.mobile-run-status { flex: none; padding: 3px 9px; border: 1px solid color-mix(in srgb, currentColor 45%, transparent); border-radius: 999px; background: color-mix(in srgb, currentColor 12%, transparent); color: var(--text-secondary); font-size: 10.5px; font-weight: 600; }
-.mobile-run-status.status-completed,.mobile-run-status.status-completed_unverified { color: var(--status-completed); }
-.mobile-run-status.status-failed,.mobile-run-status.status-failed_verification,.mobile-run-status.status-failed_budget { color: var(--status-error); }
-.mobile-run-status.status-running,.mobile-run-status.status-verifying { color: var(--status-working); }
-.mobile-run-badge { justify-self: start; padding: 4px 10px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-bg); color: var(--accent); font-size: 11px; font-weight: 600; }
-.mobile-run-blocked { color: var(--status-waiting); font-size: 11px; line-height: 1.45; }
-.mobile-run-blocked-banner { width: calc(min(100%,760px) - 28px); flex: none; align-self: center; margin: 0 14px 8px; padding: 11px 13px; border: 1px solid var(--status-waiting); border-radius: 13px; background: var(--status-waiting-bg); color: var(--text-primary); font-size: 12px; line-height: 1.5; }
+/* What remains of the old phone-shaped Collaborator workspace: a Session's
+   conversation (SessionChat.tsx, shared with the admin phone's own
+   SessionWorkspace in MobileWorkspace.tsx and the admin desktop's
+   TerminalWorkspace.tsx) and the admin phone's Run-attention/composer rules
+   above. CollaboratorWorkspace.tsx itself now adopts the admin desktop shell
+   instead (collaborator.css) — see that file's own header comment. */
 
 .mobile-run-intent { margin-bottom: 18px; }
 .mobile-run-intent h2 { margin: 0 0 9px; font-size: 16px; line-height: 1.35; }
 .mobile-run-intent small { display: block; margin-top: 9px; color: var(--text-muted); font-size: 11.5px; }
-.mobile-run-criteria { margin: 0; padding-left: 18px; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
-.mobile-run-criteria-section { margin-bottom: 18px; }
-.mobile-run-criteria-section h3 { margin: 0 0 9px; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
-/* Ticket 70 (B10) is explicitly not authorized for this surface — eligibility text only, never a broken "Open preview" action (see RunFailureNotice's neighbor, RunConversation's previewCandidates comment). */
-.mobile-run-preview-note { margin: 0 0 18px; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-.mobile-run-answer,.mobile-run-steps,.mobile-run-result { margin-bottom: 18px; padding: 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); }
-.mobile-run-answer h3,.mobile-run-steps h3,.mobile-run-result h3 { margin: 0 0 9px; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
-.mobile-run-result h4 { margin: 13px 0 6px; color: var(--text-muted); font-size: 10.5px; font-weight: 600; letter-spacing: .02em; }
-.mobile-run-answer p { margin: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-.mobile-run-steps ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
-.mobile-run-step { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 8px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.mobile-run-step-icon { color: var(--text-muted); font: 11px var(--font-mono); }
-.mobile-run-step.status-completed .mobile-run-step-icon { color: var(--status-working); }
-.mobile-run-step.status-failed .mobile-run-step-icon { color: var(--status-error); }
-.mobile-run-step-time { color: var(--text-muted); font-size: 11px; }
-.mobile-run-truncated { display: block; margin-bottom: 8px; color: var(--text-muted); font-size: 10.5px; }
-.mobile-run-verdict { margin: 0 0 18px; padding: 11px 13px; border-radius: var(--radius-lg); background: var(--surface-elevated); font-size: 12px; }
-.mobile-run-verdict.is-success { color: var(--status-working); }
-.mobile-run-verdict.is-failure { color: var(--status-error); }
-/* Ticket 44 (A10): token usage is secondary technical detail riding along the
-   verdict sentence — it must stay readable, but it should not inherit the
-   verdict's success/failure color, which is reserved for the outcome itself. */
-.mobile-run-verdict-meta { color: var(--text-muted); font-weight: 400; }
 .mobile-run-waiting { margin: 0 0 18px; color: var(--text-muted); font-size: 12px; }
-.mobile-run-result-note { margin: 0 0 9px; color: var(--status-error); font-size: 12px; line-height: 1.5; }
-.mobile-run-result-commit { margin: 0; font-size: 12px; }
-.mobile-run-result code,.mobile-run-files code { font: 11px var(--font-mono); overflow-wrap: anywhere; }
-.mobile-run-files,.mobile-run-gates,.mobile-run-approvals { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; font-size: 12px; line-height: 1.5; }
-.mobile-run-gates li { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 7px; }
-.mobile-run-gates li.is-passed > span { color: var(--status-working); }
-.mobile-run-gates li.is-failed > span { color: var(--status-error); }
-.mobile-run-approvals li { color: var(--text-secondary); }
 
-/* Agents in a Repository (CollaboratorWorkspace). Deliberately built on
-   .mobile-run-tile rather than beside it: the Agents and Runs feeds are one
-   list of "what is happening here", so they must not drift apart visually. */
-.mobile-run-list-heading { margin: 6px 2px 0; color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
-.mobile-run-list-heading:first-child { margin-top: 0; }
 .mobile-agent-messages { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .mobile-agent-message { padding: 11px 13px; border: 1px solid var(--border-muted); border-radius: var(--radius-lg); background: var(--surface-panel); }
 .mobile-agent-message.is-human { border-color: var(--action-primary); background: var(--surface-elevated); }
@@ -744,11 +680,6 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .mobile-request-composer label { display: grid; gap: 5px; }
 .mobile-request-composer label > span { color: var(--text-secondary); font-size: 11.5px; font-weight: 500; }
 .mobile-request-composer textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-primary); font: 13px/1.5 inherit; resize: vertical; }
-.mobile-request-actions { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; }
-.mobile-request-profile select { width: 100%; min-height: 44px; padding: 9px 11px; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-elevated); color: var(--text-primary); font-size: 13px; }
-.mobile-request-actions button { min-height: 44px; padding: 9px 18px; border: 1px solid var(--action-primary); border-radius: var(--radius-md); background: var(--action-primary); color: var(--text-on-action); font-size: 13px; font-weight: 600; cursor: pointer; }
-.mobile-request-actions button:disabled { border-color: var(--border-muted); background: var(--surface-selected); color: var(--text-muted); cursor: default; }
-.mobile-request-empty { margin: 0; padding: 13px; border: 1px dashed var(--border-muted); border-radius: var(--radius-md); color: var(--text-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 
 @media (max-width: 380px) {
   .mobile-conversation { padding-inline: 12px; }
@@ -756,8 +687,6 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
   .mobile-agent-response > .mobile-agent-mark { width: 24px; height: 24px; border-radius: 8px; }
   .mobile-reflow { padding: 11px; font-size: 11px; }
   .mobile-approval-card { width: calc(100% - 24px); margin-inline: 12px; }
-  .mobile-run-blocked-banner { width: calc(100% - 24px); margin-inline: 12px; }
-  .mobile-run-list { padding-inline: 12px; }
   .mobile-request-composer { padding-inline: 12px; }
 }
 
@@ -784,6 +713,3 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .work-status-filter { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--text-muted); font-size: 11px; }
 .work-status-filter select, .operation-group-header select { padding: 6px 28px 6px 9px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-secondary); font-size: 11px; }
 .operation-group-header select { margin-left: auto; }
-.mobile-run-list-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.mobile-run-list-heading-row .mobile-run-list-heading { margin-right: auto; }
-.mobile-run-list-heading-row select { max-width: 52%; padding: 6px 24px 6px 8px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-secondary); font-size: 11px; }
