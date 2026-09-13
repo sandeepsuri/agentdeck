@@ -7,6 +7,7 @@ import type { RateLimitSnapshot, RateLimitWindow } from '../usage/types.js';
 import type { RunReviewState } from '../work-engine/run-review.js';
 import type { CollaboratorRunSummary, WorkRun } from '../work-engine/types.js';
 import { parseApprovalReason } from './risk.js';
+import { repoPathOf } from './workspace/model.js';
 
 export type NeedsYouKind = 'permission' | 'question' | 'conflict' | 'error' | 'usage' | 'review';
 export type NeedsYouAction = 'Respond' | 'Answer' | 'Review' | 'Resolve';
@@ -58,6 +59,11 @@ function windowLabel(window: RateLimitWindow): string {
   return `${Math.round(window.windowMinutes / 60)}-hour`;
 }
 
+/** Settled work nobody has signed off on yet, and that has not already been published. */
+export function isReadyForReview(run: WorkRun, review: RunReviewState | undefined): boolean {
+  return review?.state === 'ready_to_review' && run.publication?.state !== 'succeeded';
+}
+
 function hasReviewDecision(state: RunReviewState | undefined): boolean {
   return state?.state === 'reviewed' || state?.state === 'changes_requested';
 }
@@ -93,7 +99,7 @@ export function deriveNeedsYou({ runs, sessions, conflicts, reviewStates, rateLi
       });
       continue;
     }
-    if (review?.state === 'ready_to_review' && run.publication?.state !== 'succeeded') {
+    if (isReadyForReview(run, review)) {
       items.push({
         id: `run:${run.id}:review`, kind: 'review', action: 'Review',
         title: 'Ready for review', context, occurredAt: run.submittedAt, target: { kind: 'run', runId: run.id },
@@ -103,7 +109,7 @@ export function deriveNeedsYou({ runs, sessions, conflicts, reviewStates, rateLi
 
   for (const session of sessions) {
     if (session.status !== 'waiting_input') continue;
-    const repo = session.worktreePath ?? session.repoId ?? session.cwd;
+    const repo = repoPathOf(session);
     items.push({
       id: `session:${session.id}:waiting`, kind: 'question', action: 'Respond',
       title: `${agentName(session.agent)} is waiting for you`,

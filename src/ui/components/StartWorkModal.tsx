@@ -74,11 +74,14 @@ export function StartWorkModal({ repos, initialRepositoryId = null, onClose, onE
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
+  // Keyed on the id, not the object: App re-fetches `repos` every few seconds,
+  // and a new object must not reload the policy over commands being edited.
+  const repositoryKey = repository?.id;
   useEffect(() => {
-    if (mode !== 'structured' || !repository) return;
+    if (mode !== 'structured' || !repositoryKey) return;
     let disposed = false;
     setVerificationPolicyState('loading');
-    apiFetch(`/api/repos/verification-policy?repoId=${encodeURIComponent(repository.id)}`)
+    apiFetch(`/api/repos/verification-policy?repoId=${encodeURIComponent(repositoryKey)}`)
       .then(async (response) => {
         const body = await response.json() as { policy?: RepositoryVerificationPolicy | null };
         if (!response.ok) throw new Error('Could not load verification policy.');
@@ -96,7 +99,7 @@ export function StartWorkModal({ repos, initialRepositoryId = null, onClose, onE
       })
       .catch(() => { if (!disposed) setVerificationPolicyState('missing'); });
     return () => { disposed = true; };
-  }, [mode, repository]);
+  }, [mode, repositoryKey]);
 
   const structuredRuntimes = resolveStructuredRuntimes(agent, runtimeReadiness);
   const canSubmit = Boolean(task.trim()) && Boolean(repository) && !submitting

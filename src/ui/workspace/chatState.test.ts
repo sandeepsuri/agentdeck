@@ -27,6 +27,10 @@ describe('isAgentWorking', () => {
     expect(isAgentWorking({ processingState: 'idle', awaitingSince: sentAt, messages: [agentReply('2026-09-10T10:00:05.000Z')] })).toBe(false);
   });
 
+  it('stops when the agent went idle after starting, even without a chat reply', () => {
+    expect(isAgentWorking({ processingState: 'idle', awaitingSince: sentAt, agentStarted: true, messages: [] })).toBe(false);
+  });
+
   it('stops once the agent blocks, fails or exits', () => {
     for (const processingState of ['waiting_answer', 'waiting_approval', 'failed', 'disconnected', 'finished'] as const) {
       expect(isAgentWorking({ processingState, awaitingSince: sentAt, messages: [] })).toBe(false);

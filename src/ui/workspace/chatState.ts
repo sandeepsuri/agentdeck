@@ -23,13 +23,16 @@ export function draftForRecipient(text: string, recipient: ChatRecipient): strin
 /** States in which the agent has stopped working: it is blocked on a human, failed, or gone. */
 const SETTLED: ReadonlySet<SessionProcessingState> = new Set(['waiting_answer', 'waiting_approval', 'failed', 'disconnected', 'finished']);
 
-export function isAgentWorking({ processingState, awaitingSince, messages }: {
+export function isAgentWorking({ processingState, awaitingSince, agentStarted = false, messages }: {
   processingState: SessionProcessingState | undefined;
   /** When this composer last delivered a message to the agent, or null. */
   awaitingSince: string | null;
+  /** True once the server reported the agent working after that delivery — a later idle then means the turn ended without a chat reply. */
+  agentStarted?: boolean;
   messages: readonly SessionChatMessage[];
 }): boolean {
   if (processingState && SETTLED.has(processingState)) return false;
+  if (agentStarted && processingState === 'idle') return false;
   if (awaitingSince && !messages.some((message) => message.authorKind === 'agent' && message.ts > awaitingSince)) return true;
   return processingState === 'working';
 }

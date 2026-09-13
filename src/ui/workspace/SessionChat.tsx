@@ -228,6 +228,7 @@ export function SessionChat({ session, principal, onError }: {
   const [interactionView, setInteractionView] = useState<SessionInteractionsView | null>(null);
   /** When this person last delivered something to the agent — the working state holds until the agent answers, blocks, fails or exits. */
   const [awaitingSince, setAwaitingSince] = useState<string | null>(null);
+  const [agentStarted, setAgentStarted] = useState(false);
   const posted = useRef(new Map<string, SessionChatMessage>());
 
   useEffect(() => {
@@ -237,6 +238,7 @@ export function SessionChat({ session, principal, onError }: {
     setMessages([]);
     setInteractionView(null);
     setAwaitingSince(null);
+    setAgentStarted(false);
     setLoaded(false);
     const tick = async () => {
       try {
@@ -268,13 +270,17 @@ export function SessionChat({ session, principal, onError }: {
 
   const replaceInteraction = (next: SessionInteraction) => {
     setAwaitingSince(new Date().toISOString());
+    setAgentStarted(false);
     setInteractionView((current) => current ? {
       ...current, processingState: 'delivery_pending',
       interactions: current.interactions.map((item) => item.id === next.id ? next : item),
     } : current);
   };
   const agentName = session.agent === 'claude' ? 'Claude' : 'Codex';
-  const working = isAgentWorking({ processingState: interactionView?.processingState, awaitingSince, messages });
+  useEffect(() => {
+    if (awaitingSince && interactionView?.processingState === 'working') setAgentStarted(true);
+  }, [awaitingSince, interactionView?.processingState]);
+  const working = isAgentWorking({ processingState: interactionView?.processingState, awaitingSince, agentStarted, messages });
 
   return <section aria-label="Shared session chat" className="session-chat">
     {loadError && <p role="status" className="mobile-agent-hint">Unable to refresh the conversation. Retrying…</p>}
@@ -294,6 +300,7 @@ export function SessionChat({ session, principal, onError }: {
         setMessages((current) => [...current.filter((item) => item.id !== message.id), message].slice(-100));
         if (message.audience === 'agent' && (message.delivery === 'sent' || message.delivery === 'queued')) {
           setAwaitingSince(message.ts);
+          setAgentStarted(false);
           setInteractionView((current) => current ? { ...current, processingState: 'delivery_pending' } : current);
         }
       }} />

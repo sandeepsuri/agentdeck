@@ -11,6 +11,7 @@ import { deriveRunResult } from '../../work-engine/run-result.js';
 import type { PublicationTarget, WorkRun } from '../../work-engine/types.js';
 import { apiFetch } from '../apiFetch.js';
 import { postRunFeedback } from '../collaboratorRuns.js';
+import { isReadyForReview } from '../needsYou.js';
 import { estimateChangeRisk, RISK_LABELS } from '../risk.js';
 import { ChangesWorkspace } from './ChangesWorkspace.js';
 import { RunFeedbackPanel } from './RunFeedbackPanel.js';
@@ -77,7 +78,7 @@ function reviewGroups(runs: readonly WorkRun[], reviewStates: ReadonlyMap<string
   const settled = runs.filter((run) => isTerminalRunStatus(run.status) && deriveRunResult(run));
   const byState = (state: RunReviewState['state']) => settled.filter((run) => (reviewStates.get(run.id)?.state ?? 'not_applicable') === state);
   return [
-    { label: 'Ready for review', runs: byState('ready_to_review').filter((run) => run.publication?.state !== 'succeeded') },
+    { label: 'Ready for review', runs: settled.filter((run) => isReadyForReview(run, reviewStates.get(run.id))) },
     { label: 'Changes requested', runs: byState('changes_requested') },
     { label: 'Reviewed', runs: [...byState('reviewed'), ...byState('ready_to_review').filter((run) => run.publication?.state === 'succeeded')] },
   ];
@@ -241,7 +242,21 @@ function RunReview({ run, review, sessions, claims, structuredAttemptsEnabled, o
         {run.attempts && run.attempts.length > 1 && <div><dt>Retries</dt><dd>{run.attempts.length - 1}</dd></div>}
       </dl>
 
-      <div aria-label="Review sections" className="run-detail-tabs" role="tablist">
+      <div
+        aria-label="Review sections"
+        className="run-detail-tabs"
+        onKeyDown={(event) => {
+          const index = REVIEW_TABS.findIndex((item) => item.id === tab);
+          const next = event.key === 'ArrowRight' ? REVIEW_TABS[(index + 1) % REVIEW_TABS.length]
+            : event.key === 'ArrowLeft' ? REVIEW_TABS[(index - 1 + REVIEW_TABS.length) % REVIEW_TABS.length]
+              : event.key === 'Home' ? REVIEW_TABS[0] : event.key === 'End' ? REVIEW_TABS.at(-1) : undefined;
+          if (!next) return;
+          event.preventDefault();
+          setTab(next.id);
+          (event.currentTarget.querySelector(`#review-tab-${next.id}`) as HTMLButtonElement | null)?.focus();
+        }}
+        role="tablist"
+      >
         {REVIEW_TABS.map((item) => (
           <button aria-controls={`review-tabpanel-${item.id}`} aria-selected={tab === item.id} className={tab === item.id ? 'is-active' : ''} id={`review-tab-${item.id}`} key={item.id} onClick={() => setTab(item.id)} role="tab" tabIndex={tab === item.id ? 0 : -1} type="button">{item.label}</button>
         ))}

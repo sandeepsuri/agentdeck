@@ -92,6 +92,9 @@ describe('ReviewView', () => {
     expect(host.querySelector('[data-testid="changes"]')?.textContent).toBe('Diff for /worktrees/rate-limit');
     await act(async () => { host.querySelector<HTMLButtonElement>('#review-tab-tests')!.click(); });
     expect(host.querySelector('#review-tabpanel-tests')?.textContent).toContain('npm test');
+    await act(async () => { host.querySelector('[role="tablist"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); });
+    expect(host.querySelector('#review-tab-activity')?.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(host.querySelector('#review-tab-activity'));
   });
 
   it('records an approval as a review decision', async () => {

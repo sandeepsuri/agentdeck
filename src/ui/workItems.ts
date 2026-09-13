@@ -5,7 +5,7 @@
 import type { AgentType, Repo, Session } from '../types.js';
 import type { RunReviewState } from '../work-engine/run-review.js';
 import type { RunStatus, WorkRun } from '../work-engine/types.js';
-import type { NeedsYouItem } from './needsYou.js';
+import { isReadyForReview, type NeedsYouItem } from './needsYou.js';
 import { STATUS_LABELS, repoPathOf, sessionLabel } from './workspace/model.js';
 import { isTerminalRunStatus } from './workspace/runModel.js';
 
@@ -118,7 +118,7 @@ export function deriveWorkItems({ runs, sessions, historySessions, repos, needsY
 
   for (const run of runs) {
     const review = reviewStates?.get(run.id);
-    const readyForReview = review?.state === 'ready_to_review' && run.publication?.state !== 'succeeded';
+    const readyForReview = isReadyForReview(run, review);
     const terminal = isTerminalRunStatus(run.status);
     const bucket: WorkBucket = needsRun.has(run.id) ? 'needs_you'
       : readyForReview ? 'review'
