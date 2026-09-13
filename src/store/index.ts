@@ -16,6 +16,7 @@ import type {
   WorkRun, WorkSpec,
 } from '../work-engine/types.js';
 import { migrate } from './migrate.js';
+import { UsageRepository } from './usage.js';
 import type {
   CollaboratorRow, CollaboratorStore, DeviceRow, InvitationRow,
 } from '../collaborators/service.js';
@@ -381,7 +382,11 @@ export class Store implements CollaboratorStore {
       }
     }
     migrate(this.db, MIGRATIONS_DIR);
+    this.usage = new UsageRepository(this.db);
   }
+
+  /** Local Claude/Codex token usage and model news (src/usage). */
+  readonly usage: UsageRepository;
 
   close(): void {
     this.db.close();

@@ -24,7 +24,7 @@ interface NavigationItem {
 const NAVIGATION_GROUPS: readonly { label: string; items: readonly NavigationItem[] }[] = [
   { label: 'Repositories', items: [{ id: 'overview', glyph: '⌂' }, { id: 'tasks', glyph: '✓' }, { id: 'changes', glyph: '±', badge: 'changes' }] },
   { label: 'Work', items: [{ id: 'operations', glyph: '◉' }, { id: 'terminal', glyph: '>_' }, { id: 'grid', glyph: '▦' }, { id: 'history', glyph: '↶', badge: 'history' }] },
-  { label: 'System', items: [{ id: 'signals', glyph: '⌁' }] },
+  { label: 'System', items: [{ id: 'signals', glyph: '⌁' }, { id: 'usage', glyph: '◔' }] },
 ];
 
 function NavigationGroup({ label, items, activeView, badges, onView }: {

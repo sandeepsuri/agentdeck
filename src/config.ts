@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parsePricingOverrides, type PricingTable } from './usage/pricing.js';
 
 export interface AgentDeckConfig {
   /** Port the app is reachable on (UI + API). */
@@ -39,6 +40,13 @@ export interface AgentDeckConfig {
    * config.json until ticket 15 ships the full managed-work release.
    */
   structuredAttemptsEnabled?: boolean;
+  /**
+   * Per-model price overrides for the Usage view's estimated API cost, USD
+   * per million tokens: { "<model id or prefix>": { input, output,
+   * cacheRead?, cacheWrite?, cacheWrite1h? } }. Merged over the bundled
+   * table in usage/pricing.ts.
+   */
+  usagePricing?: PricingTable;
 }
 
 export function defaultDataDir(): string {
@@ -106,6 +114,8 @@ export function loadConfig(configPath?: string): AgentDeckConfig {
   if (typeof o.structuredAttemptsEnabled === 'boolean') {
     cfg.structuredAttemptsEnabled = o.structuredAttemptsEnabled;
   }
+  const usagePricing = parsePricingOverrides(o.usagePricing);
+  if (usagePricing) cfg.usagePricing = usagePricing;
   return cfg;
 }
 

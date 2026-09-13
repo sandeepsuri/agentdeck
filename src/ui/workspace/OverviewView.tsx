@@ -18,6 +18,7 @@ import { useEffect, useState } from 'react';
 import type { Repo, Session, SessionStatus } from '../../types.js';
 import type { RunStatus, WorkRun } from '../../work-engine/types.js';
 import { formatRunLabel, isTerminalRunStatus, orderRuns, RUN_STATUS_OPTIONS } from './runModel.js';
+import { UsageStrip } from './UsageStrip.js';
 import { ElapsedTime, SESSION_STATUS_OPTIONS, STATUS_LABELS, StatusBadge, StatusLamp, relativeTime, repoPathOf, sessionLabel } from './model.js';
 
 export interface Props {
@@ -33,6 +34,8 @@ export interface Props {
   onSelectRun: (run: WorkRun) => void;
   onSelectSession: (session: Session) => void;
   onRepositoryContextChange?: (name: string | null) => void;
+  /** Shows the usage glance under the heading; clicking it opens the Usage view. */
+  onOpenUsage?: () => void;
 }
 
 function repoOf(repos: readonly Repo[], id: string | undefined): Repo | undefined {
@@ -166,7 +169,7 @@ function RepositoryPage({ repo, runs, sessions, selectedRunId, selectedId, onSel
   );
 }
 
-export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, requestedRepositoryId = null, requestedNavigationSequence = 0, onSelectRun, onSelectSession, onRepositoryContextChange }: Props) {
+export function OverviewView({ repos, runs, sessions, selectedRunId = null, selectedId = null, requestedRepositoryId = null, requestedNavigationSequence = 0, onSelectRun, onSelectSession, onRepositoryContextChange, onOpenUsage }: Props) {
   // Opens on the Repository behind whatever is already selected (a run/session
   // reached via deep link, the sidebar, or the command palette) rather than
   // an arbitrary first entry — but only as a starting point: once a person
@@ -215,6 +218,7 @@ export function OverviewView({ repos, runs, sessions, selectedRunId = null, sele
         <h1>Overview</h1>
         <span>{repos.length} repositor{repos.length === 1 ? 'y' : 'ies'} · {runs.length} runs · {sessions.length} sessions</span>
       </div>
+      {onOpenUsage && <UsageStrip onOpen={onOpenUsage} />}
       <div className="repo-overview-grid">
         {repos.map((repo) => (
           <RepoCard

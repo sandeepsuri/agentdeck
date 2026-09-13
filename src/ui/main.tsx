@@ -7,6 +7,7 @@ import './theme.css';
 import './workspace.css';
 import './runs.css';
 import './collaborator.css';
+import './usage.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root');
