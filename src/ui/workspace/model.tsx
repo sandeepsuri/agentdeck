@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'overview' | 'tasks' | 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history';
+export type WorkspaceView = 'overview' | 'tasks' | 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history' | 'usage';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -12,6 +12,7 @@ export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
   { id: 'grid', label: 'Grid' },
   { id: 'signals', label: 'Signals' },
   { id: 'history', label: 'History' },
+  { id: 'usage', label: 'Usage' },
 ];
 
 export const STATUS_LABELS: Record<SessionStatus, string> = {

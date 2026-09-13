@@ -27,6 +27,10 @@ import { CollaboratorService } from '../collaborators/service.js';
 import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
 import { resolveSenderIdentity } from './session-conversation.js';
 import { RunPreviewServer } from './run-preview-server.js';
+import { UsageQueries } from '../usage/aggregate.js';
+import { UsageIndexer } from '../usage/indexer.js';
+import { ModelNewsService } from '../usage/news.js';
+import { DEFAULT_PRICING } from '../usage/pricing.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -114,9 +118,20 @@ export async function startServer(): Promise<RunningServer> {
     },
     remove: (sessionId) => manager.publishSessionRemoved(sessionId), terminals,
   });
+  // Usage view: indexes ~/.claude/projects and ~/.codex/sessions in the
+  // background; nothing here blocks startup.
+  const logUsage = (message: string, error?: unknown) => console.error(message, error instanceof Error ? error.message : error ?? '');
+  const modelNews = new ModelNewsService({ repository: store.usage, log: logUsage });
+  const usageIndexer = new UsageIndexer({ repository: store.usage, log: logUsage, onIndexed: () => modelNews.recordFirstUse() });
+  const usageQueries = new UsageQueries({
+    repository: store.usage,
+    getPricing: () => ({ ...DEFAULT_PRICING, ...config.usagePricing }),
+    status: () => ({ indexedAt: usageIndexer.indexedAt, indexing: usageIndexer.indexing }),
+  });
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators,
+    usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
   });
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator
@@ -149,6 +164,7 @@ export async function startServer(): Promise<RunningServer> {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
     discovery.stop(); coordination.stop();
+    usageIndexer.stop(); modelNews.stop();
     companion?.close();
     releaseWakeLock();
     await manager.shutdown();
@@ -183,6 +199,8 @@ export async function startServer(): Promise<RunningServer> {
 
     companion = launchNativeCompanion(port);
     discovery.start();
+    usageIndexer.start();
+    modelNews.start();
     void coordination.syncRepos(store.listRepos());
     if (!store.getSetting<boolean>('firstRunShown')) {
       console.log('[agentdeck] First run: macOS may request Automation access when focusing terminal tabs. You can continue if denied and enable it later in System Settings → Privacy & Security → Automation.');

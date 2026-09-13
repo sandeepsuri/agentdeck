@@ -14,6 +14,7 @@ import type { CollaboratorService } from '../collaborators/service.js';
 import { registerRoutes, type RouteContext } from './routes.js';
 import { registerCollaboratorRoutes } from './collaborator-routes.js';
 import { registerProfileRoutes } from './profile-routes.js';
+import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -163,6 +164,8 @@ export interface AppContext {
    * (via routes.ts) GET /api/connection.
    */
   remoteHosts?: readonly string[];
+  /** Local token usage and model news — /api/usage/* (usage-routes.ts). Local-only by omission from both allowlists. */
+  usage?: UsageRouteContext;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -264,6 +267,8 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
     { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
   ).device?.grantedProfileIds);
+
+  if (ctx.usage) registerUsageRoutes(app, ctx.usage);
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

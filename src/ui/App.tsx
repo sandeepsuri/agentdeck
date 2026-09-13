@@ -30,6 +30,7 @@ import { OperationsView } from './workspace/OperationsView.js';
 import { OverviewView } from './workspace/OverviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { SignalsView } from './workspace/SignalsView.js';
+import { UsageView } from './workspace/UsageView.js';
 import { TasksView } from './workspace/TasksView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
@@ -768,13 +769,14 @@ export function App() {
 
       <div className="app-body">
         <main className="workspace-stage">
-          <div className={layerClass('overview')}><OverviewView onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
+          <div className={layerClass('overview')}><OverviewView onOpenUsage={() => navigateToView('usage')} onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
           <div className={layerClass('tasks')}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
           <div className={layerClass('operations')}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
           {terminalVisited && <div className={layerClass('terminal')}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
           <div className={layerClass('changes')}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
           <div className={layerClass('grid')}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
           <div className={layerClass('signals')}><SignalsView events={events} /></div>
+          <div className={layerClass('usage')}><UsageView active={!showSettings && view === 'usage'} onSelectSession={selectSessionFromOverview} repos={repos} sessions={sessions} /></div>
           <div className={layerClass('history')}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
           <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} />}</div>
         </main>
