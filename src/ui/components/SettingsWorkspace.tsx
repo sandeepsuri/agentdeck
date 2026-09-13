@@ -74,7 +74,13 @@ function SettingsTabList({ active, onChange }: { active: SettingsTab; onChange: 
  * openaiKeyConfigured (a boolean), never the key itself, so there is
  * nothing to prefill here even right after saving one.
  */
-export function SettingsWorkspace({ onBack, repos = [], appearanceControl }: { onBack: () => void; repos?: Repo[]; appearanceControl?: ReactNode }) {
+export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onInstallHooks }: {
+  onBack: () => void;
+  repos?: Repo[];
+  appearanceControl?: ReactNode;
+  /** Redesign spec §03: integrations live in Settings rather than the top bar. */
+  onInstallHooks?: () => void;
+}) {
   const [tab, setTab] = useState<SettingsTab>('general');
   const [models, setModels] = useState<Model[]>([]);
   const [openaiKeyConfigured, setOpenaiKeyConfigured] = useState(false);
@@ -186,6 +192,14 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl }: { o
               </div>
               <div className="field-hint"><span>{openaiKeyConfigured ? 'An OpenAI API key is configured.' : 'No OpenAI API key configured — OpenAI models are shown disabled until one is added.'}</span></div>
             </fieldset>
+
+            {onInstallHooks && (
+              <fieldset>
+                <legend>Agent hooks</legend>
+                <p className="field-hint-block">Hooks let Claude Code and Codex report activity, questions and approvals to AgentDeck. Restart active sessions after installing.</p>
+                <button className="button" onClick={onInstallHooks} type="button">Install hooks</button>
+              </fieldset>
+            )}
 
             {appearanceControl && (
               <fieldset>

@@ -97,7 +97,7 @@ describe('MobileWorkspace (static render)', () => {
       wsReady: true,
     }));
     expect(live).toContain('Message everyone');
-    expect(live).toContain('Mention @agent');
+    expect(live).toContain('aria-label="Send to"');
     expect(live).toContain('Session view');
 
     const ended = renderToStaticMarkup(createElement(MobileWorkspace, {

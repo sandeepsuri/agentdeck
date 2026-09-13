@@ -180,3 +180,29 @@ describe('shared agent requests and processing state', () => {
     expect(host.textContent).not.toContain('Claude is working');
   });
 });
+
+describe('agent working state after delivery', () => {
+  it('shows the agent working as soon as a message is delivered, until the agent replies', async () => {
+    vi.useFakeTimers();
+    let rows: SessionChatMessage[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes('/capabilities')) return json({ send: 'managed' });
+      if (target.endsWith('/interactions')) return json({ providerSupport: 'supported', processingState: 'idle', interactions: [] });
+      if (init?.method === 'POST') return json({ ...message('5', '@agent run the tests', 'Admin'), ts: '2026-09-01T00:00:05Z', audience: 'agent', delivery: 'sent' });
+      return json(rows);
+    }));
+    await render({ ...session, agent: 'claude' });
+    await submit('@agent run the tests');
+    expect(host.textContent).toContain('Claude is working…');
+
+    // The server still reports idle before the agent picks the turn up — the working state must hold.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(host.textContent).toContain('Claude is working…');
+
+    rows = [{ id: 'reply', ts: '2026-09-01T00:00:09Z', authorKind: 'agent', displayName: 'Claude Code', text: 'Tests pass.', event: 'message' }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(host.textContent).not.toContain('Claude is working…');
+    expect(host.textContent).toContain('Tests pass.');
+  });
+});

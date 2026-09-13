@@ -63,7 +63,7 @@ export function CommandPalette<R extends SearchRun, S extends SearchSession>({ o
   const visibleRuns = useMemo(() => runs.filter((run) =>
     !normalized || `${runObjective(run)} ${run.id} ${'taskId' in run ? run.taskId : ''} ${runRepository(run).name} ${runRequester(run)} ${formatRunLabel(run.status)}`.toLowerCase().includes(normalized)), [normalized, runs]);
   const visibleViews = onView ? WORKSPACE_VIEWS.filter((view) => !normalized || view.label.toLowerCase().includes(normalized)) : [];
-  const showLaunch = Boolean(onLaunch) && (!normalized || 'launch new session'.includes(normalized));
+  const showLaunch = Boolean(onLaunch) && (!normalized || 'start work new session run launch'.includes(normalized));
   const items = [
     ...(showLaunch ? [{ key: 'action:launch', activate: () => { onClose(); onLaunch?.(); } }] : []),
     ...visibleViews.map((view) => ({ key: `view:${view.id}`, activate: () => { onView?.(view.id); onClose(); } })),
@@ -108,7 +108,7 @@ export function CommandPalette<R extends SearchRun, S extends SearchSession>({ o
         <div className="palette-input"><span>&gt;_</span><input ref={inputRef} onChange={(event) => { setQuery(event.target.value); setSelectedIndex(0); }} onKeyDown={onInputKeyDown} placeholder="Search repositories, runs, sessions, or actions…" value={query} /><kbd>ESC</kbd></div>
         <div className="palette-results">
           {(onLaunch || onView) && <div className="sidebar-section-label"><span>Actions</span></div>}
-          {showLaunch && <button {...selectionProps('action:launch')} onClick={() => activateItem('action:launch')} type="button"><span>＋</span><strong>Launch new session</strong><kbd>⌘L</kbd></button>}
+          {showLaunch && <button {...selectionProps('action:launch')} onClick={() => activateItem('action:launch')} type="button"><span>＋</span><strong>Start work</strong><kbd>⌘L</kbd></button>}
           {visibleViews.map((view) => <button {...selectionProps(`view:${view.id}`)} key={view.id} onClick={() => activateItem(`view:${view.id}`)} type="button"><span>⌘</span><strong>Open {view.label}</strong></button>)}
           <div className="sidebar-section-label"><span>Repositories</span><span>{visibleRepos.length}</span></div>
           {visibleRepos.map((repo) => <button {...selectionProps(`repo:${repo.id}`)} data-repo-id={repo.id} key={repo.id} onClick={() => activateItem(`repo:${repo.id}`)} type="button"><span>▣</span><strong>{repo.name}<small>{repo.path}{repo.currentBranch ? ` · ${repo.currentBranch}` : ''}</small></strong></button>)}

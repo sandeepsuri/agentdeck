@@ -36,8 +36,8 @@ Hooks enrich status reporting, capture supported replies, track edits, and allow
 
 From the workspace:
 
-1. Select a session in the target repository.
-2. Choose **Install hooks**.
+1. Select the target repository in the sidebar (otherwise the first known repository is used).
+2. Open **Settings → General** and choose **Install hooks**.
 3. Restart Claude Code or Codex sessions that were already running.
 4. Run a turn so AgentDeck can associate the hook identity with the discovered session.
 

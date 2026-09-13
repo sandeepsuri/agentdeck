@@ -9,7 +9,8 @@ import type {
 import {
   describeOutcome, formatTokenCount, summarizeAttempt, type ActivityStatus,
 } from './attemptActivity.js';
-import { HistoryScrollback } from './HistoryView.js';
+import { ApprovalCard } from '../components/ApprovalCard.js';
+import { HistoryScrollback } from './HistoryScrollback.js';
 import { RunFeedbackPanel } from './RunFeedbackPanel.js';
 import { formatRunLabel, isRetryAttemptEligibleStatus, isTerminalRunStatus } from './runModel.js';
 
@@ -72,7 +73,7 @@ const STATUS_MARK: Record<ActivityStatus, string> = { started: '…', completed:
  * sentences, then a verdict. The exact commands stay one toggle away — the
  * durable log keeps them, and a reader who wants them is one click from them.
  */
-function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
+export function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
   const [showDetail, setShowDetail] = useState(false);
   const { answer, steps, outcome, usage } = summarizeAttempt(events);
   const settled = Boolean(outcome);
@@ -129,7 +130,7 @@ function AttemptReport({ events }: { events: readonly AttemptEvent[] }) {
   );
 }
 
-const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
+export const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
   authorized: 'Authorized — not yet started.',
   executing: 'Publishing…',
   succeeded: 'Published.',
@@ -138,7 +139,7 @@ const PUBLICATION_STATE_COPY: Record<RunPublication['state'], string> = {
 };
 
 /** Ticket 13: the one gate for "publication is even relevant here" — a delivery commit on a `completed` Run — shared by PublicationPanel and PublicationHint so the two surfaces of the same decision can't drift apart. */
-function isPublishableRun(run: WorkRun): boolean {
+export function isPublishableRun(run: WorkRun): boolean {
   return Boolean(deriveRunResult(run)?.commit) && run.status === 'completed';
 }
 
@@ -151,7 +152,7 @@ function isPublishableRun(run: WorkRun): boolean {
  * Collaborators never reach this desktop panel; the mobile UI does not
  * render it, and the engine refuses them regardless (AC2).
  */
-function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: WorkRun, target: PublicationTarget) => void }) {
+export function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: WorkRun, target: PublicationTarget) => void }) {
   if (!isPublishableRun(run)) return null;
   const { publication } = run;
   const requestedTarget: PublicationTarget = defaultPublicationTarget(run.spec.requestedDeliveryResult);
@@ -209,7 +210,7 @@ function PublicationPanel({ run, onPublish }: { run: WorkRun; onPublish?: (run: 
  * it). Renders once the Attempt has settled, whatever the outcome —
  * AC7's honest non-success result gets the same treatment as a verified one.
  */
-function RunResultPanel({ run, onApply, onReverify, onViewChanges, onPreview }: {
+export function RunResultPanel({ run, onApply, onReverify, onViewChanges, onPreview }: {
   run: WorkRun;
   onApply?: (run: WorkRun) => void;
   onReverify?: (run: WorkRun) => void;
@@ -371,8 +372,14 @@ type RunDetailTab = 'overview' | 'activity' | 'execution';
 const RUN_DETAIL_TABS: { id: RunDetailTab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'activity', label: 'Activity' },
-  { id: 'execution', label: 'Execution' },
+  // Redesign spec §05: execution metadata is Advanced details, not a peer of the work itself.
+  { id: 'execution', label: 'Advanced details' },
 ];
+
+/** Redesign spec §05 vocabulary: an Attempt is "Retry #n" in people-facing text; the first one is the initial run. */
+export function attemptLabel(ordinal: number): string {
+  return ordinal <= 1 ? 'Initial run' : `Retry #${ordinal - 1}`;
+}
 
 /** WAI-ARIA "Tabs" pattern: roving tabindex, Left/Right/Home/End move both selection and focus. */
 function RunDetailTabList({ active, onChange }: { active: RunDetailTab; onChange: (tab: RunDetailTab) => void }) {
@@ -428,7 +435,7 @@ function RunBlockedNotice({ heading, detail, onOpenExecution }: { heading: strin
     <div className="run-blocked-notice" role="alert">
       <strong>{heading}</strong>
       {detail && <p>{detail}</p>}
-      <button className="button" onClick={onOpenExecution} type="button">Open Execution</button>
+      <button className="button" onClick={onOpenExecution} type="button">Open advanced details</button>
     </div>
   );
 }
@@ -447,7 +454,7 @@ function PublicationHint({ run, onOpenExecution }: { run: WorkRun; onOpenExecuti
     <p className="run-publication-hint">
       <span className={`work-run-status status-${publication?.state ?? 'none'}`}>Publication</span>
       {' '}{publication ? PUBLICATION_STATE_COPY[publication.state] : 'This result stays local until you publish it.'}
-      {' '}<button className="button" onClick={onOpenExecution} type="button">Open Execution</button>
+      {' '}<button className="button" onClick={onOpenExecution} type="button">Open advanced details</button>
     </p>
   );
 }
@@ -534,7 +541,7 @@ export function RunWorkspace({
   return (
     <article className="run-workspace">
       <header>
-        <span><small>Run {run.id}</small><h1 title={run.spec.objective}>{run.spec.objective}</h1></span>
+        <span><small>{run.spec.repository.name}</small><h1 title={run.spec.objective}>{run.spec.objective}</h1></span>
         <span className="run-header-actions">
           <span className={`work-run-status status-${run.status}`}>{formatRunLabel(run.status)}</span>
           {canDelete && (
@@ -564,18 +571,21 @@ export function RunWorkspace({
         return (
           <section aria-labelledby="run-attention-title" className="run-attention-request" data-attention-kind={pending.kind}>
             <strong id="run-attention-title">{pending.kind === 'approval' ? 'Approval requested' : 'Input requested'}</strong>
-            <p>{pending.reason}</p>
             {pending.kind === 'approval' ? (
-              <div className="run-attention-actions" role="group" aria-label="Approval response">
-                <button className="button" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'deny' })} type="button">
-                  Deny
-                </button>
-                <button className="button button-primary" onClick={() => onResolveAttention?.(run, pending.id, { kind: 'approve' })} type="button">
-                  Approve
-                </button>
-              </div>
+              <ApprovalCard
+                fallbackAgent={envelope.state === 'ready' && envelope.capabilityEnvelope.runtime === 'codex' ? 'Codex' : 'Claude'}
+                intent={run.spec.objective}
+                onApprove={() => onResolveAttention?.(run, pending.id, { kind: 'approve' })}
+                onDeny={() => onResolveAttention?.(run, pending.id, { kind: 'deny' })}
+                reason={pending.reason}
+                repositoryName={run.spec.repository.name}
+                {...(preparation.worktreePath ? { workingDirectory: preparation.worktreePath } : {})}
+              />
             ) : (
-              <AttentionInputForm onSubmit={(value) => onResolveAttention?.(run, pending.id, { kind: 'input', value })} />
+              <>
+                <p>{pending.reason}</p>
+                <AttentionInputForm onSubmit={(value) => onResolveAttention?.(run, pending.id, { kind: 'input', value })} />
+              </>
             )}
           </section>
         );
@@ -631,13 +641,13 @@ export function RunWorkspace({
          */}
         {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
           <section className="run-attempt-history-section">
-            <h2>Attempt history</h2>
+            <h2>Run history</h2>
             {run.attempts && run.attempts.length > 0 ? (
               <div className="run-attempt-history">
                 {run.attempts.map((record) => (
                   <details className="run-section-detail" key={record.attemptId} open={record.ordinal === run.attempts!.length}>
                     <summary>
-                      Attempt {record.ordinal} of {run.attempts!.length}
+                      {attemptLabel(record.ordinal)}
                       {' '}<span className={`work-run-status status-${record.state.state}`}>{formatRunLabel(record.state.state)}</span>
                     </summary>
                     {record.state.state !== 'idle' && <AttemptReport events={record.state.events} />}
@@ -660,11 +670,11 @@ export function RunWorkspace({
          */}
         {structuredAttemptsEnabled && eligibleForStructuredAttempt && (
           <section className="run-attempt">
-            <h2>Attempt</h2>
+            <h2>Agent</h2>
             <dl className="run-intent-grid">
               <div><dt>Runtime</dt><dd>{formatRunLabel(envelope.state === 'ready' ? envelope.capabilityEnvelope.runtime : '')}</dd></div>
               <div>
-                <dt>Attempt state</dt>
+                <dt>Agent state</dt>
                 <dd><span className={`work-run-status status-${attempt.state}`}>{formatRunLabel(attempt.state)}</span></dd>
               </div>
               {attempt.state === 'failed' && <div><dt>Terminal outcome</dt><dd>Failed — {attempt.reason}</dd></div>}
@@ -680,12 +690,12 @@ export function RunWorkspace({
             </dl>
             {canStart && (
               <button className="button button-primary" onClick={() => onStart?.(run)} type="button">
-                Start Attempt
+                Start agent
               </button>
             )}
             {canRetryAttempt && (
               <button className="button" onClick={() => onRetryAttempt?.(run)} type="button">
-                Start a new attempt
+                Start {attemptLabel((run.attempts?.length ?? 1) + 1).toLowerCase()}
               </button>
             )}
             {(canPause || canResume) && (
@@ -798,7 +808,7 @@ export function RunWorkspace({
         <PublicationPanel onPublish={onPublish} run={run} />
       </div>
 
-      <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Task {run.taskId}</footer>
+      <footer>Submitted {new Date(run.submittedAt).toLocaleString()} · Run {run.id} · Task {run.taskId}</footer>
     </article>
   );
 }

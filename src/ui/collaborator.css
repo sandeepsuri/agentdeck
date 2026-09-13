@@ -104,3 +104,6 @@
   .collab-shell .app-topbar { gap: 8px; padding-inline: 10px; }
   .collab-detail-scroll { padding-inline: 14px; }
 }
+
+/* Redesign spec §10: Needs You leads the collaborator's screen. */
+.collab-needs-you { margin-bottom: 26px; }

@@ -191,8 +191,8 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
   it('stays hidden when the feature gate is off, even for an eligible Run', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: false }));
 
-    expect(html).not.toContain('Start Attempt');
-    expect(html).not.toContain('Attempt state');
+    expect(html).not.toContain('Start agent');
+    expect(html).not.toContain('Agent state');
   });
 
   it('offers a Start Attempt action for a Claude Run too — both runtimes have a real Attempt adapter', () => {
@@ -205,8 +205,8 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
 
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onStart: () => undefined }));
 
-    expect(html).toContain('Attempt state');
-    expect(html).toContain('Start Attempt');
+    expect(html).toContain('Agent state');
+    expect(html).toContain('Start agent');
   });
 
   it('offers a Start Attempt action for an idle, eligible Run once the gate is on', () => {
@@ -214,14 +214,14 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
       run: eligibleRun(), structuredAttemptsEnabled: true, onStart: () => undefined,
     }));
 
-    expect(html).toContain('Start Attempt');
+    expect(html).toContain('Start agent');
     expect(html).toContain('Idle');
   });
 
   it('offers no Start Attempt action without a handler, even when eligible', () => {
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run: eligibleRun(), structuredAttemptsEnabled: true }));
 
-    expect(html).not.toContain('Start Attempt');
+    expect(html).not.toContain('Start agent');
   });
 
   it('reports a running Attempt in plain language, and offers no Start action once one is underway', () => {
@@ -247,7 +247,7 @@ describe('RunWorkspace Attempt panel (ticket 05, feature-gated)', () => {
 
     const html = renderToStaticMarkup(createElement(RunWorkspace, { run, structuredAttemptsEnabled: true, onStart: () => undefined }));
 
-    expect(html).not.toContain('Start Attempt');
+    expect(html).not.toContain('Start agent');
     expect(html).toContain('Ran the tests');
     expect(html).toContain('Working on the fix now.');
     // Lifecycle bookkeeping is not a step a reader needs.
@@ -795,7 +795,7 @@ describe('RunWorkspace companion Sessions (ticket 68, B13)', () => {
 });
 
 // Ticket 68 (B12, docs/specs/run-retry-attempt-history.md): the attempt-
-// history list and the "Start a new attempt" control — both live inside
+// history list and the "Start retry #1" control — both live inside
 // the same structuredAttemptsEnabled-gated section the single-attempt view
 // already used, per RunWorkspace's own existing convention.
 describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
@@ -836,17 +836,17 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
       run: readyRun({ status: 'running', attempt: runningAttempt.state, attempts: [failedAttempt, runningAttempt] }),
       structuredAttemptsEnabled: true,
     }));
-    expect(html).toContain('Attempt 1 of 2');
-    expect(html).toContain('Attempt 2 of 2');
+    expect(html).toContain('Initial run');
+    expect(html).toContain('Retry #1');
     expect(html).toContain('process crashed');
   });
 
-  it('offers "Start a new attempt" for a failed Run, and it is absent for a completed one', () => {
+  it('offers "Start retry #1" for a failed Run, and it is absent for a completed one', () => {
     const failedHtml = renderToStaticMarkup(createElement(RunWorkspace, {
       run: readyRun({ status: 'failed', attempt: failedAttempt.state, attempts: [failedAttempt] }),
       structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
     }));
-    expect(failedHtml).toContain('Start a new attempt');
+    expect(failedHtml).toContain('Start retry #1');
 
     const completedAttempt = {
       ...failedAttempt,
@@ -856,7 +856,7 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
       run: readyRun({ status: 'completed', attempt: completedAttempt.state, attempts: [completedAttempt] }),
       structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
     }));
-    expect(completedHtml).not.toContain('Start a new attempt');
+    expect(completedHtml).not.toContain('Start retry #1');
   });
 
   it('is absent while the current attempt is still live', () => {
@@ -864,10 +864,10 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
       run: readyRun({ status: 'running', attempt: runningAttempt.state, attempts: [failedAttempt, runningAttempt] }),
       structuredAttemptsEnabled: true, onRetryAttempt: () => undefined,
     }));
-    expect(html).not.toContain('Start a new attempt');
+    expect(html).not.toContain('Start retry #1');
   });
 
-  it('offers "Start a new attempt" alongside "Retry verification" for failed_verification — never merged into one control', () => {
+  it('offers "Start retry #1" alongside "Retry verification" for failed_verification — never merged into one control', () => {
     const gate = { gate: 'tests', required: true, passed: false, exitCode: 1, evidence: 'FAIL' };
     const verificationOutcome = {
       kind: 'verification-outcome' as const, sequence: 1, at: '2026-09-01T00:01:00.000Z', outcome: 'failed_verification' as const, repairAttempts: 0,
@@ -889,7 +889,7 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
       structuredAttemptsEnabled: true, onRetryAttempt: () => undefined, onReverify: () => undefined,
     }));
     expect(html).toContain('Retry verification');
-    expect(html).toContain('Start a new attempt');
+    expect(html).toContain('Start retry #1');
   });
 
   it('renders nothing new when structuredAttemptsEnabled is off — the multi-attempt UI stays behind the same experimental gate as the rest of the Attempt panel', () => {
@@ -897,8 +897,8 @@ describe('RunWorkspace attempt history and retry (ticket 68, B12)', () => {
       run: readyRun({ status: 'failed', attempt: failedAttempt.state, attempts: [failedAttempt] }),
       onRetryAttempt: () => undefined,
     }));
-    expect(html).not.toContain('Start a new attempt');
-    expect(html).not.toContain('Attempt 1 of 1');
+    expect(html).not.toContain('Start retry #1');
+    expect(html).not.toContain('Initial run');
   });
 });
 
@@ -1071,7 +1071,7 @@ describe('RunWorkspace detail tabs (presentation-only redesign slice)', () => {
     expect(host!.textContent).toContain('Worktree path already exists');
     expect(tabPanel('execution').hasAttribute('hidden')).toBe(true);
 
-    const jumpButton = [...host!.querySelectorAll('.run-blocked-notice button')].find((button) => button.textContent === 'Open Execution')!;
+    const jumpButton = [...host!.querySelectorAll('.run-blocked-notice button')].find((button) => button.textContent === 'Open advanced details')!;
     await act(async () => { jumpButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(tabPanel('execution').hasAttribute('hidden')).toBe(false);
   });

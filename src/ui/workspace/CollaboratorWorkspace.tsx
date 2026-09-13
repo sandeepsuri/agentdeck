@@ -50,6 +50,7 @@ import { RunFeedbackPanel } from './RunFeedbackPanel.js';
 import { SessionChat } from './SessionChat.js';
 import { CollaboratorSidebar } from './CollaboratorSidebar.js';
 import { SESSION_STATUS_OPTIONS, STATUS_LABELS, StatusBadge, StatusLamp, narrativeStepTime, relativeTime } from './model.js';
+import { deriveCollaboratorNeedsYou, type NeedsYouItem } from '../needsYou.js';
 import { CommandPalette } from './CommandPalette.js';
 import { formatRunLabel, isTerminalRunStatus, RUN_STATUS_OPTIONS } from './runModel.js';
 
@@ -473,6 +474,31 @@ function RunConversation({ detail, onResolveRunAttention }: {
   );
 }
 
+/** Redesign spec §10: actions first on a collaborator's screen — the same Needs You items the sidebar lists. */
+function CollaboratorNeedsYou({ items, onOpenRun, onOpenAgent }: {
+  items: readonly NeedsYouItem[];
+  onOpenRun: (runId: string) => void;
+  onOpenAgent: (sessionId: string) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section aria-labelledby="collab-needs-you" className="home-section collab-needs-you">
+      <header className="home-section-header"><h2 id="collab-needs-you">Needs you</h2><span className="home-count">{items.length}</span></header>
+      <ol className="needs-you-list">
+        {items.map((item) => (
+          <li className={`needs-you-item kind-${item.kind}`} key={item.id}>
+            <div className="needs-you-summary">
+              <span aria-hidden="true" className="needs-you-glyph">?</span>
+              <span className="needs-you-copy"><strong>{item.title}</strong><small>{item.context}</small></span>
+              <button className="button button-primary" onClick={() => (item.target.kind === 'run' ? onOpenRun(item.target.runId) : item.target.kind === 'session' ? onOpenAgent(item.target.sessionId) : undefined)} type="button">{item.action}</button>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 export function CollaboratorWorkspace({
   appearanceControl, principal, repos, profiles, runs, sessions, onError, onRunsStale, onResolveRunAttention, onSignOut,
   runListState = 'ready', repositoryListState = 'ready',
@@ -580,6 +606,8 @@ export function CollaboratorWorkspace({
   const visibleSessions = sessionStatus === 'all' ? repositorySessions : repositorySessions.filter((session) => session.status === sessionStatus);
   const personalRuns = orderRuns(accessibleRuns.filter((run) => run.isRequestedByMe));
   const visiblePersonalRuns = runStatus === 'all' ? personalRuns : personalRuns.filter((run) => run.status === runStatus);
+  const accessibleSessions = sessions.filter((item) => grantedRepositoryIds.has(item.repoId));
+  const needsYou = deriveCollaboratorNeedsYou({ runs: accessibleRuns, sessions: accessibleSessions, repos });
 
   const openRun = (
     id: string,
@@ -627,6 +655,7 @@ export function CollaboratorWorkspace({
         onSelectRun={(id) => { setDrawerOpen(false); openRun(id); }}
         onSelectSession={(id) => { setDrawerOpen(false); openAgent(id); }}
         open={drawerOpen}
+        needsYou={needsYou}
         repos={repos}
         requestsSelected={view?.kind === 'requests'}
         runs={accessibleRuns}
@@ -691,6 +720,7 @@ export function CollaboratorWorkspace({
 
           {view?.kind === 'requests' && (
             <div className="workspace-scroll">
+              <CollaboratorNeedsYou items={needsYou} onOpenAgent={openAgent} onOpenRun={(id) => openRun(id)} />
               <div className="view-heading">
                 <h1>Your requests</h1>
                 <span>{personalRuns.length} request{personalRuns.length === 1 ? '' : 's'} across your Repositories</span>
@@ -721,6 +751,7 @@ export function CollaboratorWorkspace({
 
           {view?.kind === 'repository' && repository && (
             <div className="workspace-scroll">
+              <CollaboratorNeedsYou items={needsYou} onOpenAgent={openAgent} onOpenRun={(id) => openRun(id)} />
               <div className="view-heading">
                 <h1>{repository.name}</h1>
                 <span>⎇ {repository.currentBranch ?? 'unknown'} · {repositoryRuns.length} run{repositoryRuns.length === 1 ? '' : 's'} · {repositorySessions.length} agent{repositorySessions.length === 1 ? '' : 's'}</span>

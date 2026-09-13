@@ -14,26 +14,27 @@ import { listCollaboratorSessions } from './collaboratorSessions.js';
 import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
-import { RunSubmissionModal } from './components/RunSubmissionModal.js';
 import { SettingsWorkspace } from './components/SettingsWorkspace.js';
-import { inspectorPreferenceStorage, persistInspectorCollapsed, readInspectorCollapsed } from './preferences.js';
+import { StartWorkModal, type StartWorkDraft } from './components/StartWorkModal.js';
+import { deriveNeedsYou, type NeedsYouItem } from './needsYou.js';
+import {
+  inspectorPreferenceStorage, persistInspectorCollapsed, persistWorkLayout, readInspectorCollapsed, readWorkLayout, type WorkLayout,
+} from './preferences.js';
 import { THEME_OPTIONS, useTheme } from './theme.js';
-import { ChangesWorkspace } from './workspace/ChangesWorkspace.js';
-import { AdminSidebar } from './workspace/AdminSidebar.js';
+import { useRateLimits, useRunReviewStates } from './useAttentionSources.js';
+import { deriveWorkItems, type WorkFilters, type WorkItem } from './workItems.js';
+import { AdminSidebar, type RepositoryActivity } from './workspace/AdminSidebar.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
-import { GridView } from './workspace/GridView.js';
-import { HistoryView } from './workspace/HistoryView.js';
+import { HomeView } from './workspace/HomeView.js';
 import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
-import { OperationsView } from './workspace/OperationsView.js';
-import { OverviewView } from './workspace/OverviewView.js';
+import { ReviewView, type ReviewTarget } from './workspace/ReviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
-import { SignalsView } from './workspace/SignalsView.js';
 import { UsageView } from './workspace/UsageView.js';
-import { TasksView } from './workspace/TasksView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
-import { repoPathOf, sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
+import { WorkView } from './workspace/WorkView.js';
+import { sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { isInspectorRelevant, parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
 
@@ -82,17 +83,20 @@ export function App() {
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
   const [discoveryStatus, setDiscoveryStatus] = useState<DiscoveryStatus | null>(null);
   const [vscodeStatus, setVsCodeStatus] = useState({ connected: false, windows: 0, terminals: 0, installable: false });
-  const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'operations');
+  const [view, setView] = useState<WorkspaceView>(initialNavigation.view ?? 'home');
+  // Redesign spec §06: Work shows its list until a piece of work is opened;
+  // a Session and a Run open into the same Work destination.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [showLaunch, setShowLaunch] = useState(false);
-  const [showRunSubmission, setShowRunSubmission] = useState(false);
+  const [workFilters, setWorkFilters] = useState<WorkFilters>({ status: 'all' });
+  const [workLayout, setWorkLayout] = useState<WorkLayout>(() => readWorkLayout(inspectorPreferenceStorage()));
+  const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
+  const [showStartWork, setShowStartWork] = useState(false);
+  const [advancedLaunch, setAdvancedLaunch] = useState<StartWorkDraft | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsVisited, setSettingsVisited] = useState(false);
   useEffect(() => { if (showSettings) setSettingsVisited(true); }, [showSettings]);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [repositoryNavigationRequest, setRepositoryNavigationRequest] = useState<{ repositoryId: string | null; sequence: number }>({ repositoryId: null, sequence: 0 });
-  const [overviewRepositoryName, setOverviewRepositoryName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [wsReady, setWsReady] = useState(false);
   const [terminalVisited, setTerminalVisited] = useState(false);
@@ -138,27 +142,21 @@ export function App() {
 
   const selected = useMemo(() => sessions.find((session) => session.id === selectedId) ?? null, [selectedId, sessions]);
   const selectedRun = useMemo(() => runs.find((run) => run.id === selectedRunId) ?? null, [runs, selectedRunId]);
+  const activeRepositoryId = workFilters.repositoryId ?? null;
   // Ticket 68 (B13): live, derived, admin-only — never stored, never a
   // claim that a companion Session is this Run's own terminal.
   const companionSessions = useMemo(
     () => selectedRun ? deriveRunCompanionSessions(selectedRun, sessions) : [],
     [selectedRun, sessions],
   );
-  const selectedRepoPath = selectedRun?.spec.repository.path ?? (selected ? repoPathOf(selected) : repos[0]?.path ?? null);
-  const changesRepoPath = selectedRun?.preparation.state === 'ready'
-    ? selectedRun.preparation.worktreePath ?? selectedRepoPath
-    : selectedRepoPath;
-  const changeCount = repos.find((repo) => repo.path === selectedRepoPath || repo.id === selectedRepoPath)?.dirtyFiles?.length ?? 0;
   const inspectorRelevant = !showSettings && isInspectorRelevant(view, Boolean(selected) && !selectedRun);
   const pageTitle = showSettings
     ? 'Settings & access'
-    : view === 'overview' && overviewRepositoryName
-      ? overviewRepositoryName
-      : selectedRun && view === 'operations'
-        ? selectedRun.spec.objective
-        : selected && view === 'terminal'
-          ? sessionLabel(selected)
-          : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
+    : view === 'work' && selectedRun
+      ? selectedRun.spec.objective
+      : view === 'work' && selected
+        ? sessionLabel(selected)
+        : WORKSPACE_VIEWS.find((item) => item.id === view)?.label ?? 'Workspace';
   // A14: Settings is an additional workspace-stage layer, not a `view` of
   // its own (it isn't a sidebar destination) — so a given view's layer is
   // active only while Settings isn't showing, and Settings' own layer is
@@ -203,16 +201,14 @@ export function App() {
         requestedSessionIdRef.current = undefined;
         history.replaceState(null, '', location.pathname);
         if (body.some((session) => session.id === requested)) {
+          setSelectedRunId(null);
           setSelectedId(requested);
-        } else {
-          setView('operations');
-          setSelectedId(body[0]?.id ?? null);
+          setTerminalVisited(true);
         }
+        setView('work');
         return;
       }
-      setSelectedId((current) => {
-        return current && body.some((session) => session.id === current) ? current : body[0]?.id ?? null;
-      });
+      setSelectedId((current) => current && body.some((session) => session.id === current) ? current : null);
     }).catch(() => setError('AgentDeck API is unreachable.')), []);
   const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => setRepos(adminRepos(all))).catch(() => undefined), []);
   const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((all) => {
@@ -227,7 +223,7 @@ export function App() {
       history.replaceState(null, '', location.pathname);
       setSelectedId(null);
       setSelectedRunId(requestedRunId);
-      setView('operations');
+      setView('work');
     }
   }).catch(() => undefined), []);
   const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
@@ -370,13 +366,14 @@ export function App() {
       const target = event.target as HTMLElement | null;
       const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setPaletteOpen(true); }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setShowLaunch(true); }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setShowStartWork(true); }
       if (!typing && /^[1-9]$/.test(event.key)) {
         const session = sessions[Number(event.key) - 1];
         if (session) {
+          setShowSettings(false);
           setSelectedRunId(null);
           setSelectedId(session.id);
-          setView('terminal');
+          setView('work');
           setTerminalVisited(true);
         }
       }
@@ -386,11 +383,37 @@ export function App() {
     return () => window.removeEventListener('keydown', keydown);
   }, [sessions]);
 
-  useEffect(() => { if (view === 'terminal') setTerminalVisited(true); }, [view]);
-
   useEffect(() => {
     persistInspectorCollapsed(inspectorPreferenceStorage(), inspectorCollapsed);
   }, [inspectorCollapsed]);
+
+  useEffect(() => {
+    persistWorkLayout(inspectorPreferenceStorage(), workLayout);
+  }, [workLayout]);
+
+  // The global Needs You system (redesign spec §04) — one derivation feeding
+  // Home, the sidebar badge and Work's "Needs you" filter.
+  const desktop = connectionKind === 'local';
+  const { reviewStates, refreshReviewState } = useRunReviewStates(runs, desktop);
+  const rateLimits = useRateLimits(desktop);
+  const needsYou = useMemo(
+    () => deriveNeedsYou({ runs, sessions: railSessions, conflicts, reviewStates, rateLimits }),
+    [conflicts, railSessions, rateLimits, reviewStates, runs],
+  );
+  const workItems = useMemo(
+    () => deriveWorkItems({ runs, sessions: railSessions, historySessions, repos, needsYou, reviewStates }),
+    [historySessions, needsYou, railSessions, repos, reviewStates, runs],
+  );
+  const reviewCount = needsYou.filter((item) => item.kind === 'review').length;
+  const repositoryActivity = useMemo(() => {
+    const activity = new Map<string, RepositoryActivity>();
+    for (const item of workItems) {
+      if (!item.repositoryId || (item.bucket !== 'working' && item.bucket !== 'needs_you')) continue;
+      const current = activity.get(item.repositoryId) ?? { active: 0, waiting: 0 };
+      activity.set(item.repositoryId, { active: current.active + 1, waiting: current.waiting + (item.bucket === 'needs_you' ? 1 : 0) });
+    }
+    return activity;
+  }, [workItems]);
 
   // Three places learn this connection's identity — the probe below and
   // both gate submissions — and every one of them has to apply it the same
@@ -486,14 +509,31 @@ export function App() {
     }
   };
 
-  const selectSession = (session: Session) => { setSelectedRunId(null); setSelectedId(session.id); };
-  const selectRun = (run: WorkRun) => { setShowSettings(false); setSelectedId(null); setSelectedRunId(run.id); setView('operations'); };
-  // Ticket 47: Overview/Repository rows hand off to the same Run/Session
-  // detail every other entry point (sidebar, command palette) already
-  // opens — selectSession alone doesn't switch tabs, so pair it with the
-  // view change the way CommandPalette's onSelectSession already does.
-  const selectSessionFromOverview = (session: Session) => { setShowSettings(false); selectSession(session); setView('operations'); };
-  const openTerminal = (session: Session) => { setShowSettings(false); setSelectedRunId(null); setSelectedId(session.id); setView('terminal'); setTerminalVisited(true); };
+  const selectSession = (session: Pick<Session, 'id'>) => { setSelectedRunId(null); setSelectedId(session.id); };
+  // Every entry point (Home, Work, sidebar, command palette, deep links)
+  // opens the same Run or Session detail inside Work.
+  const selectRun = (run: Pick<WorkRun, 'id'>) => { setShowSettings(false); setSelectedId(null); setSelectedRunId(run.id); setView('work'); };
+  const openSession = (session: Pick<Session, 'id'>) => { setShowSettings(false); selectSession(session); setView('work'); setTerminalVisited(true); };
+  const closeWorkDetail = () => { setSelectedId(null); setSelectedRunId(null); };
+  const openWorkItem = (item: WorkItem) => (item.run ? selectRun(item.run) : item.session ? openSession(item.session) : undefined);
+  const selectRepository = (repositoryId: string) => {
+    setShowSettings(false);
+    closeWorkDetail();
+    setWorkFilters((current) => ({ ...current, repositoryId: current.repositoryId === repositoryId && view === 'work' ? null : repositoryId }));
+    setView((current) => current === 'review' ? 'review' : 'work');
+  };
+  const openNeedsYou = (item: NeedsYouItem) => {
+    const { target } = item;
+    if (target.kind === 'usage') return navigateToView('usage');
+    if (target.kind === 'repository') {
+      const repo = repos.find((candidate) => candidate.id === target.repositoryId || candidate.path === target.repositoryId);
+      if (repo) { setShowSettings(false); setReviewTarget({ kind: 'repository', repositoryId: repo.id }); setView('review'); }
+      return;
+    }
+    if (target.kind === 'session') return openSession({ id: target.sessionId });
+    if (item.kind === 'review') { setShowSettings(false); setReviewTarget({ kind: 'run', runId: target.runId }); setView('review'); return; }
+    selectRun({ id: target.runId });
+  };
   // A14: these are the two navigation surfaces that stay reachable while the
   // Settings workspace is open (AdminSidebar, always visible; CommandPalette,
   // reachable via ⌘K) — every view layer that could otherwise call this is
@@ -502,14 +542,8 @@ export function App() {
   // stray reset of an in-progress view.
   const navigateToView = (nextView: WorkspaceView) => {
     setShowSettings(false);
-    if (nextView === 'overview') {
-      setRepositoryNavigationRequest((current) => ({ repositoryId: null, sequence: current.sequence + 1 }));
-    }
-    if (nextView === 'terminal') {
-      setSelectedRunId(null);
-      setSelectedId((current) => current && sessions.some((session) => session.id === current) ? current : railSessions[0]?.id ?? null);
-      setTerminalVisited(true);
-    }
+    // Choosing Work from navigation always lands on the list, never a stale detail.
+    if (nextView === 'work' && view === 'work') closeWorkDetail();
     setView(nextView);
   };
 
@@ -645,7 +679,7 @@ export function App() {
   };
 
   const installHooks = async () => {
-    const repo = repos.find((item) => item.path === selectedRepoPath) ?? repos[0];
+    const repo = repos.find((item) => item.id === activeRepositoryId) ?? repos[0];
     if (!repo) return setError('No repository is available for hook installation.');
     const response = await apiFetch('/api/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repoPath: repo.path, user: true }) });
     const body = await response.json() as { error?: string };
@@ -747,21 +781,30 @@ export function App() {
     );
   }
 
+  const workDetailOpen = Boolean(selectedRun) || Boolean(selected);
   return (
     <div className="agentdeck-shell">
       <div className="admin-shell-main">
-        <AdminSidebar activeView={view} changeCount={changeCount} historyCount={historySessions.length} onLaunch={() => setShowLaunch(true)} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} onSubmitRun={() => setShowRunSubmission(true)} onView={navigateToView} runs={runs} sessions={railSessions} />
+        <AdminSidebar
+          activeRepositoryId={activeRepositoryId}
+          activeView={view}
+          needsYouCount={needsYou.length}
+          onSelectRepository={selectRepository}
+          onSettings={() => setShowSettings(true)}
+          onStartWork={() => setShowStartWork(true)}
+          onView={navigateToView}
+          repos={repos}
+          repositoryActivity={repositoryActivity}
+          reviewCount={reviewCount}
+          settingsActive={showSettings}
+        />
         <div className="admin-shell-content">
       <header className="app-topbar">
-        <div className="topbar-context"><span>Workspace</span><strong title={pageTitle}>{pageTitle}</strong></div>
-        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>&gt;_</span><strong>Search repositories, runs, sessions, or actions…</strong><kbd>⌘K</kbd></button>
+        <div className="topbar-context"><strong title={pageTitle}>{pageTitle}</strong></div>
+        <button className="jump-control" onClick={() => setPaletteOpen(true)} type="button"><span>⌕</span><strong>Search work, repositories, or actions…</strong><kbd>⌘K</kbd></button>
         <div className="topbar-actions">
           <span className={`live-indicator${wsReady ? '' : ' is-down'}`}><i />{wsReady ? 'live' : 'reconnecting'}</span>
           <ThemeControl />
-          <button aria-label="Settings" className="top-icon-button" onClick={() => setShowSettings(true)} title="Settings — workspace configuration and access management" type="button">⚙</button>
-          <button aria-label="Install hooks" className="button compact-button hooks-button" onClick={() => void installHooks()} title="Install hooks" type="button"><span aria-hidden="true">⌁</span><strong>Install hooks</strong></button>
-          <button className="button compact-button top-new-run-button" onClick={() => setShowRunSubmission(true)} type="button">New run</button>
-          <button className="button button-primary launch-button" onClick={() => setShowLaunch(true)} type="button"><span>Launch agent</span> <kbd>⌘L</kbd></button>
         </div>
       </header>
 
@@ -769,16 +812,71 @@ export function App() {
 
       <div className="app-body">
         <main className="workspace-stage">
-          <div className={layerClass('overview')}><OverviewView onOpenUsage={() => navigateToView('usage')} onRepositoryContextChange={setOverviewRepositoryName} onSelectRun={selectRun} onSelectSession={selectSessionFromOverview} repos={repos} requestedNavigationSequence={repositoryNavigationRequest.sequence} requestedRepositoryId={repositoryNavigationRequest.repositoryId} runs={runs} selectedId={selectedRun ? null : selectedId} selectedRunId={selectedRunId} sessions={sessions} /></div>
-          <div className={layerClass('tasks')}><TasksView historyCount={historySessions.length} onDeleteRun={(run) => void deleteRun(run)} onSelectRun={selectRun} onViewHistory={() => setView('history')} runs={runs} selectedRunId={selectedRunId} /></div>
-          <div className={layerClass('operations')}>{selectedRun ? <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => { const session = sessions.find((item) => item.id === sessionId); if (session) openTerminal(session); }} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={() => setView('changes')} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} /> : <OperationsView conflicts={conflicts} discoveryStatus={discoveryStatus} events={events} onOpenTerminal={openTerminal} onRefreshDiscovery={() => void retryDiscovery()} onSelect={selectSession} repos={repos} selected={selected} sessions={sessions} />}</div>
-          {terminalVisited && <div className={layerClass('terminal')}><TerminalWorkspace onError={setError} onFocusExternal={(session) => void action(session, 'focus')} onSelect={selectSession} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} /></div>}
-          <div className={layerClass('changes')}><ChangesWorkspace claims={claims} onError={setError} repoPath={changesRepoPath} sessions={sessions} /></div>
-          <div className={layerClass('grid')}><GridView onOpen={openTerminal} sessions={sessions} ws={wsRef.current} /></div>
-          <div className={layerClass('signals')}><SignalsView events={events} /></div>
-          <div className={layerClass('usage')}><UsageView active={!showSettings && view === 'usage'} onSelectSession={selectSessionFromOverview} repos={repos} sessions={sessions} /></div>
-          <div className={layerClass('history')}><HistoryView onDelete={(session) => void deleteSession(session)} repos={repos} sessions={historySessions} /></div>
-          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} repos={repos} />}</div>
+          <div className={layerClass('home')}>
+            <HomeView
+              active={!showSettings && view === 'home'}
+              needsYou={needsYou}
+              onOpenNeedsYou={openNeedsYou}
+              onOpenUsage={() => navigateToView('usage')}
+              onOpenWorkItem={openWorkItem}
+              onResolveRunAttention={resolveRunAttention}
+              onSelectRepository={selectRepository}
+              onStartWork={() => setShowStartWork(true)}
+              rateLimits={rateLimits}
+              repos={repos}
+              repositoryActivity={repositoryActivity}
+              runs={runs}
+              workItems={workItems}
+            />
+          </div>
+          <div className={layerClass('work')}>
+            <div className="work-layer-list" hidden={workDetailOpen}>
+              <WorkView
+                events={events}
+                filters={workFilters}
+                items={workItems}
+                layout={workLayout}
+                onFiltersChange={setWorkFilters}
+                onLayoutChange={setWorkLayout}
+                onOpen={openWorkItem}
+                onStartWork={() => setShowStartWork(true)}
+                repos={repos}
+              />
+            </div>
+            {selectedRun && (
+              <div className="work-run-detail">
+                <button className="repository-page-back" onClick={closeWorkDetail} type="button">‹ Work</button>
+                <RunWorkspace companionSessions={companionSessions} onApply={(run) => void runRecoveryAction(run, 'apply')} onDelete={(run) => void deleteRun(run)} onOpenCompanionSession={(sessionId) => openSession({ id: sessionId })} onPause={(run) => void guideRun(run, 'pause')} onPrepare={prepareRun} onPreview={(run, previewPath) => void previewRun(run, previewPath)} onPublish={publishRun} onResolveAttention={(run, attentionId, decision) => void resolveRunAttention(run.id, attentionId, decision)} onResume={(run) => void guideRun(run, 'resume')} onRetryAttempt={(run) => void retryAttempt(run)} onReverify={(run) => void runRecoveryAction(run, 'reverify')} onStart={startRun} onViewChanges={(run) => { setReviewTarget({ kind: 'run', runId: run.id }); setView('review'); }} run={selectedRun} structuredAttemptsEnabled={structuredAttemptsEnabled} />
+              </div>
+            )}
+            {terminalVisited && (
+              <div className="work-session-detail" hidden={!selected || Boolean(selectedRun)}>
+                <TerminalWorkspace events={events} onBack={closeWorkDetail} onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
+              </div>
+            )}
+          </div>
+          <div className={layerClass('review')}>
+            <ReviewView
+              activeRepositoryId={activeRepositoryId}
+              claims={claims}
+              onApply={(run) => runRecoveryAction(run, 'apply')}
+              onError={setError}
+              onOpenInWork={selectRun}
+              onPreview={(run, previewPath) => void previewRun(run, previewPath)}
+              onPublish={publishRun}
+              onReverify={(run) => void runRecoveryAction(run, 'reverify')}
+              onReviewDecided={(runId) => void refreshReviewState(runId)}
+              onSelectTarget={setReviewTarget}
+              repos={repos}
+              reviewStates={reviewStates}
+              runs={runs}
+              sessions={sessions}
+              structuredAttemptsEnabled={structuredAttemptsEnabled}
+              target={reviewTarget}
+            />
+          </div>
+          <div className={layerClass('usage')}><UsageView active={!showSettings && view === 'usage'} onSelectSession={openSession} repos={repos} sessions={sessions} /></div>
+          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} onInstallHooks={() => void installHooks()} repos={repos} />}</div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button
@@ -791,7 +889,7 @@ export function App() {
             type="button"
           >{inspectorCollapsed ? '‹' : '›'}</button>
           <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
-            <InspectorRail conflicts={conflicts} events={events} onAction={(session, actionName) => void action(session, actionName)} onError={setError} onRename={(session, name) => void rename(session, name)} onView={navigateToView} selected={selectedRun ? null : selected} view={view} />
+            <InspectorRail onAction={(session, actionName) => void action(session, actionName)} onDelete={(session) => void deleteSession(session)} onError={setError} onRename={(session, name) => void rename(session, name)} selected={selectedRun ? null : selected} />
           </div>
         </div>
       </div>
@@ -799,35 +897,42 @@ export function App() {
       <footer className="app-statusbar">
         <span className={wsReady ? 'is-live' : ''}><i />{wsReady ? 'Live' : 'Offline'}</span>
         <span>AgentDeck v0.1.0</span>
-        <span>▣ {selectedRun ? selectedRun.spec.repository.name : selected ? selected.cwd.split('/').pop() : `${repos.length} repos`}</span>
-        {repos.some((repo) => repo.isDirty) && <span className="is-dirty"><i />Worktree dirty</span>}
-        {!showSettings && (['operations', 'terminal', 'signals'] as WorkspaceView[]).includes(view) && <span className="status-ticker">{events.slice(-3).reverse().map((event) => `${event.agent} · ${event.event}${event.task ? ` · ${event.task}` : ''}`).join('      ') || 'Waiting for coordination signals'}</span>}
         <Clock />
-        <span>API status <i className={wsReady ? 'api-ok' : ''} /></span>
       </footer>
         </div>
       </div>
 
       <CommandPalette
         onClose={() => setPaletteOpen(false)}
-        onLaunch={() => setShowLaunch(true)}
-        onSelectRepo={(repo) => {
-          setShowSettings(false);
-          setSelectedId(null);
-          setSelectedRunId(null);
-          setRepositoryNavigationRequest((current) => ({ repositoryId: repo.id, sequence: current.sequence + 1 }));
-          setView('overview');
-        }}
+        onLaunch={() => setShowStartWork(true)}
+        onSelectRepo={(repo) => selectRepository(repo.id)}
         onSelectRun={selectRun}
-        onSelectSession={(session) => { setShowSettings(false); selectSession(session); setView('operations'); }}
+        onSelectSession={openSession}
         onView={navigateToView}
         open={paletteOpen}
         repos={repos}
         runs={runs}
         sessions={sessions}
       />
-      {showLaunch && <LaunchModal onClose={() => setShowLaunch(false)} onLaunched={(session) => { setShowSettings(false); upsertSession(session); setSelectedRunId(null); setSelectedId(session.id); setShowLaunch(false); setView('terminal'); setTerminalVisited(true); refreshRepos(); }} repos={repos} />}
-      {showRunSubmission && <RunSubmissionModal onClose={() => setShowRunSubmission(false)} onError={setError} onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowRunSubmission(false); }} repos={repos} />}
+      {showStartWork && (
+        <StartWorkModal
+          initialRepositoryId={activeRepositoryId}
+          onAdvanced={(draft) => { setShowStartWork(false); setAdvancedLaunch(draft); }}
+          onClose={() => setShowStartWork(false)}
+          onError={setError}
+          onLaunched={(session) => { setShowStartWork(false); upsertSession(session); openSession(session); refreshRepos(); }}
+          onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowStartWork(false); }}
+          repos={repos}
+        />
+      )}
+      {advancedLaunch && (
+        <LaunchModal
+          initial={{ prompt: advancedLaunch.task, repoPath: advancedLaunch.repoPath, ...(advancedLaunch.agent !== 'auto' ? { agent: advancedLaunch.agent } : {}) }}
+          onClose={() => setAdvancedLaunch(null)}
+          onLaunched={(session) => { setAdvancedLaunch(null); upsertSession(session); openSession(session); refreshRepos(); }}
+          repos={repos}
+        />
+      )}
     </div>
   );
 }

@@ -2,10 +2,10 @@ import { useState } from 'react';
 import type { AgentType } from '../../types.js';
 import { createProfile, toggleId, updateGrants, type Collaborator } from '../collaborators.js';
 import type { Profile, RequestedDeliveryResult, RunBudget } from '../../work-engine/types.js';
-import { lines } from './RunSubmissionModal.js';
+import { lines } from './workSubmission.js';
 import type { AccessData } from './useAccessData.js';
 
-/** Matches RunSubmissionModal's own delivery-result options (ticket 55: a clone must offer the source Profile's actual `requestedDeliveryResult`, not a hardcoded 'local-commit'). */
+/** Matches Start work's structured delivery-result options (ticket 55: a clone must offer the source Profile's actual `requestedDeliveryResult`, not a hardcoded 'local-commit'). */
 const DELIVERY_RESULT_LABELS: Record<RequestedDeliveryResult, string> = {
   'apply-to-repository': 'Apply to repository',
   'local-commit': 'Create run branch and commit',

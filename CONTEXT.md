@@ -24,6 +24,14 @@ _Avoid_: Session, job
 A derived indication that a session may need human input, such as an approval or reply.
 _Avoid_: Notification, alert
 
+**Needs You**:
+The single, derived queue of every Attention-bearing item across Runs, Sessions, conflicts, failures, review-ready results, and crossed usage limits, ordered by urgency then age. It is the one source for the Home queue, the sidebar badge, and the Work "Needs you" filter.
+_Avoid_: Inbox, notifications
+
+**Work**:
+The people-facing name for a Run or Session in the interface. Work is a presentation concept only; Run, Attempt, and Session keep their meanings internally, and an Attempt appears to people as "Retry #n".
+_Avoid_: Job, operation
+
 **Claim**:
 A session's declaration that it is working on a file or area of a repository.
 _Avoid_: Lock, ownership

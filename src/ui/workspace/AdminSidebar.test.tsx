@@ -1,55 +1,52 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import type { Session } from '../../types.js';
-import type { WorkRun } from '../../work-engine/types.js';
+import type { Repo } from '../../types.js';
 import { AdminSidebar } from './AdminSidebar.js';
-import { WORKSPACE_VIEWS } from './model.js';
 
-const session: Session = {
-  id: 'session-attention', origin: 'managed', agent: 'codex', name: 'Waiting session',
-  cwd: '/repos/example', startedAt: '2026-09-01T00:00:00.000Z',
-  lastActivityAt: '2026-09-01T00:01:00.000Z', status: 'waiting_input', statusSource: 'hook',
-};
+const repos: Repo[] = [
+  { id: 'repo-agentdeck', path: '/repos/agentdeck', name: 'AgentDeck' },
+  { id: 'repo-website', path: '/repos/website', name: 'Website' },
+];
 
-const run: WorkRun = {
-  id: 'run-attention', taskId: 'task-attention', status: 'waiting_input',
-  submittedAt: '2026-09-01T00:00:00.000Z',
-  spec: {
-    objective: 'Answer the deployment question', acceptanceCriteria: ['Question answered'],
-    repository: { id: '/repos/example', name: 'example', path: '/repos/example' },
-    requestedBaseReference: 'main', runtimePreference: ['codex'], budget: {},
-    verificationIntent: { required: false, commands: [] }, requestedDeliveryResult: 'working-tree',
-  },
-  principal: { id: 'local:test', displayName: 'test' }, preparation: { state: 'ready' },
-  envelope: { state: 'pending' }, verificationPolicy: { state: 'pending' }, attempt: { state: 'idle' },
-  pendingAttention: { id: 'attention-1', kind: 'input', reason: 'Choose a target', requestedAt: '2026-09-01T00:01:00.000Z' },
-};
+function render(overrides: Partial<Parameters<typeof AdminSidebar>[0]> = {}) {
+  return renderToStaticMarkup(createElement(AdminSidebar, {
+    activeView: 'home', activeRepositoryId: null, needsYouCount: 0, reviewCount: 0, repos,
+    repositoryActivity: new Map(), onSelectRepository: () => undefined, onSettings: () => undefined,
+    onStartWork: () => undefined, onView: () => undefined,
+    ...overrides,
+  }));
+}
 
 describe('AdminSidebar', () => {
-  it('keeps every workspace destination in one navigation', () => {
-    const html = renderToStaticMarkup(createElement(AdminSidebar, {
-      activeView: 'overview', onLaunch: () => undefined, onSelectRun: () => undefined,
-      onSelectSession: () => undefined, onSubmitRun: () => undefined, onView: () => undefined,
-      runs: [], sessions: [],
-    }));
-
-    for (const destination of WORKSPACE_VIEWS) expect(html).toContain(`>${destination.label}<`);
-    expect(html).toContain('aria-label="Admin navigation"');
+  it('contains only Home, Work, Review, Usage and Settings as primary destinations', () => {
+    const html = render();
+    const navigation = html.slice(html.indexOf('aria-label="Admin navigation"'), html.indexOf('aria-label="Repositories"'));
+    for (const label of ['Home', 'Work', 'Review', 'Usage']) expect(navigation).toContain(`<span>${label}</span>`);
+    for (const retired of ['Operations', 'Sessions', 'Grid', 'History', 'Signals', 'Tasks', 'Changes', 'Overview']) {
+      expect(html).not.toContain(retired);
+    }
+    expect(html).toContain('<strong>Settings</strong>');
+    expect(html).toContain('<strong>Start work</strong>');
+    expect(html).not.toContain('New run');
+    expect(html).not.toContain('New session');
   });
 
-  it('shows only attention-bearing work instead of the complete inventory', () => {
-    const quietSession = { ...session, id: 'session-quiet', name: 'Quiet session', status: 'working' as const };
-    const quietRun = { ...run, id: 'run-quiet', spec: { ...run.spec, objective: 'Quiet run' }, pendingAttention: undefined };
-    const html = renderToStaticMarkup(createElement(AdminSidebar, {
-      activeView: 'overview', onLaunch: () => undefined, onSelectRun: () => undefined,
-      onSelectSession: () => undefined, onSubmitRun: () => undefined, onView: () => undefined,
-      runs: [run, quietRun], sessions: [session, quietSession],
-    }));
+  it('mirrors the Needs You and review counts as badges', () => {
+    const html = render({ needsYouCount: 3, reviewCount: 2 });
+    expect(html).toContain('aria-label="3 items need you"');
+    expect(html).toContain('aria-label="2 ready for review"');
+    expect(render()).not.toContain('need you');
+  });
 
-    expect(html).toContain('Answer the deployment question');
-    expect(html).toContain('Waiting session');
-    expect(html).not.toContain('Quiet run');
-    expect(html).not.toContain('Quiet session');
+  it('lists repositories as contextual shortcuts with active and waiting counts', () => {
+    const html = render({
+      activeRepositoryId: 'repo-agentdeck',
+      repositoryActivity: new Map([['repo-agentdeck', { active: 2, waiting: 1 }]]),
+    });
+    expect(html).toContain('AgentDeck');
+    expect(html).toContain('Website');
+    expect(html).toContain('aria-label="2 active, 1 waiting"');
+    expect(html).toContain('aria-pressed="true"');
   });
 });

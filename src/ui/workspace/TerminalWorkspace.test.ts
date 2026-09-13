@@ -30,7 +30,7 @@ describe('TerminalWorkspace', () => {
     }));
 
     expect(html).toContain('Message everyone');
-    expect(html).toContain('Mention @agent');
+    expect(html).toContain('aria-label="Send to"');
     expect(html).not.toContain('Send to PTY');
     expect(html).not.toContain('Type a response, or queue the next instruction');
     expect(html).not.toContain('>Queue<');

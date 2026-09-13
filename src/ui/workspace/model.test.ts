@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Repo, Session } from '../../types.js';
-import { isEndedSession, narrativeStepTime, repoDisplayName } from './model.js';
+import { durationLabel, isEndedSession, narrativeStepTime, repoDisplayName } from './model.js';
 
 const base = {
   cwd: '/repos/alpha',
@@ -68,5 +68,17 @@ describe('repoDisplayName', () => {
 
   it('falls back to the cwd basename when no repo matches', () => {
     expect(repoDisplayName(managed('exited', { repoId: '/repos/unknown', cwd: '/repos/unknown' }), repos)).toBe('unknown');
+  });
+});
+
+describe('durationLabel', () => {
+  it('reads as minutes, hours and days without seconds or zero padding', () => {
+    const start = '2026-09-10T10:00:00.000Z';
+    const at = (minutes: number) => Date.parse(start) + minutes * 60_000;
+    expect(durationLabel(start, at(0))).toBe('now');
+    expect(durationLabel(start, at(52))).toBe('52m');
+    expect(durationLabel(start, at(82))).toBe('1h 22m');
+    expect(durationLabel(start, at(120))).toBe('2h');
+    expect(durationLabel(start, at(60 * 76))).toBe('3d 4h');
   });
 });

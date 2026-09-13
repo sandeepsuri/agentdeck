@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import type { Session } from '../../types.js';
+import type { AgentMessage, Session } from '../../types.js';
+import { ActivityTimeline } from './ActivityTimeline.js';
+import { HistoryScrollback } from './HistoryScrollback.js';
 import { SessionChat } from './SessionChat.js';
 import { Terminal } from '../components/Terminal.js';
 import { ElapsedTime, sessionLabel } from './model.js';
@@ -12,11 +14,16 @@ interface Props {
   wsReady: boolean;
   onError: (message: string) => void;
   onFocusExternal: (session: Session) => void;
+  /** Shows the session picker when present; Work's session detail omits it (the Work list is the picker). */
   onSelect?: (session: Session) => void;
+  /** Durable bus events feeding the Activity tab (redesign spec §06). */
+  events?: readonly AgentMessage[];
+  /** Returns to the Work list. */
+  onBack?: () => void;
 }
 
-export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect }: Props) {
-  const [view, setView] = useState<'chat' | 'terminal'>('chat');
+export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect, events = [], onBack }: Props) {
+  const [view, setView] = useState<'chat' | 'terminal' | 'activity'>('chat');
   const [mountedIds, setMountedIds] = useState<string[]>([]);
   useEffect(() => { setView('chat'); }, [session?.id]);
 
@@ -35,20 +42,31 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
 
   return (
     <section className="terminal-workspace session-workspace">
+      {onBack && (
+        <header className="work-detail-header">
+          <button className="repository-page-back" onClick={onBack} type="button">‹ Work</button>
+          <h1 title={sessionLabel(session)}>{sessionLabel(session)}</h1>
+          <span>{session.agent === 'claude' ? 'Claude' : 'Codex'}{session.branch ? ` · ${session.branch}` : ''}</span>
+        </header>
+      )}
       <div className="session-view-tabs" role="group" aria-label="Session view">
-        <label className="session-picker">
-          <span>Session</span>
-          <select aria-label="Selected Session" onChange={(event) => {
-            const next = sessions.find((item) => item.id === event.target.value);
-            if (next) onSelect?.(next);
-          }} value={session.id}>
-            {sessions.map((item) => <option key={item.id} value={item.id}>{sessionLabel(item)}</option>)}
-          </select>
-        </label>
+        {onSelect && (
+          <label className="session-picker">
+            <span>Session</span>
+            <select aria-label="Selected Session" onChange={(event) => {
+              const next = sessions.find((item) => item.id === event.target.value);
+              if (next) onSelect(next);
+            }} value={session.id}>
+              {sessions.map((item) => <option key={item.id} value={item.id}>{sessionLabel(item)}</option>)}
+            </select>
+          </label>
+        )}
         <button className="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')} type="button">Chat</button>
+        <button className="button" aria-pressed={view === 'activity'} onClick={() => setView('activity')} type="button">Activity</button>
         <button className="button" aria-pressed={view === 'terminal'} onClick={() => setView('terminal')} type="button">Terminal</button>
       </div>
       {view === 'chat' && <SessionChat key={session.id} session={session} onError={onError} />}
+      {view === 'activity' && <div className="session-activity-panel"><ActivityTimeline events={events} session={session} /></div>}
       <div className="session-terminal-panel" hidden={view !== 'terminal'}>
         <div className="terminal-frame">
           <header className="terminal-chrome">
@@ -65,7 +83,9 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
                 </div>
               ))}
             </div>
-            {session.origin === 'managed' ? (
+            {session.origin === 'managed' && session.status === 'exited' ? (
+              view === 'terminal' && <div className="history-scrollback"><HistoryScrollback sessionId={session.id} /></div>
+            ) : session.origin === 'managed' ? (
               !mountedIds.includes(session.id) && <div className="terminal-loading">Terminal reconnecting…</div>
             ) : (
               <div className="external-terminal-overview">

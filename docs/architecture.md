@@ -24,7 +24,7 @@ The production server serves the built browser application and API on `127.0.0.1
 
 ### Browser workspace
 
-The interface is implemented with React, TypeScript, and Vite under `src/ui/`. A local, loopback connection renders the Admin shell: the Overview, Tasks, Operations, Sessions, Changes, Grid, Signals, and History workspaces, plus the launch manifest, command palette, session rail, and inspector. Settings (General, Profiles, and Collaborators tabs) renders as an additional page in the same workspace stage rather than a modal. A remote connection instead renders a repository-first Collaborator workspace scoped to that device's grants; see [Runs and the Work Engine](#runs-and-the-work-engine) and the [user guide](user-guide.md#admin-and-collaborator-workspaces).
+The interface is implemented with React, TypeScript, and Vite under `src/ui/`. A local, loopback connection renders the Admin shell: four destinations — Home (the Needs You queue, derived in `src/ui/needsYou.ts`), Work (Runs and Sessions as one list, `src/ui/workItems.ts`, with Session chat, activity timeline, and terminal), Review (review-and-ship for Run results and repository changes), and Usage — plus the Start work flow, command palette, and inspector. Settings (General, Profiles, and Collaborators tabs) renders as an additional page in the same workspace stage rather than a modal. A remote connection instead renders a repository-first Collaborator workspace scoped to that device's grants; see [Runs and the Work Engine](#runs-and-the-work-engine) and the [user guide](user-guide.md#admin-and-collaborator-workspaces).
 
 The managed terminal uses xterm.js. REST requests handle application actions and queries, while a WebSocket connection carries terminal I/O and live session updates.
 

@@ -1,17 +1,13 @@
 import { useEffect, useState } from 'react';
 import type { Repo, Session, SessionStatus } from '../../types.js';
 
-export type WorkspaceView = 'overview' | 'tasks' | 'operations' | 'terminal' | 'changes' | 'grid' | 'signals' | 'history' | 'usage';
+/** Redesign spec §03: the four primary destinations. Settings is a separate layer, not a view. */
+export type WorkspaceView = 'home' | 'work' | 'review' | 'usage';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'tasks', label: 'Tasks' },
-  { id: 'operations', label: 'Operations' },
-  { id: 'terminal', label: 'Sessions' },
-  { id: 'changes', label: 'Changes' },
-  { id: 'grid', label: 'Grid' },
-  { id: 'signals', label: 'Signals' },
-  { id: 'history', label: 'History' },
+  { id: 'home', label: 'Home' },
+  { id: 'work', label: 'Work' },
+  { id: 'review', label: 'Review' },
   { id: 'usage', label: 'Usage' },
 ];
 
@@ -127,13 +123,19 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
   return <span className={`status-badge status-${status}`}>{STATUS_LABELS[status]}</span>;
 }
 
-export function SparkBars({ seed, active = false, count = 18 }: { seed: number; active?: boolean; count?: number }) {
-  return (
-    <span aria-hidden="true" className={`spark-bars${active ? ' is-active' : ''}`}>
-      {Array.from({ length: count }, (_, index) => {
-        const height = 3 + Math.abs(Math.sin(seed * 7.3 + index * 1.7) * Math.cos(seed + index * 0.61)) * 10;
-        return <i key={index} style={{ height }} />;
-      })}
-    </span>
-  );
+/** A calm, people-facing duration: "now", "52m", "1h 22m", "3d 4h". */
+export function durationLabel(startedAt: string, now = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 60_000));
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
+}
+
+/** Leaf component so only the duration text re-renders each minute. */
+export function Duration({ since }: { since: string }) {
+  const now = useNow(30_000);
+  return <>{durationLabel(since, now)}</>;
 }
