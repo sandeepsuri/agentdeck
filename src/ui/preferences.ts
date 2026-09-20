@@ -30,3 +30,25 @@ export function inspectorPreferenceStorage(): Storage | undefined {
     return undefined;
   }
 }
+
+/** Redesign spec §06: Grid is a Work display toggle, not a destination — the choice persists locally. */
+export const WORK_LAYOUT_STORAGE_KEY = 'agentdeck.work.layout';
+export type WorkLayout = 'list' | 'grid';
+
+export function readWorkLayout(storage: PreferenceStorage | undefined): WorkLayout {
+  if (!storage) return 'list';
+  try {
+    return storage.getItem(WORK_LAYOUT_STORAGE_KEY) === 'grid' ? 'grid' : 'list';
+  } catch {
+    return 'list';
+  }
+}
+
+export function persistWorkLayout(storage: PreferenceStorage | undefined, layout: WorkLayout): void {
+  if (!storage) return;
+  try {
+    storage.setItem(WORK_LAYOUT_STORAGE_KEY, layout);
+  } catch {
+    // Persistence is optional; the current page can still use the chosen layout.
+  }
+}

@@ -5,7 +5,7 @@
 // server/collaborator-run-view.ts), so nothing in this module needs to know
 // what a Collaborator may see. It only knows the shapes.
 import { apiFetch, responseJson, responseJsonArray } from './apiFetch.js';
-import { submitWorkRun } from './components/RunSubmissionModal.js';
+import { submitWorkRun } from './components/workSubmission.js';
 import type { ReviewDecision, RunFeedbackEntry } from '../types.js';
 import type { CollaboratorRunDetail, CollaboratorRunSummary, WorkSpec } from '../work-engine/types.js';
 import type { RunReviewState } from '../work-engine/run-review.js';

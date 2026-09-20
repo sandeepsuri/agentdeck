@@ -27,7 +27,7 @@ const secondSession: Session = { ...firstSession, id: 'session-2', name: 'Second
 function InspectorDock({ view, session, onError }: { view: WorkspaceView; session: Session; onError: (message: string) => void }) {
   return (
     <div className="inspector-dock" hidden={!isInspectorRelevant(view, true)}>
-      <InspectorRail conflicts={[]} events={[]} onAction={() => undefined} onError={onError} onRename={() => undefined} onView={() => undefined} selected={session} view={view} />
+      <InspectorRail onAction={() => undefined} onError={onError} onRename={() => undefined} selected={session} />
     </div>
   );
 }
@@ -50,17 +50,17 @@ describe('InspectorRail message draft lifecycle', () => {
     document.body.append(host);
     root = createRoot(host);
 
-    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="operations" />));
+    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="work" />));
     setDraft('message for session one');
 
-    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="overview" />));
+    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="home" />));
     expect(host.querySelector('.inspector-dock')?.hasAttribute('hidden')).toBe(true);
 
-    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="operations" />));
+    await act(async () => root.render(<InspectorDock onError={onError} session={firstSession} view="work" />));
     expect(host.querySelector<HTMLInputElement>('.rail-message-box input')?.value).toBe('message for session one');
 
     await act(async () => { host.querySelector<HTMLButtonElement>('.rail-message-box button')!.click(); });
-    await act(async () => root.render(<InspectorDock onError={onError} session={secondSession} view="operations" />));
+    await act(async () => root.render(<InspectorDock onError={onError} session={secondSession} view="work" />));
     expect(host.querySelector<HTMLInputElement>('.rail-message-box input')?.value).toBe('');
 
     await act(async () => {

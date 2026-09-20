@@ -7,6 +7,7 @@
 // [data-repo-id] node the tests rely on, so there is exactly one.
 import type { CollaboratorSession, Repo } from '../../types.js';
 import type { CollaboratorRunSummary } from '../../work-engine/types.js';
+import type { NeedsYouItem } from '../needsYou.js';
 import { isTerminalRunStatus } from './runModel.js';
 
 interface Props {
@@ -14,6 +15,8 @@ interface Props {
   /** Already grant-scoped and authorized — the same list the feed and "Your requests" page read, so a Repository's count here never disagrees with what opening it shows. */
   runs: readonly CollaboratorRunSummary[];
   sessions: readonly CollaboratorSession[];
+  /** Redesign spec §10: the collaborator's Needs You queue (deriveCollaboratorNeedsYou), shown first. */
+  needsYou: readonly NeedsYouItem[];
   selectedRepositoryId: string | null;
   requestsSelected: boolean;
   open: boolean;
@@ -27,17 +30,30 @@ interface Props {
 }
 
 export function CollaboratorSidebar({
-  repos, runs, sessions, selectedRepositoryId, requestsSelected, open, canRequestWork,
+  repos, runs, sessions, needsYou, selectedRepositoryId, requestsSelected, open, canRequestWork,
   onSelectRepository, onSelectRequests, onSelectRun, onSelectSession, onNewRequest,
 }: Props) {
-  const attentionRuns = runs.filter((run) => Boolean(run.pendingAttentionKind));
-  const attentionSessions = sessions.filter((session) => session.status === 'waiting_input');
-  const attentionCount = attentionRuns.length + attentionSessions.length;
-
   return (
     <aside className={`admin-sidebar collab-sidebar${open ? ' is-open' : ''}`}>
       <div className="admin-sidebar-brand"><span className="brand-mark"><i /></span><strong>AgentDeck</strong></div>
       <nav aria-label="Collaborator navigation" className="admin-navigation">
+        {needsYou.length > 0 && (
+          <section aria-label="Needs you" className="admin-nav-group admin-sidebar-attention">
+            <div className="admin-nav-label">Needs you <span>{needsYou.length}</span></div>
+            {needsYou.slice(0, 4).map((item) => (
+              <button
+                aria-label={`${item.action}: ${item.title} — ${item.context}`}
+                key={item.id}
+                onClick={() => (item.target.kind === 'run' ? onSelectRun(item.target.runId) : item.target.kind === 'session' ? onSelectSession(item.target.sessionId) : undefined)}
+                title={item.context}
+                type="button"
+              >
+                <span aria-hidden="true" className="attention-dot" />
+                <span><strong>{item.title}</strong><small>{item.context}</small></span>
+              </button>
+            ))}
+          </section>
+        )}
         <div className="admin-nav-group">
           <div className="admin-nav-label">Work</div>
           <button
@@ -78,24 +94,6 @@ export function CollaboratorSidebar({
           {repos.length === 0 && <p className="sidebar-empty">No Repositories have been granted to you yet.</p>}
         </div>
       </nav>
-
-      {attentionCount > 0 && (
-        <section aria-label="Attention" className="admin-sidebar-attention">
-          <div className="admin-nav-label">Attention <span>{attentionCount}</span></div>
-          {attentionRuns.slice(0, 3).map((run) => (
-            <button aria-label={`Open Run needing attention: ${run.objective}`} key={run.id} onClick={() => onSelectRun(run.id)} title={run.objective} type="button">
-              <span aria-hidden="true" className="attention-dot" />
-              <span><strong>{run.objective}</strong><small>{run.repository.name} · Run</small></span>
-            </button>
-          ))}
-          {attentionSessions.slice(0, Math.max(0, 3 - attentionRuns.length)).map((session) => (
-            <button aria-label={`Open agent needing attention: ${session.name ?? session.agent}`} key={session.id} onClick={() => onSelectSession(session.id)} title={session.name ?? session.agent} type="button">
-              <span aria-hidden="true" className="attention-dot" />
-              <span><strong>{session.name ?? (session.agent === 'claude' ? 'Claude Code' : 'Codex')}</strong><small>Waiting for a reply</small></span>
-            </button>
-          ))}
-        </section>
-      )}
 
       <div className="admin-sidebar-actions collab-sidebar-actions">
         <button

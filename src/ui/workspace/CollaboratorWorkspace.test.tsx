@@ -116,6 +116,27 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('CollaboratorWorkspace Needs You (redesign spec §10)', () => {
+  it('leads with questions and waiting agents the collaborator can act on, before the Repository feed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(detail({ status: 'waiting_input', pendingAttentionKind: 'input' }))));
+    const host = await mount({
+      runs: [summary({ status: 'waiting_input', pendingAttentionKind: 'input' }), summary({ id: 'run-approval', objective: 'Admin-only approval', pendingAttentionKind: 'approval' })],
+      sessions: [agent({ status: 'waiting_input' })],
+    });
+
+    const needsYou = host.querySelector('.collab-needs-you')!;
+    expect(needsYou.textContent).toContain('An agent has a question');
+    expect(needsYou.textContent).toContain('Claude is waiting for you');
+    expect(needsYou.textContent).not.toContain('Admin-only approval');
+    const heading = host.querySelector('.workspace-scroll h1')!;
+    expect(needsYou.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const answer = [...needsYou.querySelectorAll('button')].find((button) => button.textContent === 'Answer')!;
+    await act(async () => { answer.click(); });
+    expect(host.querySelector('.collab-run-detail')).not.toBeNull();
+  });
+});
+
 describe('CollaboratorWorkspace navigation', () => {
   it('shows the appearance control supplied by the shared app chrome', async () => {
     const host = await mount({ appearanceControl: <button aria-label="Appearance: System" type="button">◐</button> });
@@ -885,19 +906,28 @@ describe('CollaboratorWorkspace agent conversation', () => {
     expect(host.textContent).toContain('Waiting for the agent’s next turn');
   });
 
-  it('a Mention @agent action inserts the mention without submitting', async () => {
+  it('choosing the agent as recipient inserts the mention without submitting, and typing one switches the recipient', async () => {
     vi.stubGlobal('fetch', stubAgentFetch([]));
 
     const host = await mount({ sessions: [agent()] });
     const tile = host.querySelector('[data-session-id="session-1"]') as HTMLButtonElement;
     await act(async () => { tile.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    const mentionButton = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Mention @agent') as HTMLButtonElement;
-    await act(async () => { mentionButton.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const recipient = host.querySelector('select[aria-label="Send to"]') as HTMLSelectElement;
+    expect(recipient.value).toBe('team');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(recipient, 'agent');
+      recipient.dispatchEvent(new Event('change', { bubbles: true }));
+    });
 
     const composer = host.querySelector('textarea[aria-label="Message everyone"]') as HTMLTextAreaElement;
     expect(composer.value).toContain('@agent');
     expect(host.textContent).toContain('Send to agent');
+
+    await act(async () => { setInputValue(composer, 'just for the team'); });
+    expect((host.querySelector('select[aria-label="Send to"]') as HTMLSelectElement).value).toBe('team');
+    await act(async () => { setInputValue(composer, '@agent please look'); });
+    expect((host.querySelector('select[aria-label="Send to"]') as HTMLSelectElement).value).toBe('agent');
   });
 
   // Chat stays available even when the agent cannot be reached -- the

@@ -44,22 +44,20 @@ Terminal.app and iTerm2 sessions can be focused through macOS Automation. VS Cod
 
 ### Views
 
-- **Overview** is a cross-repository landing page, with a per-repository drill-down, summarizing Runs, Sessions, and repository health.
-- **Tasks** presents a Run-centric queue across repositories.
-- **Operations** shows the selected Run's workspace when a Run is selected; otherwise it groups active Sessions by repository and surfaces attention prompts, process activity, working-tree health, and conflict warnings.
-- **Sessions** hosts the managed PTY or focus and messaging controls for an external terminal. Managed terminals stay mounted while switching views, preserving their connection and history.
-- **Changes** provides repository-wide code review, staging, editor, commit, and publishing actions.
-- **Grid** presents recent output from every session in a terminal-style mission control view.
-- **Signals** shows a raw feed of agent coordination events.
-- **History** lists sessions that have ended. An ended managed session stays in the session rail for about an hour before moving here.
+The sidebar has four destinations, plus contextual repository shortcuts and Settings:
 
-Settings is not one of the sidebar views. Open it from the gear icon in the top bar; it replaces the workspace content while the sidebar stays visible, and "‹ Back to workspace" (or navigating elsewhere) returns you to what was open before. See [Settings, Profiles, and access](#settings-profiles-and-access).
+- **Home** answers "what needs me?" first. **Needs you** is one queue of everything waiting on a human — agent permissions and questions, blocking conflicts, recent failures, crossed usage limits, and work ready for review — sorted by urgency, then age. Pending Run approvals and questions can be answered inline. Below it: active work at a glance, a compact usage glance, repositories, and recently finished work. The Home badge in the sidebar mirrors the queue.
+- **Work** lists every Run and Session together, filtered by status (All, Needs you, Working, Review, Completed, Archived), repository, agent, or search, in a **List** or **Grid** layout (remembered locally). Opening a Session shows its **Chat**, **Activity** timeline (observable actions such as reading, editing, testing, waiting and asking), and **Terminal**; opening a Run shows its detail page. Process details such as PID, TTY and origin sit under **Advanced details**. Ended Sessions older than about an hour appear under **Archived**.
+- **Review** gathers work ready for review and uncommitted repository changes. A Run's review shows acceptance criteria, verification checks, files changed, and an estimated risk, with **Summary**, **Changes**, **Tests**, and **Activity** tabs, plus **Request changes**, **Approve**, and a **Ship** menu. Every ship action (apply, push, draft pull request) asks for confirmation — nothing is pushed or published without an explicit final step.
+- **Usage** shows spend, tokens, plan limits and per-agent usage.
+
+Selecting a repository in the sidebar filters Work and Review to it. Settings opens from the bottom of the sidebar; it replaces the workspace content while the sidebar stays visible, and "‹ Back to workspace" (or navigating elsewhere) returns you to what was open before. See [Settings, Profiles, and access](#settings-profiles-and-access).
 
 Useful keyboard shortcuts:
 
 - `⌘K` opens the command palette to search repositories, Runs, Sessions, or actions.
-- `⌘L` opens the launch manifest for a new session.
-- `1` through `9` select the corresponding visible session.
+- `⌘L` opens **Start work**.
+- `1` through `9` open the corresponding session in Work.
 
 ### Appearance and session labels
 
@@ -71,27 +69,27 @@ Sessions can be renamed from the inspector so long-running or similarly named wo
 
 A Run is a durable unit of work with its own identity and lifecycle: it survives restarts and can use multiple Attempts or Sessions without becoming either one. Runs are distinct from the ad hoc, terminal-driven Sessions described above.
 
-### Submitting a Run
+### Starting work
 
-1. Select **New run** in the top bar.
-2. Enter an **Objective** and one **Acceptance criterion** per line.
-3. Choose a **Repository** and, optionally, a **Requested base reference** (it defaults to the repository's current branch).
-4. Choose a **Runtime preference** (Codex, Claude, or both); only runtimes AgentDeck can currently run are selectable.
-5. Set a **Budget**: wall-clock minutes and model turns, plus optional advanced limits for input/output tokens, child Runs, tool calls, concurrent processes, cost, and repair attempts.
-6. Optionally set a repository-wide **verification policy** — commands that must pass before a Run's delivery is accepted.
-7. Choose the **Requested delivery result**: apply the change directly to the repository (default), leave a local commit only, open a draft pull request, or leave the change in the working tree.
+**＋ Start work** (sidebar, Home, or `⌘L`) is the single entry point for new work:
+
+1. Describe what you want done.
+2. Choose a **Repository** and an **Agent** (Auto, Claude, or Codex).
+3. Choose a mode:
+   - **Quick** launches an ad hoc coding session with your description as its first instruction, optionally on a branch. **More session options…** opens the full launcher (permission mode, environment, free path).
+   - **Structured** submits a durable Run with **Acceptance criteria**, repository **verification commands**, **time and turn limits**, a base branch, and a **delivery target**: apply to the repository (default), create a branch and commit, open a draft pull request, or keep the change in AgentDeck for review. Only agents AgentDeck can currently run managed work with are used.
 
 ### Attempts, retry, pause, and resume
 
-A Run advances through one or more **Attempts** — individual runtime executions. Preparing a Run creates its worktree; starting it launches the first Attempt. **Retry** starts a genuinely new Attempt rather than rerunning the old one, so Run identity and history are preserved. **Pause** and **Resume** act at safe boundary points the Work Engine controls, not an arbitrary interrupt.
+A Run advances through one or more **Attempts** — individual runtime executions, shown as the initial run and then **Retry #1**, **Retry #2**, and so on. Preparing a Run creates its worktree; starting it launches the first Attempt. **Retry** starts a genuinely new Attempt rather than rerunning the old one, so Run identity and history are preserved. **Pause** and **Resume** act at safe boundary points the Work Engine controls, not an arbitrary interrupt.
 
 ### Reviewing a Run
 
-The admin Run detail page has three tabs:
+The admin Run detail page has three tabs (the **Review** destination adds the review-and-ship view described under [Views](#views)):
 
 - **Overview** — acceptance criteria, the latest result and verification summary, a publication hint, and the feedback panel.
-- **Activity** — the full history across every Attempt.
-- **Execution** — the current Attempt's state and controls (start, pause, resume, retry), worktree preparation, its capability envelope, and any Sessions that happen to share the Run's prepared worktree. That correlation is read-only and advisory — starting a Run's Attempt never creates a Session, and a Session sharing the worktree is not owned by the Run.
+- **Activity** — the full history across every retry.
+- **Advanced details** — the current Attempt's state and controls (start, pause, resume, retry), worktree preparation, its capability envelope, and any Sessions that happen to share the Run's prepared worktree. That correlation is read-only and advisory — starting a Run's Attempt never creates a Session, and a Session sharing the worktree is not owned by the Run.
 
 The collaborator Run detail page is deliberately smaller, with only **Overview** (acceptance criteria, result/verification summary, feedback and review state, and preview eligibility as information only) and **Updates** (the readable progress narrative and timestamps).
 
@@ -109,7 +107,9 @@ Publishing is an explicit, admin-only step, never automatic. Once a Run complete
 
 ## Launching a managed session
 
-1. Select **Launch agent**.
+Quick mode in **Start work** covers most sessions. For full control:
+
+1. Select **Start work**, keep **Quick**, and choose **More session options…**.
 2. Choose Claude Code or Codex CLI.
 3. Select a scanned repository or enter a free path.
 4. Optionally set a session name, branch, and initial objective.
@@ -185,7 +185,7 @@ For discovered sessions, delivery depends on the owning terminal and installed i
 - Claude Code in an unknown terminal can receive a queued message through hooks on the next prompt or session start.
 - Codex in an unknown terminal does not currently support queued inbound delivery.
 
-Messages sent through the workspace and supported agent replies appear in session conversation history. Capturing replies and richer statuses requires the hooks described in [Integrations](integrations.md#agent-hooks).
+Messages sent through the workspace and supported agent replies appear in session conversation history. The chat composer's **Send to** control makes the recipient explicit: **Team** posts to everyone only, while choosing the agent adds an `@agent` mention (typing `@agent` switches the control too). Once a message reaches the agent, a "‹Agent› is working…" state stays visible until the agent replies, asks, needs approval, fails, or exits. Capturing replies and richer statuses requires the hooks described in [Integrations](integrations.md#agent-hooks).
 
 ### Answering agent questions and approvals
 
@@ -197,7 +197,7 @@ When Claude asks a structured question (an `AskUserQuestion` prompt) or requests
 
 ### Settings workspace
 
-Open **Settings** from the gear icon in the top bar. It has three tabs — **General**, **Profiles**, and **Collaborators** — that all stay mounted while you switch between them, so an unsaved draft or a one-time invitation code survives navigating away and back. General holds the default summary model, the OpenAI API key (write-only once saved), and the appearance control.
+Open **Settings** from the bottom of the sidebar. It has three tabs — **General**, **Profiles**, and **Collaborators** — that all stay mounted while you switch between them, so an unsaved draft or a one-time invitation code survives navigating away and back. General holds the default summary model, the OpenAI API key (write-only once saved), agent hook installation, and the appearance control.
 
 ### Profiles
 

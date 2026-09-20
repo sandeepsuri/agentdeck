@@ -6,6 +6,7 @@ import { parseMention } from '../../mentions.js';
 import {
   getSessionCapabilities, getSessionInteractions, listChatMessages, postChatMessage, respondToSessionInteraction,
 } from '../collaboratorSessions.js';
+import { type ChatRecipient, draftForRecipient, isAgentWorking, recipientForDraft } from './chatState.js';
 import { relativeTime } from './model.js';
 
 type ChatSession = Pick<CollaboratorSession, 'id' | 'agent' | 'name' | 'startedAt' | 'branch'>;
@@ -86,10 +87,12 @@ function InteractionCard({ sessionId, interaction, onResolved, onError }: {
  * It reaches the agent only when the author writes an explicit @agent
  * mention — the same parser (../../mentions.js) the server enforces, used
  * here only to preview the destination before submission, never to decide
- * it. `capabilities` still comes from the server's own pure check, but it no
+ * it. Redesign spec §09: the "Send to" control makes that recipient explicit;
+ * choosing the agent writes the mention, and typing one switches the control.
+ * `capabilities` still comes from the server's own pure check, but it no
  * longer gates the composer itself: chat stays available even when the
- * agent cannot be reached, so an
- * addressed message is still posted and shown "Not sent" with why.
+ * agent cannot be reached, so an addressed message is still posted and
+ * shown "Not sent" with why.
  */
 function ChatComposer({ sessionId, runtimeLabel, capabilities, onError, onSent }: {
   sessionId: string;
@@ -101,6 +104,7 @@ function ChatComposer({ sessionId, runtimeLabel, capabilities, onError, onSent }
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const mention = parseMention(text);
+  const recipient = recipientForDraft(text);
   const agentUnavailable = capabilities?.send === 'unavailable';
 
   const submit = async () => {
@@ -133,18 +137,18 @@ function ChatComposer({ sessionId, runtimeLabel, capabilities, onError, onSent }
             void submit();
           }
         }}
-        placeholder="Message everyone · mention @agent to ask the agent…"
+        placeholder={recipient === 'agent' ? `Ask ${runtimeLabel}…` : 'Message everyone…'}
         rows={2}
         value={text}
       />
       <div className="mobile-agent-composer-actions">
-        <button
-          className="mobile-mention-button"
-          onClick={() => setText((current) => (current.trim().length > 0 ? `${current.trimEnd()} @agent ` : '@agent '))}
-          type="button"
-        >
-          Mention @agent
-        </button>
+        <label className="chat-recipient">
+          <span>Send to</span>
+          <select aria-label="Send to" onChange={(event) => setText((current) => draftForRecipient(current, event.target.value as ChatRecipient))} value={recipient}>
+            <option value="team">Team</option>
+            <option value="agent">@{runtimeLabel}</option>
+          </select>
+        </label>
         <button className="is-primary" disabled={!text.trim() || sending} type="submit">
           {sending ? 'Sending…' : mention.mentioned ? 'Send to agent' : 'Send to chat'}
         </button>
@@ -154,7 +158,7 @@ function ChatComposer({ sessionId, runtimeLabel, capabilities, onError, onSent }
           ? (agentUnavailable
             ? (capabilities?.reason ?? 'This agent cannot receive messages right now.')
             : `Visible to everyone here, and delivered to ${runtimeLabel}.`)
-          : 'Visible to everyone here. Mention @agent to ask the agent.'}
+          : 'Visible to everyone here. Send to the agent, or mention @agent, to ask it.'}
       </small>
     </form>
   );
@@ -222,6 +226,9 @@ export function SessionChat({ session, principal, onError }: {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [interactionView, setInteractionView] = useState<SessionInteractionsView | null>(null);
+  /** When this person last delivered something to the agent — the working state holds until the agent answers, blocks, fails or exits. */
+  const [awaitingSince, setAwaitingSince] = useState<string | null>(null);
+  const [agentStarted, setAgentStarted] = useState(false);
   const posted = useRef(new Map<string, SessionChatMessage>());
 
   useEffect(() => {
@@ -230,6 +237,8 @@ export function SessionChat({ session, principal, onError }: {
     posted.current.clear();
     setMessages([]);
     setInteractionView(null);
+    setAwaitingSince(null);
+    setAgentStarted(false);
     setLoaded(false);
     const tick = async () => {
       try {
@@ -259,16 +268,25 @@ export function SessionChat({ session, principal, onError }: {
     return () => { disposed = true; clearTimeout(timer); };
   }, [session.id]);
 
-  const replaceInteraction = (next: SessionInteraction) => setInteractionView((current) => current ? {
-    ...current, processingState: 'delivery_pending',
-    interactions: current.interactions.map((item) => item.id === next.id ? next : item),
-  } : current);
+  const replaceInteraction = (next: SessionInteraction) => {
+    setAwaitingSince(new Date().toISOString());
+    setAgentStarted(false);
+    setInteractionView((current) => current ? {
+      ...current, processingState: 'delivery_pending',
+      interactions: current.interactions.map((item) => item.id === next.id ? next : item),
+    } : current);
+  };
+  const agentName = session.agent === 'claude' ? 'Claude' : 'Codex';
+  useEffect(() => {
+    if (awaitingSince && interactionView?.processingState === 'working') setAgentStarted(true);
+  }, [awaitingSince, interactionView?.processingState]);
+  const working = isAgentWorking({ processingState: interactionView?.processingState, awaitingSince, agentStarted, messages });
 
   return <section aria-label="Shared session chat" className="session-chat">
     {loadError && <p role="status" className="mobile-agent-hint">Unable to refresh the conversation. Retrying…</p>}
-    {interactionView && <div className="session-processing" role="status">
-      {interactionView.processingState === 'working' ? `${session.agent === 'claude' ? 'Claude' : 'Codex'} is working…` : processingLabels[interactionView.processingState]}
-      {interactionView.processingReason ? ` — ${interactionView.processingReason}` : ''}
+    {(working || interactionView) && <div className={`session-processing${working ? ' is-working' : ''}`} role="status">
+      {working ? <><i aria-hidden="true" className="working-dot" />{agentName} is working…</> : processingLabels[interactionView!.processingState]}
+      {interactionView?.processingReason ? ` — ${interactionView.processingReason}` : ''}
     </div>}
     {interactionView?.providerSupport === 'unavailable' && <p className="mobile-agent-hint">{interactionView.providerReason}</p>}
     {interactionView && interactionView.interactions.length > 0 && <ol aria-label="Agent requests" className="session-interactions">
@@ -281,6 +299,8 @@ export function SessionChat({ session, principal, onError }: {
         posted.current.set(message.id, message);
         setMessages((current) => [...current.filter((item) => item.id !== message.id), message].slice(-100));
         if (message.audience === 'agent' && (message.delivery === 'sent' || message.delivery === 'queued')) {
+          setAwaitingSince(message.ts);
+          setAgentStarted(false);
           setInteractionView((current) => current ? { ...current, processingState: 'delivery_pending' } : current);
         }
       }} />

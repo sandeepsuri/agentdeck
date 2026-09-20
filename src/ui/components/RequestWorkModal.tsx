@@ -1,7 +1,7 @@
 // The collaborator's "request work" form (formerly CollaboratorWorkspace's
 // inline RequestWorkComposer, pinned to the bottom of a Repository's feed),
 // now reached from a "New request" action and presented the same way the
-// admin's own RunSubmissionModal is — same modal chrome, same field
+// admin's Start work structured mode is — same modal chrome, same field
 // styling. Presentation only: the WorkSpec construction, requestWork() call,
 // onError/onRequested contract, "text stays in the form on failure"
 // behavior, and "no Profiles granted" empty state are all unchanged from the
@@ -10,7 +10,7 @@ import { type FormEvent, useEffect, useState } from 'react';
 import type { AgentType, Repo } from '../../types.js';
 import type { Profile, WorkSpec } from '../../work-engine/types.js';
 import { requestWork } from '../collaboratorRuns.js';
-import { lines } from './RunSubmissionModal.js';
+import { lines } from './workSubmission.js';
 
 interface Props {
   repository: Repo;

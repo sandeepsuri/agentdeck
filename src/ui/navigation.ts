@@ -7,14 +7,30 @@ export interface InitialNavigation {
   view?: WorkspaceView;
 }
 
+/**
+ * Redesign spec §14: destinations retired from primary navigation. Deep links
+ * (the notch companion still sends view=terminal / view=operations) resolve
+ * to the destination that absorbed them rather than being dropped.
+ */
+const LEGACY_VIEWS: Record<string, WorkspaceView> = {
+  overview: 'home',
+  tasks: 'work',
+  operations: 'work',
+  terminal: 'work',
+  grid: 'work',
+  history: 'work',
+  signals: 'work',
+  changes: 'review',
+};
+
 export function parseInitialNavigation(search: string): InitialNavigation {
   const params = new URLSearchParams(search);
   const sessionId = params.get('session')?.trim();
   const runId = params.get('run')?.trim();
-  const requestedView = params.get('view');
+  const requestedView = params.get('view') ?? '';
   const view = WORKSPACE_VIEWS.some((candidate) => candidate.id === requestedView)
     ? requestedView as WorkspaceView
-    : undefined;
+    : LEGACY_VIEWS[requestedView];
   return {
     ...(sessionId ? { sessionId } : {}),
     ...(runId ? { runId } : {}),
@@ -22,7 +38,7 @@ export function parseInitialNavigation(search: string): InitialNavigation {
   };
 }
 
-/** A Session inspector belongs only beside views where that selected Session is active context. */
-export function isInspectorRelevant(view: WorkspaceView, hasSelectedSession: boolean): boolean {
-  return hasSelectedSession && (view === 'operations' || view === 'terminal' || view === 'changes');
+/** A Session inspector belongs only beside an opened Session's detail inside Work. */
+export function isInspectorRelevant(view: WorkspaceView, hasOpenSession: boolean): boolean {
+  return hasOpenSession && view === 'work';
 }

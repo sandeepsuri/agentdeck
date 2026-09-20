@@ -20,6 +20,8 @@ export interface LaunchModalProps {
   repos: Repo[];
   onClose: () => void;
   onLaunched: (session: Session) => void;
+  /** Carries what was already typed in Start work into the full session options. */
+  initial?: { prompt?: string; repoPath?: string; agent?: AgentType };
 }
 
 const PERMISSIONS: { value: PermissionMode; label: string; icon: string; description: string }[] = [
@@ -41,15 +43,15 @@ function parseEnvFile(contents: string): EnvRow[] {
   });
 }
 
-export function LaunchModal({ repos, onClose, onLaunched }: LaunchModalProps) {
-  const [agent, setAgent] = useState<AgentType>('claude');
+export function LaunchModal({ repos, onClose, onLaunched, initial }: LaunchModalProps) {
+  const [agent, setAgent] = useState<AgentType>(initial?.agent ?? 'claude');
   const [workspaceMode, setWorkspaceMode] = useState<'repo' | 'free'>(repos.length ? 'repo' : 'free');
-  const [repoPath, setRepoPath] = useState(repos[0]?.path ?? '');
+  const [repoPath, setRepoPath] = useState(repos.find((repo) => repo.path === initial?.repoPath)?.path ?? repos[0]?.path ?? '');
   const [freePath, setFreePath] = useState('');
   const [name, setName] = useState('');
   const [branch, setBranch] = useState('');
   const [createBranch, setCreateBranch] = useState(false);
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(initial?.prompt ?? '');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);

@@ -4,7 +4,6 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Repo, Session } from '../../types.js';
 import type { ModelNewsFeed, TokenTotals, UsageModelRow, UsageSessionRow, UsageSummary, UsageTimeseriesPoint } from '../../usage/types.js';
-import { UsageStrip } from './UsageStrip.js';
 import { UsageView } from './UsageView.js';
 import { formatTokens, formatUsd } from './usageModel.js';
 
@@ -160,23 +159,3 @@ describe('UsageView', () => {
   });
 });
 
-describe('UsageStrip', () => {
-  it('shows a glance with the latest non-local headline and opens Usage', async () => {
-    mockApi();
-    const onOpen = vi.fn();
-    const host = await render(<UsageStrip onOpen={onOpen} />);
-    const strip = host.querySelector('.usage-strip') as HTMLButtonElement;
-    expect(strip.textContent).toContain('2.4M');
-    expect(strip.textContent).toContain('$42.00');
-    expect(strip.textContent).toContain('claude-sonnet-5');
-    expect(strip.textContent).toContain('We launched Claude Fable 5.1.');
-    await act(async () => { strip.click(); });
-    expect(onOpen).toHaveBeenCalled();
-  });
-
-  it('stays hidden when usage is unavailable', async () => {
-    mockApi({ '/api/usage/summary': new Response('{}', { status: 404 }) });
-    const host = await render(<UsageStrip onOpen={() => undefined} />);
-    expect(host.querySelector('.usage-strip')).toBeNull();
-  });
-});

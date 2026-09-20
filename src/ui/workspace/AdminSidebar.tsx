@@ -1,91 +1,85 @@
-import type { Session } from '../../types.js';
-import type { WorkRun } from '../../work-engine/types.js';
-import { sessionLabel, type WorkspaceView, WORKSPACE_VIEWS } from './model.js';
+// Redesign spec §03: four primary destinations, repositories as contextual
+// filters rather than a navigation tree, and Settings at the foot. The Home
+// badge mirrors the global Needs You queue (needsYou.ts); nothing else in the
+// sidebar competes with it.
+import type { Repo } from '../../types.js';
+import { type WorkspaceView, WORKSPACE_VIEWS } from './model.js';
+
+export interface RepositoryActivity {
+  active: number;
+  waiting: number;
+}
 
 interface Props {
   activeView: WorkspaceView;
-  runs: readonly WorkRun[];
-  sessions: readonly Session[];
+  settingsActive?: boolean;
+  needsYouCount: number;
+  reviewCount: number;
+  repos: readonly Repo[];
+  repositoryActivity: ReadonlyMap<string, RepositoryActivity>;
+  activeRepositoryId: string | null;
   onView: (view: WorkspaceView) => void;
-  onSelectRun: (run: WorkRun) => void;
-  onSelectSession: (session: Session) => void;
-  onSubmitRun: () => void;
-  onLaunch: () => void;
-  changeCount?: number;
-  historyCount?: number;
+  onSelectRepository: (repositoryId: string) => void;
+  onStartWork: () => void;
+  onSettings: () => void;
 }
 
-interface NavigationItem {
-  id: WorkspaceView;
-  glyph: string;
-  badge?: 'changes' | 'history';
-}
+const GLYPHS: Record<WorkspaceView, string> = { home: '⌂', work: '◉', review: '±', usage: '◔' };
 
-const NAVIGATION_GROUPS: readonly { label: string; items: readonly NavigationItem[] }[] = [
-  { label: 'Repositories', items: [{ id: 'overview', glyph: '⌂' }, { id: 'tasks', glyph: '✓' }, { id: 'changes', glyph: '±', badge: 'changes' }] },
-  { label: 'Work', items: [{ id: 'operations', glyph: '◉' }, { id: 'terminal', glyph: '>_' }, { id: 'grid', glyph: '▦' }, { id: 'history', glyph: '↶', badge: 'history' }] },
-  { label: 'System', items: [{ id: 'signals', glyph: '⌁' }, { id: 'usage', glyph: '◔' }] },
-];
-
-function NavigationGroup({ label, items, activeView, badges, onView }: {
-  label: string;
-  items: readonly NavigationItem[];
-  activeView: WorkspaceView;
-  badges: Record<'changes' | 'history', number>;
-  onView: (view: WorkspaceView) => void;
-}) {
-  return (
-    <div className="admin-nav-group">
-      <div className="admin-nav-label">{label}</div>
-      {items.map(({ id, glyph, badge }) => {
-        const destination = WORKSPACE_VIEWS.find((item) => item.id === id)!;
-        const count = badge ? badges[badge] : 0;
-        return (
-          <button aria-current={activeView === id ? 'page' : undefined} aria-label={destination.label} className={activeView === id ? 'is-active' : ''} key={id} onClick={() => onView(id)} title={destination.label} type="button">
-            <span aria-hidden="true" className="admin-nav-glyph">{glyph}</span>
-            <span>{destination.label}</span>
-            {count > 0 && <small>{count}</small>}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-export function AdminSidebar({ activeView, runs, sessions, onView, onSelectRun, onSelectSession, onSubmitRun, onLaunch, changeCount = 0, historyCount = 0 }: Props) {
-  const attentionRuns = runs.filter((run) => Boolean(run.pendingAttention));
-  const attentionSessions = sessions.filter((session) => session.status === 'waiting_input');
-  const attentionCount = attentionRuns.length + attentionSessions.length;
-
+export function AdminSidebar({
+  activeView, settingsActive = false, needsYouCount, reviewCount, repos, repositoryActivity, activeRepositoryId,
+  onView, onSelectRepository, onStartWork, onSettings,
+}: Props) {
+  const badges: Partial<Record<WorkspaceView, { count: number; label: string }>> = {
+    home: { count: needsYouCount, label: `${needsYouCount} item${needsYouCount === 1 ? '' : 's'} need you` },
+    review: { count: reviewCount, label: `${reviewCount} ready for review` },
+  };
   return (
     <aside className="admin-sidebar">
       <div className="admin-sidebar-brand"><span className="brand-mark"><i /></span><strong>AgentDeck</strong></div>
+      <button className="button button-primary sidebar-start-work" onClick={onStartWork} title="Start work (⌘L)" type="button">
+        <span aria-hidden="true">＋</span><strong>Start work</strong>
+      </button>
       <nav aria-label="Admin navigation" className="admin-navigation">
-        {NAVIGATION_GROUPS.map((group) => <NavigationGroup activeView={activeView} badges={{ changes: changeCount, history: historyCount }} items={group.items} key={group.label} label={group.label} onView={onView} />)}
+        <div className="admin-nav-group">
+          {WORKSPACE_VIEWS.map(({ id, label }) => {
+            const active = !settingsActive && activeView === id;
+            const badge = badges[id];
+            return (
+              <button aria-current={active ? 'page' : undefined} className={active ? 'is-active' : ''} key={id} onClick={() => onView(id)} title={label} type="button">
+                <span aria-hidden="true" className="admin-nav-glyph">{GLYPHS[id]}</span>
+                <span>{label}</span>
+                {badge && badge.count > 0 && <small aria-label={badge.label} className={id === 'home' ? 'is-attention' : ''}>{badge.count}</small>}
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
-      {attentionCount > 0 && (
-        <section aria-label="Attention" className="admin-sidebar-attention">
-          <div className="admin-nav-label">Attention <span>{attentionCount}</span></div>
-          <div aria-label={`${attentionCount} item${attentionCount === 1 ? '' : 's'} need attention`} className="attention-compact-count">{attentionCount}</div>
-          {attentionRuns.slice(0, 3).map((run) => (
-            <button aria-label={`Open Run needing attention: ${run.spec.objective}`} key={run.id} onClick={() => onSelectRun(run)} title={run.spec.objective} type="button">
-              <span aria-hidden="true" className="attention-dot" />
-              <span><strong>{run.spec.objective}</strong><small>{run.spec.repository.name} · Run</small></span>
-            </button>
-          ))}
-          {attentionSessions.slice(0, Math.max(0, 3 - attentionRuns.length)).map((session) => (
-            <button aria-label={`Open Session needing attention: ${sessionLabel(session)}`} key={session.id} onClick={() => onSelectSession(session)} title={sessionLabel(session)} type="button">
-              <span aria-hidden="true" className="attention-dot" />
-              <span><strong>{sessionLabel(session)}</strong><small>Session waiting for input</small></span>
-            </button>
-          ))}
-        </section>
+      {repos.length > 0 && (
+        <nav aria-label="Repositories" className="admin-nav-group sidebar-repositories">
+          <div className="admin-nav-label">Repositories</div>
+          {repos.map((repo) => {
+            const activity = repositoryActivity.get(repo.id);
+            const active = activeRepositoryId === repo.id;
+            return (
+              <button aria-pressed={active} className={active ? 'is-active' : ''} key={repo.id} onClick={() => onSelectRepository(repo.id)} title={`Show work in ${repo.name}`} type="button">
+                <span className="sidebar-repo-name">{repo.name}</span>
+                {activity && activity.active > 0 && (
+                  <small aria-label={`${activity.active} active${activity.waiting > 0 ? `, ${activity.waiting} waiting` : ''}`} className={activity.waiting > 0 ? 'is-attention' : ''}>
+                    <i aria-hidden="true" />{activity.active}
+                  </small>
+                )}
+              </button>
+            );
+          })}
+        </nav>
       )}
 
       <div className="admin-sidebar-actions">
-        <button aria-label="New run" onClick={onSubmitRun} title="New run" type="button"><span aria-hidden="true">＋</span><strong>New run</strong></button>
-        <button aria-label="New session" onClick={onLaunch} title="New session" type="button"><span aria-hidden="true">＋</span><strong>New session</strong></button>
+        <button aria-current={settingsActive ? 'page' : undefined} className={settingsActive ? 'is-active' : ''} onClick={onSettings} title="Settings" type="button">
+          <span aria-hidden="true">⚙</span><strong>Settings</strong>
+        </button>
       </div>
     </aside>
   );
