@@ -138,8 +138,13 @@ export function deriveWorkItems({ runs, sessions, historySessions, repos, needsY
     });
   }
 
-  const bucketOrder = (item: WorkItem) => item.bucket === 'needs_you' ? 0 : 1;
-  return items.sort((a, b) => bucketOrder(a) - bucketOrder(b) || b.updatedAt.localeCompare(a.updatedAt));
+  // Order is deliberately fixed: newest work first, by the moment it started.
+  // Sorting by last activity (or floating whatever currently needs you to the
+  // top) made rows swap places on every agent event, so a row moved out from
+  // under the pointer mid-click. `startedAt` and `id` never change, so a row
+  // only moves when work is added or removed. Attention still surfaces through
+  // Home's Needs You section and Work's "Needs you" filter, not by reordering.
+  return items.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || a.id.localeCompare(b.id));
 }
 
 export function filterWorkItems(items: readonly WorkItem[], { status, repositoryId, agent, query }: WorkFilters): WorkItem[] {

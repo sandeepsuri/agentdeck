@@ -52,7 +52,7 @@ const chip = (label: string) => [...host.querySelectorAll<HTMLButtonElement>('.w
 describe('WorkView', () => {
   it('lists runs and sessions together with status chips and counts', async () => {
     await mount();
-    expect(titles()).toEqual(['Review dashboard', 'Add rate limiting', 'Update API route']);
+    expect(titles()).toEqual(['Add rate limiting', 'Review dashboard', 'Update API route']);
     expect(chip('Needs you').textContent).toBe('Needs you1');
     await act(async () => { chip('Working').click(); });
     expect(titles()).toEqual(['Add rate limiting']);
@@ -69,18 +69,18 @@ describe('WorkView', () => {
 
   it('shows the same items and status in grid, with current activity and no sparklines or process identity by default', async () => {
     await mount('grid');
-    expect(titles()).toEqual(['Review dashboard', 'Add rate limiting', 'Update API route']);
+    expect(titles()).toEqual(['Add rate limiting', 'Review dashboard', 'Update API route']);
     expect(host.querySelector('.work-grid')).not.toBeNull();
     expect(host.textContent).toContain('Testing · Running vitest for middleware');
     expect(host.querySelector('.spark-bars')).toBeNull();
     const visibleText = [...host.querySelectorAll('.work-card-main')].map((element) => element.textContent).join(' ');
     expect(visibleText).not.toMatch(/4711|ttys004|PID|iTerm2|external/i);
-    expect(host.querySelector('.work-advanced')?.textContent).toContain('4711');
+    expect(host.querySelector('[data-work-id="session:s-web"] .work-advanced')?.textContent).toContain('4711');
   });
 
   it('opens an item', async () => {
     const onOpen = await mount();
     await act(async () => { host.querySelector<HTMLButtonElement>('.work-card-main')!.click(); });
-    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: 'session:s-web' }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ id: 'session:s-api' }));
   });
 });

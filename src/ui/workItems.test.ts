@@ -48,8 +48,8 @@ describe('deriveWorkItems', () => {
   it('presents Runs and Sessions as one kind of work with title, agent, repository and status', () => {
     const items = derive({ runs: [run()], sessions: [session()] });
     expect(items.map(({ id, kind, title, agentLabel, repositoryId, repositoryName, bucket, statusLabel }) => ({ id, kind, title, agentLabel, repositoryId, repositoryName, bucket, statusLabel }))).toEqual([
-      { id: 'session:session-1', kind: 'session', title: 'Review dashboard', agentLabel: 'Claude', repositoryId: 'repo-api', repositoryName: 'example-api', bucket: 'working', statusLabel: 'Working' },
       { id: 'run:run-1', kind: 'run', title: 'Build activity feed', agentLabel: 'Codex', repositoryId: 'repo-web', repositoryName: 'example-web', bucket: 'working', statusLabel: 'Working' },
+      { id: 'session:session-1', kind: 'session', title: 'Review dashboard', agentLabel: 'Claude', repositoryId: 'repo-api', repositoryName: 'example-api', bucket: 'working', statusLabel: 'Working' },
     ]);
   });
 
@@ -79,7 +79,20 @@ describe('deriveWorkItems', () => {
       'run:run-ancient': ['archived', 'Cancelled'],
       'session:history': ['archived', 'Exited'],
     });
-    expect(items.slice(0, 2).every((item) => item.bucket === 'needs_you')).toBe(true);
+  });
+
+  it('keeps a fixed order so rows never move under the pointer while agents work', () => {
+    const before = derive({
+      runs: [run({ id: 'run-old', submittedAt: '2026-09-10T09:00:00.000Z' })],
+      sessions: [session({ id: 'chatty', startedAt: '2026-09-10T10:00:00.000Z', lastActivityAt: '2026-09-10T10:05:00.000Z' })],
+    });
+    // Same work, one busy session later: new activity, and now it needs you.
+    const after = derive({
+      runs: [run({ id: 'run-old', submittedAt: '2026-09-10T09:00:00.000Z' })],
+      sessions: [session({ id: 'chatty', startedAt: '2026-09-10T10:00:00.000Z', lastActivityAt: '2026-09-10T11:59:00.000Z', status: 'waiting_input' })],
+    });
+    expect(before.map((item) => item.id)).toEqual(['session:chatty', 'run:run-old']);
+    expect(after.map((item) => item.id)).toEqual(before.map((item) => item.id));
   });
 
   it('never exposes process identity in the default fields', () => {
@@ -95,9 +108,9 @@ describe('filterWorkItems and countWorkBuckets', () => {
   });
 
   it('filters by status bucket, repository, agent and free text together', () => {
-    expect(filterWorkItems(items, { status: 'working' }).map((item) => item.id)).toEqual(['session:session-1', 'run:run-1']);
-    expect(filterWorkItems(items, { status: 'all', repositoryId: 'repo-api' }).map((item) => item.id)).toEqual(['session:session-2', 'session:session-1', 'run:run-2']);
-    expect(filterWorkItems(items, { status: 'all', agent: 'codex', repositoryId: 'repo-api' }).map((item) => item.id)).toEqual(['session:session-2', 'run:run-2']);
+    expect(filterWorkItems(items, { status: 'working' }).map((item) => item.id)).toEqual(['run:run-1', 'session:session-1']);
+    expect(filterWorkItems(items, { status: 'all', repositoryId: 'repo-api' }).map((item) => item.id)).toEqual(['run:run-2', 'session:session-1', 'session:session-2']);
+    expect(filterWorkItems(items, { status: 'all', agent: 'codex', repositoryId: 'repo-api' }).map((item) => item.id)).toEqual(['run:run-2', 'session:session-2']);
     expect(filterWorkItems(items, { status: 'all', query: 'api route' }).map((item) => item.id)).toEqual(['run:run-2']);
   });
 
