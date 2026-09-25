@@ -50,7 +50,8 @@ export function parseMime(raw: string): ParsedMime {
 
 export function contentFromMime(raw: string): DraftContent {
   const { headers, body } = parseMime(raw);
-  const list = (value?: string) => (value ? value.split(',').map((s) => s.trim()).filter(Boolean) : []);
+  // Split on commas outside quoted display names, e.g. "Doe, Jane" <jane@example.test>.
+  const list = (value?: string) => (value ? (value.match(/(?:"[^"]*"|[^,])+/g) ?? []).map((s) => s.trim()).filter(Boolean) : []);
   return {
     to: list(headers.get('to')),
     cc: list(headers.get('cc')),

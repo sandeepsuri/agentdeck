@@ -10,6 +10,9 @@ import { keychainSecret } from './local-state.js';
 import { buildMime, contentFromMime, parseMime } from './mime.js';
 import type { DraftContent, DraftRef, EmailSpikeAdapter, LookupQuery, MessageSummary, SendEvidence } from './types.js';
 
+/** Per-connection idle limit; the protocol's in-flight grace must exceed it. */
+const REQUEST_TIMEOUT_MS = 20_000;
+
 interface ImapSmtpConfig {
   user: string;
   password: string;
@@ -133,6 +136,8 @@ export class ImapSmtpAdapter implements EmailSpikeAdapter {
 
   private async connection(): Promise<ImapConnection> {
     if (!this.imap) {
+      // Quoted strings are ASCII-only in IMAP4rev1; app passwords always are.
+      if (!/^[\x20-\x7e]*$/.test(this.config.password)) throw new Error('The spike only supports ASCII app passwords.');
       this.imap = await ImapConnection.open(this.config.imapHost);
       await this.imap.command(`LOGIN ${quote(this.config.user)} ${quote(this.config.password)}`);
     }
@@ -165,6 +170,7 @@ class ImapConnection {
   static async open(host: string): Promise<ImapConnection> {
     const socket = tls.connect({ host, port: 993, servername: host });
     await new Promise<void>((resolve, reject) => socket.once('secureConnect', resolve).once('error', reject));
+    socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy(new Error('IMAP timed out')));
     const connection = new ImapConnection(socket);
     const greeting = await connection.readResponse();
     if (!greeting.text.startsWith('* OK')) throw new Error(`IMAP greeting: ${greeting.text}`);
@@ -268,9 +274,13 @@ class ImapConnection {
 async function smtpSubmit(config: ImapSmtpConfig, recipients: string[], raw: string): Promise<string> {
   const socket = tls.connect({ host: config.smtpHost, port: 465, servername: config.smtpHost });
   await new Promise<void>((resolve, reject) => socket.once('secureConnect', resolve).once('error', reject));
+  socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy(new Error('SMTP timed out')));
   let buffer = '';
+  let failure: Error | undefined;
   let wake: (() => void) | undefined;
   socket.on('data', (chunk: Buffer) => { buffer += chunk.toString('utf8'); wake?.(); });
+  socket.on('error', (error) => { failure = error; wake?.(); });
+  socket.on('close', () => { failure ??= new Error('SMTP connection closed'); wake?.(); });
   const reply = async (expect: number): Promise<string> => {
     for (;;) {
       // A complete reply ends with a line of the form "250 text" (space, not hyphen).
@@ -281,6 +291,7 @@ async function smtpSubmit(config: ImapSmtpConfig, recipients: string[], raw: str
         if (Number(match[1]) !== expect) throw new Error(`SMTP expected ${expect}, got: ${text.trim()}`);
         return text.trim();
       }
+      if (failure) throw failure;
       await new Promise<void>((resolve) => { wake = resolve; });
     }
   };
@@ -292,7 +303,9 @@ async function smtpSubmit(config: ImapSmtpConfig, recipients: string[], raw: str
     send(`MAIL FROM:<${config.user}>`); await reply(250);
     for (const recipient of recipients) { send(`RCPT TO:<${recipient}>`); await reply(250); }
     send('DATA'); await reply(354);
-    socket.write(`${raw.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..')}\r\n.\r\n`);
+    // The message already ends in CRLF, so the terminator is just ".\r\n".
+    const data = raw.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
+    socket.write(`${data}${data.endsWith('\r\n') ? '' : '\r\n'}.\r\n`);
     const accepted = await reply(250);
     send('QUIT');
     return accepted;

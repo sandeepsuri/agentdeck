@@ -2,19 +2,19 @@
 //
 //   npx tsx scripts/spikes/email/run.ts fake
 //   npx tsx scripts/spikes/email/run.ts gmail-auth
-//   npx tsx scripts/spikes/email/run.ts live <gmail-api|imap-smtp> [--fault <fault>] [--polls n] [--settle-ms n]
+//   npx tsx scripts/spikes/email/run.ts live <gmail-api|imap-smtp> [--fault <fault>] [--polls n] [--settle-ms n] [--grace-ms n]
 //   npx tsx scripts/spikes/email/run.ts resume <gmail-api|imap-smtp>
 //   npx tsx scripts/spikes/email/run.ts status
 //   npx tsx scripts/spikes/email/run.ts cleanup <gmail-api|imap-smtp>
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { ownerOverrideCheck, runFakeScenarios } from './fake-scenarios.js';
+import { blindRetryControl, ownerOverrideCheck, runFakeScenarios } from './fake-scenarios.js';
 import { CrashAfterCommit, withSendFault, type SendFault } from './faults.js';
 import { authorizeGmail, GmailApiAdapter, GMAIL_SCOPES } from './gmail-api.js';
 import { ImapSmtpAdapter, imapSmtpConfigFromEnv } from './imap-smtp.js';
 import { IntentJournal } from './journal.js';
 import { spikeDir, writePrivateJson } from './local-state.js';
-import { reconcileIntent, recordIntent, sendOnce, type ReconcileOptions } from './protocol.js';
+import { reconcileIntent, recordIntent, sendOnce, sleep, type ReconcileOptions } from './protocol.js';
 import type { DraftContent, DraftRef, EmailSpikeAdapter, MessageSummary } from './types.js';
 
 const SUBJECT_TAG = 'agentdeck-spike';
@@ -54,6 +54,26 @@ function flag(name: string, fallback: string): string {
   return index >= 0 ? process.argv[index + 1] ?? fallback : fallback;
 }
 
+const FAULTS: SendFault[] = ['none', 'lose-response-after-commit', 'fail-before-commit', 'crash-after-commit'];
+
+function faultFlag(): SendFault {
+  const fault = flag('fault', 'lose-response-after-commit');
+  if (!FAULTS.includes(fault as SendFault)) throw new Error(`--fault must be one of: ${FAULTS.join(', ')}`);
+  return fault as SendFault;
+}
+
+/**
+ * Live settle timing. The grace outlasts the adapters' 20s request timeout;
+ * the polls outlast the grace so absence can still be proven.
+ */
+function liveReconcileOptions(): ReconcileOptions {
+  return {
+    polls: Number(flag('polls', '10')),
+    settleMs: Number(flag('settle-ms', '5000')),
+    inFlightGraceMs: Number(flag('grace-ms', '30000')),
+  };
+}
+
 async function fake(): Promise<number> {
   const results = await runFakeScenarios();
   for (const r of results) {
@@ -61,6 +81,8 @@ async function fake(): Promise<number> {
   }
   const owner = await ownerOverrideCheck();
   console.log(`${owner ? 'PASS' : 'FAIL'}  owner resolves an ambiguous intent before any resend`);
+  const control = await blindRetryControl();
+  console.log(`\nControl (no protocol): a blind retry after a lost response leaves ${control['draft-consuming']} sent cop${control['draft-consuming'] === 1 ? 'y' : 'ies'} (draft-consuming) and ${control['submit-then-cleanup']} (submit-then-cleanup).`);
   const failed = results.filter((r) => !r.passed).length + (owner ? 0 : 1);
   console.log(failed ? `\n${failed} scenario(s) failed` : `\nAll ${results.length + 1} scenarios passed; no scenario produced a duplicate send.`);
   return failed ? 1 : 0;
@@ -68,15 +90,19 @@ async function fake(): Promise<number> {
 
 /** Every live send goes only to the authenticated mailbox itself. */
 function assertSelfOnly(content: DraftContent, self: string): void {
-  const all = [...content.to, ...(content.cc ?? [])];
+  const all = [...content.to, ...(content.cc ?? [])].map(bareAddress);
   if (all.length === 0 || all.some((r) => r.toLowerCase() !== self.toLowerCase())) {
     throw new Error('The spike only sends to the authenticated mailbox itself.');
   }
 }
 
+function bareAddress(value: string): string {
+  return /<([^>]+)>/.exec(value)?.[1] ?? value.trim();
+}
+
 async function live(provider: EmailSpikeAdapter): Promise<number> {
-  const fault = flag('fault', 'lose-response-after-commit') as SendFault;
-  const reconcile: ReconcileOptions = { polls: Number(flag('polls', '6')), settleMs: Number(flag('settle-ms', '5000')) };
+  const fault = faultFlag();
+  const reconcile = liveReconcileOptions();
   const dir = spikeDir();
   const journal = IntentJournal.in(dir);
   const runId = randomUUID().slice(0, 8);
@@ -124,7 +150,7 @@ async function live(provider: EmailSpikeAdapter): Promise<number> {
     draft = await timed('draft.update', () => provider.updateDraft(draft, edited));
     const readBack = await timed('draft.read', () => provider.readDraft(draft));
     observations.draftReadBackExact = !!readBack && readBack.body === edited.body && readBack.subject === edited.subject
-      && readBack.to.map((t) => t.toLowerCase()).join() === self.toLowerCase();
+      && readBack.to.map((t) => bareAddress(t).toLowerCase()).join() === self.toLowerCase();
     observations.replyStaysInThread = !match.threadId || draft.threadId === match.threadId;
 
     // 4. Send with an injected fault, then press "retry" as an impatient owner would.
@@ -148,7 +174,14 @@ async function live(provider: EmailSpikeAdapter): Promise<number> {
     await sleep(reconcile.settleMs);
     const copies = await timed('sentCopies', () => provider.sentCopies(draft, afterFault.createdAtMs));
     observations.sentCopies = copies;
-    const passed = copies <= 1 && (retried.state !== 'sent' || copies === 1);
+    // The live gate in the decision record: never a duplicate, the expected
+    // final state for the fault, and the three draft observations.
+    const expectedState = provider.name === 'imap-smtp' && fault === 'fail-before-commit' ? 'ambiguous' : 'sent';
+    const expectedCopies = expectedState === 'sent' ? 1 : 0;
+    const passed = copies === expectedCopies && retried.state === expectedState
+      && observations.draftReadBackExact === true && observations.replyStaysInThread === true
+      && (provider.name !== 'gmail-api' || observations.draftGoneAfterSend === true);
+    observations.expected = { state: expectedState, copies: expectedCopies };
 
     const file = path.join(dir, `results-${provider.name}-${runId}.json`);
     writePrivateJson(file, { runId, at: new Date().toISOString(), passed, timings, observations });
@@ -162,7 +195,7 @@ async function live(provider: EmailSpikeAdapter): Promise<number> {
 
 async function resume(provider: EmailSpikeAdapter): Promise<number> {
   const journal = IntentJournal.in(spikeDir());
-  const reconcile: ReconcileOptions = { polls: Number(flag('polls', '6')), settleMs: Number(flag('settle-ms', '5000')) };
+  const reconcile = liveReconcileOptions();
   try {
     for (const record of journal.all().filter((r) => r.adapter === provider.name && r.state === 'dispatching')) {
       const settled = await reconcileIntent(journal, provider, record.intentId, reconcile);
@@ -190,10 +223,6 @@ async function cleanup(provider: EmailSpikeAdapter): Promise<number> {
   } finally {
     await provider.close?.();
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 main().then((code) => { process.exitCode = code; }, (error: unknown) => {

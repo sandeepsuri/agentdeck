@@ -1,6 +1,6 @@
 # Email adapter spike (issue #78)
 
-This is a throwaway harness that runs the same four operations against each candidate email adapter: message lookup, draft create/edit/read-back, exact send, and provider-side reconciliation of an uncertain send. The decision it supports is recorded in [`docs/adr/0001-first-email-adapter.md`](../../../docs/adr/0001-first-email-adapter.md). Nothing here is imported by AgentDeck.
+This is a throwaway harness that runs the same four operations against each candidate email adapter: message lookup, draft create/edit/read-back, exact send, and provider-side reconciliation of an uncertain send. The decision it supports is recorded in [`docs/decisions/0002-first-email-adapter.md`](../../../docs/decisions/0002-first-email-adapter.md). Nothing here is imported by AgentDeck.
 
 | File | Purpose |
 |---|---|
@@ -30,7 +30,7 @@ Credentials, tokens, the send-intent journal, and results live in `~/.agentdeck/
 
 1. In Google Cloud Console, create a project and enable the Gmail API.
 2. Configure the OAuth consent screen as **External** and add yourself as a test user. For refresh tokens that last longer than 7 days, set the publishing status to **In production**. The app stays unverified, which is allowed for personal use.
-3. Create an OAuth client of type **Desktop app** and download its JSON to `~/.agentdeck/spikes/email/gmail-oauth-client.json`.
+3. Create an OAuth client of type **Desktop app** and download its JSON to `~/.agentdeck/spikes/email/gmail-oauth-client.json`, or point `AGENTDECK_GMAIL_CLIENT_FILE` at it. Either way it must be outside the repository.
 4. Authorize, then run each fault:
 
 ```bash
@@ -61,3 +61,7 @@ rm -rf ~/.agentdeck/spikes/email                       # removes tokens, journal
 ```
 
 The minimum Gmail scopes cannot trash mail, so remove sent spike messages by hand with the Gmail search `subject:"agentdeck-spike"`. Revoke the spike's Google access at <https://myaccount.google.com/permissions> and delete the app password when you're done.
+
+## Timing flags
+
+Live `live` and `resume` runs accept three timing flags. `--polls` (default 10) and `--settle-ms` (default 5000) set how long reconciliation waits for the Sent index. `--grace-ms` (default 30000) sets how long a possibly in-flight send blocks proof of absence. Keep the grace above the adapters' 20 s request timeout, and keep `polls × settle-ms` above the grace.

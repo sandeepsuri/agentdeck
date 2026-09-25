@@ -1,7 +1,7 @@
 // Issue #78 spike: the smallest contract every candidate email adapter must
 // satisfy so the same scenarios can be run against each one. This is spike
 // code, not a production interface — the decision record in
-// docs/adr/0001-first-email-adapter.md says what should survive.
+// docs/decisions/0002-first-email-adapter.md says what should survive.
 
 export interface MessageSummary {
   providerId: string;

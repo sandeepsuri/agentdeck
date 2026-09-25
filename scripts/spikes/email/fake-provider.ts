@@ -16,8 +16,15 @@ export interface FakeProviderOptions {
   semantics: 'draft-consuming' | 'submit-then-cleanup';
   /** Reconcile/search calls that miss a sent message before it becomes visible. */
   sentIndexLag?: number;
-  /** When true the provider replaces the requested Message-ID, as some APIs do. */
+  /** When true the provider replaces the Message-ID on the sent copy, as some servers do. */
   rewritesMessageId?: boolean;
+  /** Yield to the event loop before committing a send, so concurrent callers genuinely overlap. */
+  sendLatency?: boolean;
+  /**
+   * The first send times out on the client, but the provider commits it after
+   * this many further reconcile checks: the late-commit race.
+   */
+  lateCommitAfterChecks?: number;
 }
 
 interface StoredMessage {
@@ -48,6 +55,7 @@ export class FakeProvider implements EmailSpikeAdapter {
   readonly sent: StoredMessage[] = [];
   readonly drafts = new Map<string, StoredDraft>();
   private nextId = 1;
+  private lateCommit?: { ref: DraftRef; checksLeft: number };
 
   constructor(private readonly options: FakeProviderOptions, private readonly self = 'owner@example.test') {
     this.name = `fake:${options.semantics}`;
@@ -79,7 +87,7 @@ export class FakeProvider implements EmailSpikeAdapter {
   }
 
   async createDraft(content: DraftContent, intentId: string, requestedMessageId: string): Promise<DraftRef> {
-    const messageIdHeader = this.options.rewritesMessageId ? `<${this.id('rw')}@provider.example.test>` : requestedMessageId;
+    const messageIdHeader = requestedMessageId;
     const draft: StoredDraft = { id: this.id('d'), intentId, messageIdHeader, threadId: content.threadId ?? this.id('t'), content };
     this.drafts.set(draft.id, draft);
     return { draftId: draft.id, messageIdHeader, intentId, threadId: draft.threadId };
@@ -101,10 +109,30 @@ export class FakeProvider implements EmailSpikeAdapter {
   }
 
   async sendDraft(ref: DraftRef): Promise<{ providerMessageId: string }> {
+    if (this.options.lateCommitAfterChecks !== undefined && !this.lateCommit) {
+      this.lateCommit = { ref, checksLeft: this.options.lateCommitAfterChecks };
+      throw new Error('simulated client timeout; the provider is still processing the request');
+    }
+    this.flushLateCommit(true);
+    if (this.options.sendLatency) await new Promise((resolve) => setImmediate(resolve));
+    return this.commitSend(ref);
+  }
+
+  /** A pending late commit lands after its reconcile checks run out, or before any new send reaches the provider. */
+  private flushLateCommit(force: boolean): void {
+    if (!this.lateCommit || (!force && this.lateCommit.checksLeft-- > 0)) return;
+    const { ref } = this.lateCommit;
+    this.lateCommit = undefined;
+    this.commitSend(ref);
+  }
+
+  private commitSend(ref: DraftRef): { providerMessageId: string } {
     const draft = this.drafts.get(ref.draftId);
     if (!draft) throw new Error('404 draft not found');
     const message: StoredMessage = {
-      id: this.id('m'), threadId: draft.threadId, messageIdHeader: draft.messageIdHeader, intentId: draft.intentId,
+      id: this.id('m'), threadId: draft.threadId, intentId: draft.intentId,
+      // A rewrite at submission leaves the caller holding a Message-ID the sent copy no longer has.
+      messageIdHeader: this.options.rewritesMessageId ? `<${this.id('rw')}@provider.example.test>` : draft.messageIdHeader,
       from: this.self, to: draft.content.to, subject: draft.content.subject, body: draft.content.body,
       sentAtMs: Date.now(), hiddenFor: this.options.sentIndexLag ?? 0,
     };
@@ -116,6 +144,7 @@ export class FakeProvider implements EmailSpikeAdapter {
   }
 
   async reconcile(ref: DraftRef, sinceMs: number): Promise<SendEvidence> {
+    this.flushLateCommit(false);
     const hit = this.searchSent(ref, sinceMs);
     if (hit) return { state: 'sent', providerMessageId: hit.id, via: 'sent-search' };
     if (this.options.semantics === 'draft-consuming' && this.drafts.has(ref.draftId)) {
@@ -129,9 +158,14 @@ export class FakeProvider implements EmailSpikeAdapter {
     return this.sent.filter((m) => m.intentId === ref.intentId).length;
   }
 
+  /**
+   * Message-ID search everywhere; the intent-header match models the Gmail
+   * adapter's thread search, which IMAP has no equivalent for.
+   */
   private searchSent(ref: DraftRef, sinceMs: number): StoredMessage | undefined {
+    const byIntent = this.options.semantics === 'draft-consuming';
     return this.sent.find((m) => this.visible(m) && m.sentAtMs >= sinceMs
-      && (m.messageIdHeader === ref.messageIdHeader || m.intentId === ref.intentId));
+      && (m.messageIdHeader === ref.messageIdHeader || (byIntent && m.intentId === ref.intentId)));
   }
 
   /** Each look at a lagging message counts down toward it becoming searchable. */
