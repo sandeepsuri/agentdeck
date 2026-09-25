@@ -85,6 +85,12 @@ npm run typecheck
 npm run build
 ```
 
+Probe personal-task confinement (macOS; `--live` spends a little provider allowance):
+
+```bash
+npx tsx scripts/probe-confinement.ts --runtime claude --live
+```
+
 Validate the package contents:
 
 ```bash

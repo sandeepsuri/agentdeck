@@ -64,6 +64,14 @@ Publication is a separate, explicit, admin-only action taken after a Run produce
 
 A Run's static-HTML preview is served through a separate, ephemeral, loopback-only preview listener minted per request; it is never exposed to a remote or collaborator connection.
 
+### Personal-task confinement
+
+Agent-driven access to the owner's personal files and accounts is gated by `src/confinement/decision.ts`. The gate allows it only when a recorded live probe has proven Seatbelt confinement for that runtime on this macOS major version. Otherwise personal work falls back to deterministic, owner-approved steps that AgentDeck performs itself.
+
+A confined CLI runs under `sandbox-exec` with a generated deny-by-default profile, which every child process inherits. It gets a private HOME and work directory, and an environment carrying no host secret. Its only network path is a loopback proxy that allows provider domains, plus a loopback capability broker that is its only tool.
+
+Developer Sessions and Runs never go through this path. See [decision 0003](decisions/0003-personal-task-confinement.md).
+
 ### Coordination and hooks
 
 Claude Code hooks and Codex notifications are normalized into shared session and coordination events. Repository-local JSONL files provide claims, progress, blockers, dependencies, and queued Claude messages. See [Coordination](coordination.md) for the event workflow.

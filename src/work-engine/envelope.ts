@@ -150,7 +150,10 @@ export function assertWritablePath(profile: EnvelopeProfile, targetPath: string)
   }
 }
 
-export function assertReadablePath(profile: EnvelopeProfile, targetPath: string): void {
+export function assertReadablePath(
+  profile: Pick<EnvelopeProfile, 'writableWorktree' | 'readableRoots'>,
+  targetPath: string,
+): void {
   const roots = [profile.writableWorktree, ...profile.readableRoots];
   if (!roots.some((root) => isWithinRoot(root, targetPath))) {
     throw new CapabilityEnvelopeViolation(`Read denied outside granted roots: ${targetPath}`);
@@ -161,7 +164,10 @@ function normalizeDomain(domain: string): string {
   return domain.trim().toLowerCase().replace(/\.$/, '');
 }
 
-export function assertNetworkDomainAllowed(profile: EnvelopeProfile, domain: string): void {
+export function assertNetworkDomainAllowed(
+  profile: Pick<EnvelopeProfile, 'allowedNetworkDomains'>,
+  domain: string,
+): void {
   const normalized = normalizeDomain(domain);
   const allowed = profile.allowedNetworkDomains.some((allowedDomain) => {
     const normalizedAllowed = normalizeDomain(allowedDomain);
