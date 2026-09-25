@@ -29,6 +29,7 @@
     "test": "NODE_ENV=test vitest run",
     "typecheck": "tsc --noEmit",
     "snapshot:codex-protocol": "node scripts/snapshot-codex-protocol.mjs",
+    "probe:providers": "tsx scripts/probe-provider-cli.ts",
     "test:notch": "xcrun swift test --package-path native/AgentDeckNotch --scratch-path .native-build",
     "postinstall": "node scripts/postinstall.mjs"
   },
