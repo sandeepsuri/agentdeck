@@ -6,15 +6,32 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const repoRoot = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'));
 
 export function spikeDir(): string {
   const dir = path.resolve(process.env.AGENTDECK_EMAIL_SPIKE_DIR ?? path.join(os.homedir(), '.agentdeck', 'spikes', 'email'));
-  if (dir === repoRoot || dir.startsWith(`${repoRoot}${path.sep}`)) {
-    throw new Error(`Refusing to keep spike credentials or artifacts inside the repository (${dir}).`);
-  }
+  assertOutsideRepo(dir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+/** Resolves symlinks before checking, so a link into the checkout is refused too. */
+export function assertOutsideRepo(file: string): string {
+  const real = realpathOfNearestAncestor(path.resolve(file));
+  if (real === repoRoot || real.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error(`Refusing to keep spike credentials or artifacts inside the repository (${real}).`);
+  }
+  return file;
+}
+
+/** realpath for a path that may not exist yet: resolve the deepest existing ancestor. */
+function realpathOfNearestAncestor(file: string): string {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    const parent = path.dirname(file);
+    return parent === file ? file : path.join(realpathOfNearestAncestor(parent), path.basename(file));
+  }
 }
 
 export function readPrivateJson<T>(file: string): T | undefined {

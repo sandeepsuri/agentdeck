@@ -12,7 +12,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
-import { spikeDir, readPrivateJson, writePrivateJson } from './local-state.js';
+import fs from 'node:fs';
+import { assertOutsideRepo, spikeDir, readPrivateJson, writePrivateJson } from './local-state.js';
 import { buildMime, contentFromMime, INTENT_HEADER } from './mime.js';
 import type { DraftContent, DraftRef, EmailSpikeAdapter, LookupQuery, MessageSummary, SendEvidence } from './types.js';
 
@@ -22,6 +23,10 @@ export const GMAIL_SCOPES = [
 ];
 
 const API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+/** Client-side limit per request; the protocol's in-flight grace must exceed it. */
+const REQUEST_TIMEOUT_MS = 20_000;
+/** How long `gmail-auth` waits for the owner to finish consent. */
+const CONSENT_TIMEOUT_MS = 5 * 60_000;
 
 interface OAuthClient { client_id: string; client_secret: string }
 interface StoredToken { refresh_token: string; scope: string; obtained_at: string }
@@ -42,6 +47,7 @@ function tokenFile(): string {
 
 function loadClient(): OAuthClient {
   const file = clientFile();
+  if (fs.existsSync(file)) assertOutsideRepo(file);
   const json = readPrivateJson<{ installed?: OAuthClient }>(file);
   if (!json?.installed?.client_id) {
     throw new Error(`No Desktop OAuth client at ${file}. Download it from Google Cloud Console → APIs & Services → Credentials.`);
@@ -58,6 +64,7 @@ export async function authorizeGmail(): Promise<{ scope: string; elapsedMs: numb
   const state = randomBytes(16).toString('hex');
 
   const { code, redirectUri } = await new Promise<{ code: string; redirectUri: string }>((resolve, reject) => {
+    const timer = setTimeout(() => { server.close(); reject(new Error('Consent was not completed within 5 minutes.')); }, CONSENT_TIMEOUT_MS);
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       if (url.pathname !== '/') { res.writeHead(404).end(); return; }
@@ -65,6 +72,7 @@ export async function authorizeGmail(): Promise<{ scope: string; elapsedMs: numb
       res.writeHead(ok ? 200 : 400, { 'content-type': 'text/plain' })
         .end(ok ? 'AgentDeck email spike authorized. You can close this tab.' : 'Authorization failed.');
       server.close();
+      clearTimeout(timer);
       if (ok) resolve({ code: url.searchParams.get('code')!, redirectUri });
       else reject(new Error(url.searchParams.get('error') ?? 'state mismatch'));
     });
@@ -85,7 +93,7 @@ export async function authorizeGmail(): Promise<{ scope: string; elapsedMs: numb
         state,
       }).toString();
       console.log(`Open this URL to grant the spike access:\n${url}\n`);
-      execFile('open', [url.toString()], () => {});
+      execFile('open', [url.toString()], () => {}); // macOS; otherwise paste the URL printed above
     });
   });
 
@@ -199,14 +207,15 @@ export class GmailApiAdapter implements EmailSpikeAdapter {
       `/messages?${new URLSearchParams({ q: `rfc822msgid:${stripBrackets(ref.messageIdHeader)}`, includeSpamTrash: 'true' })}`);
     for (const { id } of list.messages ?? []) {
       const m = await this.metadata(id);
-      if (m.labelIds?.includes('SENT')) matches.set(m.id, { id: m.id, via: 'rfc822msgid-search', messageIdHeader: header(m, 'Message-ID') });
+      if (m.labelIds?.includes('SENT') && isRecent(m, sinceMs)) {
+        matches.set(m.id, { id: m.id, via: 'rfc822msgid-search', messageIdHeader: header(m, 'Message-ID') });
+      }
     }
     if (ref.threadId) {
       const thread = await this.call<{ messages?: GmailMessage[] }>('GET',
         `/threads/${ref.threadId}?${new URLSearchParams([['format', 'metadata'], ['metadataHeaders', INTENT_HEADER], ['metadataHeaders', 'Message-ID']])}`);
       for (const m of thread.messages ?? []) {
-        const recent = Number(m.internalDate ?? 0) >= sinceMs - 60_000;
-        if (recent && m.labelIds?.includes('SENT') && header(m, INTENT_HEADER) === ref.intentId && !matches.has(m.id)) {
+        if (isRecent(m, sinceMs) && m.labelIds?.includes('SENT') && header(m, INTENT_HEADER) === ref.intentId && !matches.has(m.id)) {
           matches.set(m.id, { id: m.id, via: 'thread-intent-header', messageIdHeader: header(m, 'Message-ID') });
         }
       }
@@ -238,6 +247,7 @@ export class GmailApiAdapter implements EmailSpikeAdapter {
   private async call<T = unknown>(method: string, route: string, body?: unknown): Promise<T> {
     const res = await fetch(`${API}${route}`, {
       method,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: { authorization: `Bearer ${await this.token()}`, ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -248,6 +258,11 @@ export class GmailApiAdapter implements EmailSpikeAdapter {
 
 function header(message: GmailMessage, name: string): string | undefined {
   return message.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value;
+}
+
+/** Sent at or after the intent was recorded, allowing a minute of clock skew. */
+function isRecent(message: GmailMessage, sinceMs: number): boolean {
+  return Number(message.internalDate ?? 0) >= sinceMs - 60_000;
 }
 
 function stripBrackets(messageId: string): string {

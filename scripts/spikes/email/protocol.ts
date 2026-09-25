@@ -4,8 +4,11 @@
 //   2. A send whose outcome is not directly observed is reconciled against the
 //      provider, never retried blindly.
 //   3. Only provider evidence of absence (`not_sent`) re-opens the intent for
-//      another dispatch. Silence after the settle window is `ambiguous`, which
-//      only the owner may resolve.
+//      another dispatch, and only once the last dispatch can no longer be in
+//      flight: a request that timed out on our side may still commit on the
+//      provider's side, so "the draft still exists" proves nothing until then.
+//   4. Silence after the settle window is `ambiguous`, which only the owner
+//      may resolve. Nothing ever moves an intent out of `sent`.
 //
 // Every path that can reach the provider again goes through `sendOnce`, so a
 // double tap, a retry, and a resume after a crash all converge here.
@@ -18,10 +21,16 @@ export interface ReconcileOptions {
   polls: number;
   /** Delay between checks, to let the provider's sent index catch up. */
   settleMs: number;
+  /**
+   * How long after a dispatch its request may still commit provider-side.
+   * Should exceed the client's request timeout.
+   */
+  inFlightGraceMs: number;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
-const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export function recordIntent(journal: IntentJournal, adapter: EmailSpikeAdapter, draft: DraftRef): IntentRecord {
   const existing = journal.get(draft.intentId);
@@ -43,22 +52,25 @@ export async function sendOnce(
   intentId: string,
   options: ReconcileOptions,
 ): Promise<IntentRecord> {
-  const record = journal.get(intentId);
-  if (!record) throw new Error(`Unknown send intent ${intentId}`);
+  const record = mustGet(journal, intentId);
   if (record.state === 'sent' || record.state === 'ambiguous') return record;
   if (record.state === 'dispatching') return reconcileIntent(journal, adapter, intentId, options);
 
   // Synchronous write before the first await: a concurrent caller now sees
   // `dispatching` and reconciles instead of dispatching a second time.
-  const dispatching = journal.put({ ...record, state: 'dispatching', dispatches: record.dispatches + 1 }, 'dispatch');
+  const now = options.now ?? Date.now;
+  const dispatching = journal.put(
+    { ...record, state: 'dispatching', dispatches: record.dispatches + 1, lastDispatchAtMs: now() },
+    'dispatch',
+  );
   try {
     const { providerMessageId } = await adapter.sendDraft(dispatching.draft);
-    return journal.put({ ...dispatching, state: 'sent', providerMessageId, evidence: 'send-response' }, 'provider confirmed');
+    return transition(journal, intentId, { state: 'sent', providerMessageId, evidence: 'send-response' }, 'provider confirmed');
   } catch (error) {
     // A simulated process death must not get to write anything further: the
     // `dispatching` record is all a real crash would leave behind.
     if (error instanceof CrashAfterCommit) throw error;
-    journal.put({ ...dispatching, lastError: errorText(error) }, 'send outcome unobserved');
+    transition(journal, intentId, { lastError: errorText(error) }, 'send outcome unobserved');
     return reconcileIntent(journal, adapter, intentId, options);
   }
 }
@@ -69,14 +81,14 @@ export async function reconcileIntent(
   intentId: string,
   options: ReconcileOptions,
 ): Promise<IntentRecord> {
-  const sleep = options.sleep ?? defaultSleep;
-  const record = journal.get(intentId);
-  if (!record) throw new Error(`Unknown send intent ${intentId}`);
-  if (record.state === 'sent') return record;
-
+  const wait = options.sleep ?? sleep;
+  const now = options.now ?? Date.now;
   let lastVia = 'no check made';
   for (let poll = 0; poll < options.polls; poll += 1) {
-    if (poll > 0) await sleep(options.settleMs);
+    if (poll > 0) await wait(options.settleMs);
+    // Re-read every poll: a concurrent dispatch may have settled the intent meanwhile.
+    const record = mustGet(journal, intentId);
+    if (record.state === 'sent') return record;
     let evidence;
     try {
       evidence = await adapter.reconcile(record.draft, record.createdAtMs);
@@ -86,25 +98,44 @@ export async function reconcileIntent(
     }
     lastVia = evidence.via;
     if (evidence.state === 'sent') {
-      return journal.put(
-        { ...record, state: 'sent', providerMessageId: evidence.providerMessageId, evidence: evidence.via },
-        `reconciled on poll ${poll + 1}`,
-      );
+      return transition(journal, intentId,
+        { state: 'sent', providerMessageId: evidence.providerMessageId, evidence: evidence.via }, `reconciled on poll ${poll + 1}`);
     }
     if (evidence.state === 'not_sent') {
-      return journal.put({ ...record, state: 'not_sent', evidence: evidence.via }, `absence proven on poll ${poll + 1}`);
+      const inFlight = record.lastDispatchAtMs !== undefined && now() - record.lastDispatchAtMs < options.inFlightGraceMs;
+      if (inFlight) {
+        lastVia = `${evidence.via} (not trusted: dispatch may still be in flight)`;
+        continue;
+      }
+      return transition(journal, intentId, { state: 'not_sent', evidence: evidence.via }, `absence proven on poll ${poll + 1}`);
     }
   }
-  return journal.put({ ...record, state: 'ambiguous', evidence: lastVia }, `unresolved after ${options.polls} polls`);
+  return transition(journal, intentId, { state: 'ambiguous', evidence: lastVia }, `unresolved after ${options.polls} polls`);
 }
 
-/** The owner's explicit decision on an ambiguous intent, recorded before any further effect. */
+/**
+ * The owner's explicit decision on an ambiguous intent, recorded before any
+ * further effect. Kept in the spike only to show ambiguity has an exit; the
+ * real decision flow belongs to #89.
+ */
 export function ownerResolve(journal: IntentJournal, intentId: string, decision: 'mark_sent' | 'allow_resend'): IntentRecord {
-  const record = journal.get(intentId);
-  if (!record || record.state !== 'ambiguous') throw new Error(`Intent ${intentId} is not ambiguous`);
+  if (mustGet(journal, intentId).state !== 'ambiguous') throw new Error(`Intent ${intentId} is not ambiguous`);
   return decision === 'mark_sent'
-    ? journal.put({ ...record, state: 'sent', evidence: 'owner confirmed' }, 'owner marked sent')
-    : journal.put({ ...record, state: 'not_sent', evidence: 'owner allowed resend' }, 'owner allowed resend');
+    ? transition(journal, intentId, { state: 'sent', evidence: 'owner confirmed' }, 'owner marked sent')
+    : transition(journal, intentId, { state: 'not_sent', evidence: 'owner allowed resend' }, 'owner allowed resend');
+}
+
+/** Apply a change to the current record; `sent` is terminal and never overwritten. */
+function transition(journal: IntentJournal, intentId: string, patch: Partial<IntentRecord>, note: string): IntentRecord {
+  const current = mustGet(journal, intentId);
+  if (current.state === 'sent') return current;
+  return journal.put({ ...current, ...patch }, note);
+}
+
+function mustGet(journal: IntentJournal, intentId: string): IntentRecord {
+  const record = journal.get(intentId);
+  if (!record) throw new Error(`Unknown send intent ${intentId}`);
+  return record;
 }
 
 export function errorText(error: unknown): string {

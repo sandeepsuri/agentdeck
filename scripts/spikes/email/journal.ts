@@ -5,6 +5,7 @@
 // for `resume`.
 import fs from 'node:fs';
 import path from 'node:path';
+import { readPrivateJson } from './local-state.js';
 import type { DraftRef, SendEvidence } from './types.js';
 
 export type IntentState =
@@ -23,6 +24,7 @@ export interface IntentRecord {
   state: IntentState;
   createdAtMs: number;
   dispatches: number;
+  lastDispatchAtMs?: number;
   providerMessageId?: string;
   evidence?: SendEvidence['via'];
   lastError?: string;
@@ -56,11 +58,6 @@ export class IntentJournal {
   }
 
   private readAll(): Record<string, IntentRecord> {
-    try {
-      return JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, IntentRecord>;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw error;
-    }
+    return readPrivateJson<Record<string, IntentRecord>>(this.file) ?? {};
   }
 }
