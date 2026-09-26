@@ -112,6 +112,10 @@ _Avoid_: Run, job
 One folder the owner picked in the native picker on this Mac, stored by canonical path. Every read re-checks that the path is inside the folder and follows no symlink. Revoking the grant stops any further reads, including by a task already running.
 _Avoid_: Permission, workspace, Repository
 
+**Filing proposal**:
+A Personal task whose result is a reviewable plan to rename and file granted PDFs: for each source, its content digest, new name, destination folder, and any overwrite, duplicate, or new-folder warning. It is built only from typed requests the confined agent made through the broker, which AgentDeck validated, and it carries a plan digest that changes whenever the plan does. A proposal moves nothing.
+_Avoid_: Filing plan approval, move job
+
 **Publication**:
 An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.
 _Avoid_: Deploy, release, publish (as a bare verb with no durable record)

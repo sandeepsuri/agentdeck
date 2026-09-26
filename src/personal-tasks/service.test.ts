@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Store } from '../store/index.js';
 import { inspectPdf } from './pdf-inventory.js';
 import { PersonalTaskError, PersonalTaskService, type PersonalTaskServiceOptions } from './service.js';
-import { OWNER_WORKSPACE, PERSONAL_TASK_POLICY_VERSION, type PersonalActor } from './types.js';
+import { OWNER_WORKSPACE, PERSONAL_TASK_POLICY_VERSION, type PdfInventoryResult, type PersonalActor } from './types.js';
 
 const PDF = '%PDF-1.4\n1 0 obj\n<< /Type /Pages /Count 2 >>\nendobj\n%%EOF\n';
 const owner: PersonalActor = { principal: { id: 'local:owner', displayName: 'owner' }, device: { id: 'local', label: 'This Mac' } };
@@ -102,7 +102,7 @@ describe('inventory tasks', () => {
     expect(task.activity.map((entry) => entry.kind)).toEqual(['submitted', 'attempt-started', 'file-inspected', 'file-inspected', 'completed']);
     expect(task.activity.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4, 5]);
     expect(task.result).toMatchObject({ attemptId: task.attempts[0]!.id, totalBytes: PDF.length * 2, knownPages: 4, skipped: [] });
-    expect(task.result!.files.map((file) => file.name)).toEqual(['water.pdf', 'power.pdf']);
+    expect((task.result as PdfInventoryResult).files.map((file) => file.name)).toEqual(['water.pdf', 'power.pdf']);
     expect(JSON.stringify(service.list())).not.toContain(base);
   });
 
@@ -170,7 +170,7 @@ describe('inventory tasks', () => {
     await service.whenIdle();
     const task = service.get(id)!;
     expect(task.status).toBe('completed');
-    expect(task.result!.files.map((file) => file.name)).toEqual(['power.pdf']);
+    expect((task.result as PdfInventoryResult).files.map((file) => file.name)).toEqual(['power.pdf']);
     expect(task.result!.skipped).toEqual([{ path: 'water.pdf', reason: expect.stringMatching(/no longer exists/) }]);
     expect(task.activity.find((entry) => entry.kind === 'file-skipped')?.path).toBe('water.pdf');
   });

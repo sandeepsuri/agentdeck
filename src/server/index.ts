@@ -33,6 +33,7 @@ import { ModelNewsService } from '../usage/news.js';
 import { DEFAULT_PRICING } from '../usage/pricing.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
 import { macFolderPicker } from '../personal-tasks/folder-picker.js';
+import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -59,8 +60,14 @@ export async function startServer(): Promise<RunningServer> {
   await workEngine.recover();
   // Issue #80: personal tasks are separate from Runs. An attempt interrupted
   // by the last shutdown is ended without a result and run again under the
-  // same task id; a revoked grant fails it instead of reading.
-  const personalTasks = new PersonalTaskService({ repository: store.personal, protectedRoots: [config.dataDir] });
+  // same task id; a revoked grant fails it instead of reading. Filing
+  // proposals (issue #81) use the confined Claude Code provider only when
+  // this Mac's recorded confinement evidence passes the gate.
+  const personalTasks = new PersonalTaskService({
+    repository: store.personal,
+    protectedRoots: [config.dataDir],
+    filingProvider: confinedClaudeProvider({ dataDir: config.dataDir }),
+  });
   personalTasks.recover();
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does

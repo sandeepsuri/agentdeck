@@ -135,6 +135,46 @@ describe('PersonalTasksView', () => {
     expect(detail.querySelector('.personal-result-summary')?.textContent).toContain('4 pages');
   });
 
+  it('submits a filing proposal for the selected PDFs', async () => {
+    const server: Server = { grants: [], tasks: [], posts: [] };
+    stubServer(server);
+    await render();
+    await click(button('Choose a folder'));
+    await flush();
+    await click(button('Propose filing plan'));
+    await flush();
+    expect(server.posts.at(-1)).toEqual({ url: '/api/personal/tasks', body: { kind: 'pdf-filing-proposal', grantId: 'g1', files: ['march.pdf', 'april.pdf'] } });
+  });
+
+  it('shows every source, new name, destination and warning of a proposal, and that nothing moved', async () => {
+    const proposal = task({
+      kind: 'pdf-filing-proposal',
+      title: 'Propose filing for 2 PDFs in Statements',
+      result: {
+        kind: 'pdf-filing-proposal', attemptId: 'a1', completedAt: '2026-09-25T10:01:01.000Z', planDigest: 'cd'.repeat(32),
+        provider: { runtime: 'claude', cliVersion: '2.1.283 (Claude Code)', confinement: 'macos-seatbelt' },
+        entries: [
+          { source: 'march.pdf', sourceSha256: 'ab'.repeat(32), newName: 'Power 2026-03.pdf', destination: 'Bills', target: 'Bills/Power 2026-03.pdf',
+            warnings: [{ kind: 'overwrite', message: 'A different file already has this name and would be replaced.' }] },
+          { source: 'april.pdf', sourceSha256: 'ef'.repeat(32), newName: 'Water.pdf', destination: '', target: 'Water.pdf', warnings: [] },
+        ],
+        unplanned: [{ path: 'may.pdf', reason: 'No filing was proposed; the file stays where it is.' }],
+        skipped: [],
+      },
+    });
+    stubServer({ grants: [grant], tasks: [proposal], posts: [] });
+    await render();
+    const detail = host.querySelector('[aria-label="Filing proposal"]')!;
+    expect(detail.textContent).toContain('Nothing has been moved.');
+    expect([...detail.querySelectorAll('tbody tr')].map((row) => [...row.children].map((cell) => cell.textContent))).toEqual([
+      ['march.pdf', 'Power 2026-03.pdf', 'Bills', 'A different file already has this name and would be replaced.'],
+      ['april.pdf', 'Water.pdf', 'Top of folder', '—'],
+    ]);
+    expect(detail.querySelector('[aria-label="Left in place"]')?.textContent).toContain('may.pdf');
+    expect(detail.textContent).toContain('cdcdcdcdcdcd');
+    expect(detail.querySelector('.personal-result-summary')?.textContent).toContain('1 with warnings');
+  });
+
   it('revokes a folder grant', async () => {
     const server: Server = { grants: [grant], tasks: [], posts: [] };
     stubServer(server);

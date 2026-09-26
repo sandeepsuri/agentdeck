@@ -1,19 +1,23 @@
 // Issue #80: the owner's personal tasks, apart from coding Runs and
 // Sessions. The owner grants one folder through the native macOS picker
 // (the browser never names a path), chooses PDFs in it, and submits an
-// inventory that AgentDeck performs itself. Activity and results come from
-// the durable server projection, so a reload or restart reopens the same
-// task.
+// inventory that AgentDeck performs itself, or (issue #81) asks a confined
+// agent for a filing proposal that moves nothing. Activity and results come
+// from the durable server projection, so a reload or restart reopens the
+// same task.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { GrantedPdfListing } from '../../personal-tasks/folder-grant.js';
-import type { FolderGrantView, PersonalTaskStatus, PersonalTaskView } from '../../personal-tasks/types.js';
+import {
+  isFilingProposal, type FilingProposalResult, type FolderGrantView, type PdfInventoryResult, type PersonalTaskKind,
+  type PersonalTaskStatus, type PersonalTaskView,
+} from '../../personal-tasks/types.js';
 import { apiFetch } from '../apiFetch.js';
 
 const POLL_MS = 1500;
 
 const STATUS_LABEL: Record<PersonalTaskStatus, string> = {
   queued: 'Queued',
-  running: 'Inspecting',
+  running: 'Working',
   completed: 'Done',
   failed: 'Needs attention',
 };
@@ -46,7 +50,7 @@ function PdfSelection({ grant, onSubmitted, onError }: {
   const [listing, setListing] = useState<GrantedPdfListing | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<PersonalTaskKind | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -68,15 +72,15 @@ function PdfSelection({ grant, onSubmitted, onError }: {
     return next;
   });
 
-  const submit = async () => {
-    setBusy(true);
+  const submit = async (kind: PersonalTaskKind) => {
+    setBusy(kind);
     try {
       const files = listing!.files.map((file) => file.relativePath).filter((file) => selected.has(file));
-      onSubmitted(await post<PersonalTaskView>('/api/personal/tasks', { kind: 'pdf-inventory', grantId: grant.id, files }));
+      onSubmitted(await post<PersonalTaskView>('/api/personal/tasks', { kind, grantId: grant.id, files }));
     } catch (error) {
       onError((error as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -85,7 +89,7 @@ function PdfSelection({ grant, onSubmitted, onError }: {
   if (listing.files.length === 0) return <p className="personal-empty">No PDFs in {grant.name}.</p>;
   const all = listing.files.length === selected.size;
   return (
-    <form className="personal-pdf-picker" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <form className="personal-pdf-picker" onSubmit={(event) => { event.preventDefault(); void submit('pdf-inventory'); }}>
       <fieldset>
         <legend>PDFs in {grant.name}</legend>
         <label className="personal-pdf-all">
@@ -109,10 +113,99 @@ function PdfSelection({ grant, onSubmitted, onError }: {
         </ul>
         {listing.truncated && <p className="personal-note">Only the first {listing.files.length} PDFs are shown.</p>}
       </fieldset>
-      <button className="button button-primary" disabled={busy || selected.size === 0} type="submit">
-        {busy ? 'Submitting…' : `Inspect ${selected.size} PDF${selected.size === 1 ? '' : 's'}`}
-      </button>
+      <div className="personal-pdf-actions">
+        <button className="button button-primary" disabled={busy !== null || selected.size === 0} type="submit">
+          {busy === 'pdf-inventory' ? 'Submitting…' : `Inspect ${selected.size} PDF${selected.size === 1 ? '' : 's'}`}
+        </button>
+        <button className="button" disabled={busy !== null || selected.size === 0} onClick={() => void submit('pdf-filing-proposal')} type="button">
+          {busy === 'pdf-filing-proposal' ? 'Submitting…' : 'Propose filing plan'}
+        </button>
+      </div>
+      <p className="personal-note">A filing plan lets a confined agent read the selected PDFs through AgentDeck and suggest names and folders. Nothing is moved.</p>
     </form>
+  );
+}
+
+function InventoryResult({ result }: { result: PdfInventoryResult }) {
+  return (
+    <section aria-label="Inventory" className="personal-result">
+      <p className="personal-result-summary">
+        {result.files.length} PDF{result.files.length === 1 ? '' : 's'} · {formatBytes(result.totalBytes)}
+        {result.knownPages > 0 ? ` · ${result.knownPages} pages` : ''}
+      </p>
+      <div className="personal-table-scroll">
+        <table>
+          <thead><tr><th scope="col">File</th><th scope="col">Pages</th><th scope="col">Size</th><th scope="col">Version</th><th scope="col">Fingerprint</th></tr></thead>
+          <tbody>
+            {result.files.map((file) => (
+              <tr key={file.path}>
+                <th scope="row" title={file.path}>{file.path}{file.encrypted ? ' 🔒' : ''}</th>
+                <td>{file.pageCount ?? 'Unknown'}</td>
+                <td>{formatBytes(file.size)}</td>
+                <td>{file.pdfVersion ?? '—'}</td>
+                <td><code title={file.sha256}>{file.sha256.slice(0, 12)}</code></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {result.skipped.length > 0 && (
+        <ul className="personal-skipped" aria-label="Skipped files">
+          {result.skipped.map((entry) => <li key={entry.path}><strong>{entry.path}</strong>: {entry.reason}</li>)}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Rendered only from the typed plan entries and digests; the agent's own words never appear here. */
+function FilingProposal({ result }: { result: FilingProposalResult }) {
+  const warned = result.entries.filter((entry) => entry.warnings.some((warning) => warning.kind !== 'new-folder')).length;
+  return (
+    <section aria-label="Filing proposal" className="personal-result">
+      <p className="personal-result-summary">
+        {result.entries.length} PDF{result.entries.length === 1 ? '' : 's'} to file
+        {warned > 0 ? ` · ${warned} with warnings` : ''}
+        {result.unplanned.length > 0 ? ` · ${result.unplanned.length} left in place` : ''}
+        {' · '}<strong>Nothing has been moved.</strong>
+      </p>
+      <div className="personal-table-scroll">
+        <table>
+          <thead><tr><th scope="col">Now</th><th scope="col">New name</th><th scope="col">Folder</th><th scope="col">Warnings</th></tr></thead>
+          <tbody>
+            {result.entries.map((entry) => (
+              <tr key={entry.source}>
+                <th scope="row" title={`${entry.source} · ${entry.sourceSha256}`}>{entry.source}</th>
+                <td>{entry.newName}</td>
+                <td>{entry.destination || 'Top of folder'}</td>
+                <td className="personal-warnings">
+                  {entry.warnings.length === 0 ? '—' : (
+                    <ul>
+                      {entry.warnings.map((warning) => (
+                        <li className={`is-${warning.kind}`} key={warning.kind}>{warning.message}</li>
+                      ))}
+                    </ul>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {result.unplanned.length > 0 && (
+        <ul className="personal-skipped" aria-label="Left in place">
+          {result.unplanned.map((entry) => <li key={entry.path}><strong>{entry.path}</strong>: {entry.reason}</li>)}
+        </ul>
+      )}
+      {result.skipped.length > 0 && (
+        <ul className="personal-skipped" aria-label="Skipped files">
+          {result.skipped.map((entry) => <li key={entry.path}><strong>{entry.path}</strong>: {entry.reason}</li>)}
+        </ul>
+      )}
+      <p className="personal-note">
+        Proposed by confined Claude Code {result.provider.cliVersion.split(' ')[0]}. Plan fingerprint <code title={result.planDigest}>{result.planDigest.slice(0, 12)}</code>
+      </p>
+    </section>
   );
 }
 
@@ -138,35 +231,9 @@ function TaskDetail({ task, onRetry }: { task: PersonalTaskView; onRetry: () => 
         </div>
       )}
 
-      {task.result && (
-        <section aria-label="Inventory" className="personal-result">
-          <p className="personal-result-summary">
-            {task.result.files.length} PDF{task.result.files.length === 1 ? '' : 's'} · {formatBytes(task.result.totalBytes)}
-            {task.result.knownPages > 0 ? ` · ${task.result.knownPages} pages` : ''}
-          </p>
-          <div className="personal-table-scroll">
-            <table>
-              <thead><tr><th scope="col">File</th><th scope="col">Pages</th><th scope="col">Size</th><th scope="col">Version</th><th scope="col">Fingerprint</th></tr></thead>
-              <tbody>
-                {task.result.files.map((file) => (
-                  <tr key={file.path}>
-                    <th scope="row" title={file.path}>{file.path}{file.encrypted ? ' 🔒' : ''}</th>
-                    <td>{file.pageCount ?? 'Unknown'}</td>
-                    <td>{formatBytes(file.size)}</td>
-                    <td>{file.pdfVersion ?? '—'}</td>
-                    <td><code title={file.sha256}>{file.sha256.slice(0, 12)}</code></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {task.result.skipped.length > 0 && (
-            <ul className="personal-skipped" aria-label="Skipped files">
-              {task.result.skipped.map((entry) => <li key={entry.path}><strong>{entry.path}</strong>: {entry.reason}</li>)}
-            </ul>
-          )}
-        </section>
-      )}
+      {task.result && (isFilingProposal(task.result)
+        ? <FilingProposal result={task.result} />
+        : <InventoryResult result={task.result} />)}
 
       <section aria-label="Activity">
         <h4>Activity</h4>
@@ -253,7 +320,7 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
       <div className="view-heading">
         <div className="view-heading-copy">
           <h1>Personal tasks</h1>
-          <span>AgentDeck reads only the folder you choose. No agent sees these files.</span>
+          <span>AgentDeck reads only the folder you choose. An agent sees these files only for a filing plan you ask for, and never moves them.</span>
         </div>
       </div>
 

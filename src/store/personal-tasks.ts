@@ -5,8 +5,8 @@
 // attempt behind it.
 import type { Database } from 'better-sqlite3';
 import type {
-  FolderGrant, PdfInventoryResult, PersonalActivityKind, PersonalActor, PersonalAttemptOutcome, PersonalTask,
-  PersonalTaskActivity, PersonalTaskAttempt, PersonalTaskKind, PersonalTaskStatus,
+  FolderGrant, PersonalActivityKind, PersonalActor, PersonalAttemptOutcome, PersonalTask,
+  PersonalTaskActivity, PersonalTaskAttempt, PersonalTaskKind, PersonalTaskResult, PersonalTaskStatus,
 } from '../personal-tasks/types.js';
 
 interface GrantRow { id: string; root_path: string; created_at: string; created_by: string; revoked_at: string | null }
@@ -42,7 +42,7 @@ function rowToTask(r: TaskRow): PersonalTask {
     status: r.status as PersonalTaskStatus,
     updatedAt: r.updated_at,
     ...(r.failure !== null ? { failure: r.failure } : {}),
-    ...(r.result !== null ? { result: JSON.parse(r.result) as PdfInventoryResult } : {}),
+    ...(r.result !== null ? { result: JSON.parse(r.result) as PersonalTaskResult } : {}),
   };
 }
 
@@ -153,17 +153,19 @@ export class PersonalTaskRepository {
   /**
    * Ends an attempt and settles the task in one transaction. A result is
    * written only for a completed attempt; an interrupted attempt returns the
-   * task to 'queued' so recovery re-runs it rather than claiming an outcome.
+   * task to 'queued' so recovery re-runs it rather than claiming an outcome,
+   * unless `requeue: false` asks for it to wait for the owner as failed.
    */
   finishAttempt(
     taskId: string,
     attemptId: string,
     at: string,
     outcome: PersonalAttemptOutcome,
-    settle: { failure?: string; result?: PdfInventoryResult },
+    settle: { failure?: string; result?: PersonalTaskResult; requeue?: boolean },
     activity: NewPersonalActivity,
   ): void {
-    const status: PersonalTaskStatus = outcome === 'completed' ? 'completed' : outcome === 'failed' ? 'failed' : 'queued';
+    const requeue = outcome === 'interrupted' && settle.requeue !== false;
+    const status: PersonalTaskStatus = outcome === 'completed' ? 'completed' : requeue ? 'queued' : 'failed';
     this.db.transaction(() => {
       this.db.prepare('UPDATE personal_task_attempts SET ended_at = ?, outcome = ? WHERE id = ? AND task_id = ? AND ended_at IS NULL')
         .run(at, outcome, attemptId, taskId);

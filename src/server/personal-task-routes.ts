@@ -1,4 +1,5 @@
-// Issue #80: owner-only routes for folder grants and personal tasks. None of
+// Issue #80: owner-only routes for folder grants and personal tasks
+// (inventories, and filing proposals from issue #81). None of
 // these paths is on app.ts's remote or collaborator allowlists, so a remote
 // request is refused before it reaches here; resolveOwner repeats the check
 // so the routes stay owner-only even if an allowlist later widens.
@@ -100,11 +101,14 @@ export function registerPersonalTaskRoutes(app: FastifyInstance, deps: PersonalT
     const actor = owner(request, reply);
     if (!actor) return reply;
     const body = (request.body ?? {}) as { kind?: unknown; grantId?: unknown; files?: unknown };
-    if (body.kind !== 'pdf-inventory') return reply.code(400).send({ error: 'kind must be pdf-inventory', code: 'invalid-input' });
+    if (body.kind !== 'pdf-inventory' && body.kind !== 'pdf-filing-proposal') {
+      return reply.code(400).send({ error: 'kind must be pdf-inventory or pdf-filing-proposal', code: 'invalid-input' });
+    }
     if (typeof body.grantId !== 'string' || !body.grantId) return reply.code(400).send({ error: 'grantId is required', code: 'invalid-input' });
     if (!Array.isArray(body.files)) return reply.code(400).send({ error: 'files must be a list of PDFs', code: 'invalid-input' });
     try {
-      return reply.code(201).send(service.submitInventory({ grantId: body.grantId, files: body.files as string[] }, actor));
+      const input = { grantId: body.grantId, files: body.files as string[] };
+      return reply.code(201).send(body.kind === 'pdf-inventory' ? service.submitInventory(input, actor) : service.submitFilingProposal(input, actor));
     } catch (error) {
       return sendError(error, reply);
     }

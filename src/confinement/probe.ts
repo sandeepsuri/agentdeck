@@ -533,7 +533,7 @@ export async function cliVersion(executable: string): Promise<string> {
   return result.stdout.trim().split('\n')[0] || 'unknown';
 }
 
-async function macosVersion(): Promise<string> {
+export async function macosVersion(): Promise<string> {
   const result = await run('/usr/bin/sw_vers', ['-productVersion'], { PATH: '/usr/bin:/bin' }, '/', 5_000);
   return result.stdout.trim() || 'unknown';
 }

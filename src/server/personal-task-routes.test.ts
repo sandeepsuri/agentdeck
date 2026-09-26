@@ -181,6 +181,38 @@ describe('owner flow on this Mac', () => {
   });
 });
 
+describe('filing proposals (issue #81)', () => {
+  it('accepts a proposal and explains that agent access is off when no confined provider is available', async () => {
+    const grant = await pickGrant();
+    const created = await app.inject({
+      method: 'POST', url: '/api/personal/tasks', headers: LOCAL, payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: ['january.pdf'] },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ kind: 'pdf-filing-proposal', title: 'Propose filing for 1 PDF in Statements' });
+    await service.whenIdle();
+    const task = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${(created.json() as PersonalTaskView).id}`, headers: LOCAL })).json() as PersonalTaskView;
+    expect(task).toMatchObject({ status: 'failed', failure: expect.stringMatching(/^Agent assistance is off/) });
+    expect(task.result).toBeUndefined();
+
+    await shutdown();
+    boot();
+    const reopened = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${task.id}`, headers: LOCAL })).json() as PersonalTaskView;
+    expect(reopened).toEqual(task);
+  });
+
+  it('applies the same path checks to a proposal as to an inventory', async () => {
+    const grant = await pickGrant();
+    fs.symlinkSync(path.join(home, 'Private', 'secret.pdf'), path.join(folder, 'shortcut.pdf'));
+    for (const [file, code] of [['../../Private/secret.pdf', 'outside-grant'], ['shortcut.pdf', 'symlink'], ['readme.txt', 'unsupported-type']]) {
+      const response = await app.inject({
+        method: 'POST', url: '/api/personal/tasks', headers: LOCAL, payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: [file] },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code });
+    }
+  });
+});
+
 describe('everyone else', () => {
   it('a collaborator device can neither read nor submit owner personal work', async () => {
     const grant = await pickGrant();
@@ -194,6 +226,7 @@ describe('everyone else', () => {
       { method: 'GET' as const, url: '/api/personal/grants' },
       { method: 'GET' as const, url: `/api/personal/grants/${grant.id}/pdfs` },
       { method: 'POST' as const, url: '/api/personal/tasks', payload: { kind: 'pdf-inventory', grantId: grant.id, files: ['january.pdf'] } },
+      { method: 'POST' as const, url: '/api/personal/tasks', payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: ['january.pdf'] } },
       { method: 'POST' as const, url: '/api/personal/grants/pick' },
       { method: 'POST' as const, url: `/api/personal/grants/${grant.id}/revoke` },
     ];

@@ -46,32 +46,50 @@ export interface InspectLimits {
   maxBytes?: number;
 }
 
-export function inspectPdf(root: string, requestedPath: string, limits: InspectLimits = {}): PdfInventoryEntry {
+export interface GrantedPdfContent {
+  readonly relativePath: string;
+  readonly modifiedAt: string;
+  readonly bytes: Buffer;
+  readonly sha256: string;
+}
+
+/** Reads one granted PDF in full, within the size limit, through the grant's canonical-path checks. */
+export function readGrantedPdf(root: string, requestedPath: string, limits: InspectLimits = {}): GrantedPdfContent {
   const maxBytes = limits.maxBytes ?? DEFAULT_MAX_PDF_BYTES;
   const handle = openGrantedPdf(root, requestedPath);
   try {
     if (handle.stat.size > maxBytes) throw new PdfTooLargeError(maxBytes);
-    const bytes = Buffer.alloc(handle.stat.size);
+    const buffer = Buffer.alloc(handle.stat.size);
     let offset = 0;
-    while (offset < bytes.length) {
-      const read = fs.readSync(handle.fd, bytes, offset, bytes.length - offset, offset);
+    while (offset < buffer.length) {
+      const read = fs.readSync(handle.fd, buffer, offset, buffer.length - offset, offset);
       if (read === 0) break;
       offset += read;
     }
-    const content = bytes.subarray(0, offset);
-    const facts = readPdfFacts(content);
-    const entry: PdfInventoryEntry = {
-      path: handle.relativePath,
-      name: path.basename(handle.relativePath),
-      size: content.length,
+    const bytes = buffer.subarray(0, offset);
+    return {
+      relativePath: handle.relativePath,
       modifiedAt: handle.stat.mtime.toISOString(),
-      sha256: createHash('sha256').update(content).digest('hex'),
-      encrypted: facts.encrypted,
+      bytes,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
     };
-    if (facts.pdfVersion !== undefined) entry.pdfVersion = facts.pdfVersion;
-    if (facts.pageCount !== undefined) entry.pageCount = facts.pageCount;
-    return entry;
   } finally {
     fs.closeSync(handle.fd);
   }
+}
+
+export function inspectPdf(root: string, requestedPath: string, limits: InspectLimits = {}): PdfInventoryEntry {
+  const content = readGrantedPdf(root, requestedPath, limits);
+  const facts = readPdfFacts(content.bytes);
+  const entry: PdfInventoryEntry = {
+    path: content.relativePath,
+    name: path.basename(content.relativePath),
+    size: content.bytes.length,
+    modifiedAt: content.modifiedAt,
+    sha256: content.sha256,
+    encrypted: facts.encrypted,
+  };
+  if (facts.pdfVersion !== undefined) entry.pdfVersion = facts.pdfVersion;
+  if (facts.pageCount !== undefined) entry.pageCount = facts.pageCount;
+  return entry;
 }

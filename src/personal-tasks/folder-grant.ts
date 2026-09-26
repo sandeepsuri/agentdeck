@@ -72,7 +72,8 @@ export function canonicalGrantRoot(selectedPath: string, options: GrantRootOptio
   return canonical;
 }
 
-function assertGrantRoot(root: string): void {
+/** Throws unless the grant root still resolves to itself and is a folder. */
+export function assertGrantRoot(root: string): void {
   if (realpathOrUndefined(root) !== root || !fs.statSync(root).isDirectory()) {
     throw new GrantPathError('grant-unavailable', 'The granted folder was moved, replaced, or removed.');
   }
@@ -201,4 +202,35 @@ export function listGrantedPdfs(root: string, limits: ListingLimits = {}): Grant
   walk(root, 1);
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   return { files, truncated };
+}
+
+/** A bounded list of existing sub-folders, for choosing filing destinations. Hidden entries and symlinks are skipped. */
+export function listGrantFolders(root: string, limits: ListingLimits = {}): { folders: string[]; truncated: boolean } {
+  const maxFolders = limits.maxFiles ?? 200;
+  const maxDepth = limits.maxDepth ?? 3;
+  assertGrantRoot(root);
+  const folders: string[] = [];
+  let truncated = false;
+  const walk = (dir: string, depth: number) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (truncated) return;
+      if (entry.name.startsWith('.') || !entry.isDirectory()) continue;
+      if (folders.length >= maxFolders) {
+        truncated = true;
+        return;
+      }
+      const full = path.join(dir, entry.name);
+      folders.push(path.relative(root, full));
+      if (depth < maxDepth) walk(full, depth + 1);
+    }
+  };
+  walk(root, 1);
+  return { folders, truncated };
 }
