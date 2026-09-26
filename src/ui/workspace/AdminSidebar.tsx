@@ -1,7 +1,8 @@
-// Redesign spec §03: four primary destinations, repositories as contextual
-// filters rather than a navigation tree, and Settings at the foot. The Home
-// badge mirrors the global Needs You queue (needsYou.ts); nothing else in the
-// sidebar competes with it.
+// Redesign spec §03, extended by Everyday 04 (#79): the everyday Home leads;
+// Overview, Work, Review and Usage sit together under "Developer tools".
+// Repositories stay contextual filters rather than a navigation tree, and
+// Settings sits at the foot. The Home badge mirrors the global Needs You queue
+// (needsYou.ts); nothing else in the sidebar competes with it.
 import type { Repo } from '../../types.js';
 import { type WorkspaceView, WORKSPACE_VIEWS } from './model.js';
 
@@ -24,7 +25,12 @@ interface Props {
   onSettings: () => void;
 }
 
-const GLYPHS: Record<WorkspaceView, string> = { home: '⌂', work: '◉', review: '±', usage: '◔' };
+const GLYPHS: Record<WorkspaceView, string> = { home: '⌂', overview: '▦', work: '◉', review: '±', usage: '◔' };
+
+const GROUPS = [
+  { id: 'everyday', label: null },
+  { id: 'developer', label: 'Developer tools' },
+] as const;
 
 export function AdminSidebar({
   activeView, settingsActive = false, needsYouCount, reviewCount, repos, repositoryActivity, activeRepositoryId,
@@ -41,19 +47,22 @@ export function AdminSidebar({
         <span aria-hidden="true">＋</span><strong>Start work</strong>
       </button>
       <nav aria-label="Admin navigation" className="admin-navigation">
-        <div className="admin-nav-group">
-          {WORKSPACE_VIEWS.map(({ id, label }) => {
-            const active = !settingsActive && activeView === id;
-            const badge = badges[id];
-            return (
-              <button aria-current={active ? 'page' : undefined} className={active ? 'is-active' : ''} key={id} onClick={() => onView(id)} title={label} type="button">
-                <span aria-hidden="true" className="admin-nav-glyph">{GLYPHS[id]}</span>
-                <span>{label}</span>
-                {badge && badge.count > 0 && <small aria-label={badge.label} className={id === 'home' ? 'is-attention' : ''}>{badge.count}</small>}
-              </button>
-            );
-          })}
-        </div>
+        {GROUPS.map((group) => (
+          <div role={group.label ? 'group' : undefined} aria-label={group.label ?? undefined} className="admin-nav-group" key={group.id}>
+            {group.label && <div aria-hidden="true" className="admin-nav-label">{group.label}</div>}
+            {WORKSPACE_VIEWS.filter((view) => view.group === group.id).map(({ id, label }) => {
+              const active = !settingsActive && activeView === id;
+              const badge = badges[id];
+              return (
+                <button aria-current={active ? 'page' : undefined} className={active ? 'is-active' : ''} key={id} onClick={() => onView(id)} title={label} type="button">
+                  <span aria-hidden="true" className="admin-nav-glyph">{GLYPHS[id]}</span>
+                  <span>{label}</span>
+                  {badge && badge.count > 0 && <small aria-label={badge.label} className={id === 'home' ? 'is-attention' : ''}>{badge.count}</small>}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       {repos.length > 0 && (

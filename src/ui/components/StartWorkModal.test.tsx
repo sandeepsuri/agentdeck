@@ -95,6 +95,12 @@ describe('StartWorkModal', () => {
     expect(host.textContent).not.toContain('Acceptance criteria');
   });
 
+  it('starts from the text typed into Home’s Ask, still editable and still unsent', async () => {
+    const { calls } = await mount(readiness('managed'), { initialTask: 'Add a dark mode toggle' });
+    expect((field('What do you want done?') as HTMLTextAreaElement).value).toBe('Add a dark mode toggle');
+    expect(calls.some((call) => call.url === '/api/sessions' || call.url === '/api/runs')).toBe(false);
+  });
+
   it('Quick mode launches an ad hoc session without criteria or budgets', async () => {
     const { calls, onLaunched } = await mount(readiness('managed'), { initialRepositoryId: '/repos/web' });
     await type(field('What do you want done?') as HTMLTextAreaElement, 'Fix the flaky auth test\nIt fails on CI');

@@ -44,9 +44,15 @@ Terminal.app and iTerm2 sessions can be focused through macOS Automation. VS Cod
 
 ### Views
 
-The sidebar has four destinations, plus contextual repository shortcuts and Settings:
+The sidebar leads with **Home**. The developer destinations (**Overview**, **Work**, **Review**, and **Usage**) sit under **Developer tools**. Repository shortcuts and Settings are below them.
 
-- **Home** answers "what needs me?" first. **Needs you** is one queue of everything waiting on a human — agent permissions and questions, blocking conflicts, recent failures, crossed usage limits, and work ready for review — sorted by urgency, then age. Pending Run approvals and questions can be answered inline. Below it: active work at a glance, a compact usage glance, repositories, and recently finished work. The Home badge in the sidebar mirrors the queue.
+- **Home** is the everyday entry point, with three sections:
+  - **Ask** opens Start work with the text you type. Nothing starts until you confirm there.
+  - **Needs you** is one queue of everything waiting on a human: agent permissions and questions, blocking conflicts, recent failures, crossed usage limits, and work ready for review. It is sorted by urgency, then age, and pending Run approvals and questions can be answered inline.
+  - **Tasks** lists your current Runs and Sessions.
+
+  Each section says whether it is still loading, can't be reached, or is actually empty. The Home badge in the sidebar mirrors the Needs you queue.
+- **Overview** is the developer dashboard that Home used to be. It shows active work at a glance, a compact usage glance, repositories, and recently finished work. `?view=overview` opens it directly.
 - **Work** lists every Run and Session together, filtered by status (All, Needs you, Working, Review, Completed, Archived), repository, agent, or search, in a **List** or **Grid** layout (remembered locally). Opening a Session shows its **Chat**, **Activity** timeline (observable actions such as reading, editing, testing, waiting and asking), and **Terminal**; opening a Run shows its detail page. Process details such as PID, TTY and origin sit under **Advanced details**. Ended Sessions older than about an hour appear under **Archived**.
 - **Review** gathers work ready for review and uncommitted repository changes. A Run's review shows acceptance criteria, verification checks, files changed, and an estimated risk, with **Summary**, **Changes**, **Tests**, and **Activity** tabs, plus **Request changes**, **Approve**, and a **Ship** menu. Every ship action (apply, push, draft pull request) asks for confirmation — nothing is pushed or published without an explicit final step.
 - **Usage** shows spend, tokens, plan limits and per-agent usage.

@@ -25,7 +25,8 @@ import { useRateLimits, useRunReviewStates } from './useAttentionSources.js';
 import { deriveWorkItems, type WorkFilters, type WorkItem } from './workItems.js';
 import { AdminSidebar, type RepositoryActivity } from './workspace/AdminSidebar.js';
 import { CommandPalette } from './workspace/CommandPalette.js';
-import { HomeView } from './workspace/HomeView.js';
+import { DeveloperOverview } from './workspace/DeveloperOverview.js';
+import { combineSourceStates, HomeView, type HomeSourceState } from './workspace/HomeView.js';
 import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
@@ -91,7 +92,14 @@ export function App() {
   const [workFilters, setWorkFilters] = useState<WorkFilters>({ status: 'all' });
   const [workLayout, setWorkLayout] = useState<WorkLayout>(() => readWorkLayout(inspectorPreferenceStorage()));
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
-  const [showStartWork, setShowStartWork] = useState(false);
+  /** The task Start work opens with; null while it is closed. Home's Ask seeds it (#79). */
+  const [startWorkTask, setStartWorkTask] = useState<string | null>(null);
+  const openStartWork = useCallback((task = '') => setStartWorkTask(task), []);
+  // #79: Home says "still loading" or "unreachable" rather than an empty
+  // queue, so it needs to know whether each source has actually answered.
+  const [sessionsState, setSessionsState] = useState<HomeSourceState>('loading');
+  const [runsState, setRunsState] = useState<HomeSourceState>('loading');
+  const [reposState, setReposState] = useState<HomeSourceState>('loading');
   const [advancedLaunch, setAdvancedLaunch] = useState<StartWorkDraft | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsVisited, setSettingsVisited] = useState(false);
@@ -195,6 +203,7 @@ export function App() {
     .then((response) => responseJsonArray<Session>(response)).then((all) => {
       const body = adminSessions(all);
       setSessions(body);
+      setSessionsState('ready');
       setError(null);
       const requested = requestedSessionIdRef.current;
       if (requested) {
@@ -209,11 +218,12 @@ export function App() {
         return;
       }
       setSelectedId((current) => current && body.some((session) => session.id === current) ? current : null);
-    }).catch(() => setError('AgentDeck API is unreachable.')), []);
-  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => setRepos(adminRepos(all))).catch(() => undefined), []);
+    }).catch(() => { setSessionsState('error'); setError('AgentDeck API is unreachable.'); }), []);
+  const refreshRepos = useCallback(() => apiFetch('/api/repos').then((response) => responseJsonArray<Repo>(response)).then((all) => { setRepos(adminRepos(all)); setReposState('ready'); }).catch(() => setReposState('error')), []);
   const refreshRuns = useCallback(() => apiFetch('/api/runs').then((response) => responseJsonArray<WorkRun>(response)).then((all) => {
     const body = adminRuns(all);
     setRuns(body);
+    setRunsState('ready');
     // Ticket 07: the native companion's openRun deep-link (?run=<id>) — same
     // one-shot "consume once loaded, then clear the URL" shape as the
     // session deep-link above.
@@ -225,7 +235,7 @@ export function App() {
       setSelectedRunId(requestedRunId);
       setView('work');
     }
-  }).catch(() => undefined), []);
+  }).catch(() => setRunsState('error')), []);
   const refreshRunAttention = useCallback(() => apiFetch('/api/runs/attention').then((response) => responseJsonArray<RunAttentionItem>(response)).then(setRunAttention).catch(() => undefined), []);
   const refreshCollaboratorRuns = useCallback(() => listCollaboratorRuns().then((next) => {
     setCollaboratorRuns(next);
@@ -366,7 +376,7 @@ export function App() {
       const target = event.target as HTMLElement | null;
       const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setPaletteOpen(true); }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); setShowStartWork(true); }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') { event.preventDefault(); openStartWork(); }
       if (!typing && /^[1-9]$/.test(event.key)) {
         const session = sessions[Number(event.key) - 1];
         if (session) {
@@ -791,7 +801,7 @@ export function App() {
           needsYouCount={needsYou.length}
           onSelectRepository={selectRepository}
           onSettings={() => setShowSettings(true)}
-          onStartWork={() => setShowStartWork(true)}
+          onStartWork={() => openStartWork()}
           onView={navigateToView}
           repos={repos}
           repositoryActivity={repositoryActivity}
@@ -814,18 +824,29 @@ export function App() {
         <main className="workspace-stage">
           <div className={layerClass('home')}>
             <HomeView
-              active={!showSettings && view === 'home'}
               needsYou={needsYou}
+              onAsk={openStartWork}
               onOpenNeedsYou={openNeedsYou}
-              onOpenUsage={() => navigateToView('usage')}
+              onOpenSettings={() => setShowSettings(true)}
+              onOpenWork={() => navigateToView('work')}
               onOpenWorkItem={openWorkItem}
               onResolveRunAttention={resolveRunAttention}
+              repositoryCount={repos.length}
+              runs={runs}
+              sources={{ work: combineSourceStates(runsState, sessionsState), repositories: reposState }}
+              workItems={workItems}
+            />
+          </div>
+          <div className={layerClass('overview')}>
+            <DeveloperOverview
+              active={!showSettings && view === 'overview'}
+              onOpenUsage={() => navigateToView('usage')}
+              onOpenWorkItem={openWorkItem}
               onSelectRepository={selectRepository}
-              onStartWork={() => setShowStartWork(true)}
+              onStartWork={() => openStartWork()}
               rateLimits={rateLimits}
               repos={repos}
               repositoryActivity={repositoryActivity}
-              runs={runs}
               workItems={workItems}
             />
           </div>
@@ -839,7 +860,7 @@ export function App() {
                 onFiltersChange={setWorkFilters}
                 onLayoutChange={setWorkLayout}
                 onOpen={openWorkItem}
-                onStartWork={() => setShowStartWork(true)}
+                onStartWork={() => openStartWork()}
                 repos={repos}
               />
             </div>
@@ -904,7 +925,7 @@ export function App() {
 
       <CommandPalette
         onClose={() => setPaletteOpen(false)}
-        onLaunch={() => setShowStartWork(true)}
+        onLaunch={() => openStartWork()}
         onSelectRepo={(repo) => selectRepository(repo.id)}
         onSelectRun={selectRun}
         onSelectSession={openSession}
@@ -914,14 +935,15 @@ export function App() {
         runs={runs}
         sessions={sessions}
       />
-      {showStartWork && (
+      {startWorkTask !== null && (
         <StartWorkModal
           initialRepositoryId={activeRepositoryId}
-          onAdvanced={(draft) => { setShowStartWork(false); setAdvancedLaunch(draft); }}
-          onClose={() => setShowStartWork(false)}
+          initialTask={startWorkTask}
+          onAdvanced={(draft) => { setStartWorkTask(null); setAdvancedLaunch(draft); }}
+          onClose={() => setStartWorkTask(null)}
           onError={setError}
-          onLaunched={(session) => { setShowStartWork(false); upsertSession(session); openSession(session); refreshRepos(); }}
-          onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setShowStartWork(false); }}
+          onLaunched={(session) => { setStartWorkTask(null); upsertSession(session); openSession(session); refreshRepos(); }}
+          onSubmitted={(run) => { setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]); selectRun(run); setStartWorkTask(null); }}
           repos={repos}
         />
       )}

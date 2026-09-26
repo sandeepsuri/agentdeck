@@ -26,16 +26,22 @@ describe('parseInitialNavigation', () => {
     for (const legacy of ['tasks', 'grid', 'history', 'signals']) {
       expect(parseInitialNavigation(`?view=${legacy}`)).toEqual({ view: 'work' });
     }
-    expect(parseInitialNavigation('?view=overview')).toEqual({ view: 'home' });
     expect(parseInitialNavigation('?view=changes')).toEqual({ view: 'review' });
     expect(parseInitialNavigation('?view=usage')).toEqual({ view: 'usage' });
+  });
+});
+
+describe('everyday Home and Developer tools', () => {
+  it('opens the everyday Home by name and the developer Overview by its own deep link', () => {
+    expect(parseInitialNavigation('?view=home')).toEqual({ view: 'home' });
+    expect(parseInitialNavigation('?view=overview')).toEqual({ view: 'overview' });
   });
 });
 
 describe('isInspectorRelevant', () => {
   it('only shows a Session inspector beside an opened Session in Work', () => {
     expect(isInspectorRelevant('work', true)).toBe(true);
-    for (const view of ['home', 'review', 'usage'] as const) {
+    for (const view of ['home', 'overview', 'review', 'usage'] as const) {
       expect(isInspectorRelevant(view, true)).toBe(false);
     }
     expect(isInspectorRelevant('work', false)).toBe(false);

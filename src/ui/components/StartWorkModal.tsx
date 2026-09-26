@@ -32,6 +32,8 @@ interface Props {
   repos: Repo[];
   /** Preselects the repository currently filtering Work/Review, when there is one. */
   initialRepositoryId?: string | null;
+  /** Prefills the task — Home's Ask hands its text here unsent (#79). */
+  initialTask?: string;
   onClose: () => void;
   onError: (message: string) => void;
   onLaunched: (session: Session) => void;
@@ -40,8 +42,8 @@ interface Props {
   onAdvanced?: (draft: StartWorkDraft) => void;
 }
 
-export function StartWorkModal({ repos, initialRepositoryId = null, onClose, onError, onLaunched, onSubmitted, onAdvanced }: Props) {
-  const [task, setTask] = useState('');
+export function StartWorkModal({ repos, initialRepositoryId = null, initialTask = '', onClose, onError, onLaunched, onSubmitted, onAdvanced }: Props) {
+  const [task, setTask] = useState(initialTask);
   const [repositoryId, setRepositoryId] = useState(() => repos.find((repo) => repo.id === initialRepositoryId)?.id ?? repos[0]?.id ?? '');
   const repository = repos.find((repo) => repo.id === repositoryId) ?? repos[0];
   const [agent, setAgent] = useState<AgentChoice>('auto');

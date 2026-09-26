@@ -11,9 +11,9 @@ export interface InitialNavigation {
  * Redesign spec §14: destinations retired from primary navigation. Deep links
  * (the notch companion still sends view=terminal / view=operations) resolve
  * to the destination that absorbed them rather than being dropped.
+ * `overview` is a real destination again (Developer tools › Overview, #79).
  */
 const LEGACY_VIEWS: Record<string, WorkspaceView> = {
-  overview: 'home',
   tasks: 'work',
   operations: 'work',
   terminal: 'work',

@@ -19,17 +19,25 @@ function render(overrides: Partial<Parameters<typeof AdminSidebar>[0]> = {}) {
 }
 
 describe('AdminSidebar', () => {
-  it('contains only Home, Work, Review, Usage and Settings as primary destinations', () => {
+  it('leads with the everyday Home and groups developer destinations under Developer tools', () => {
     const html = render();
     const navigation = html.slice(html.indexOf('aria-label="Admin navigation"'), html.indexOf('aria-label="Repositories"'));
-    for (const label of ['Home', 'Work', 'Review', 'Usage']) expect(navigation).toContain(`<span>${label}</span>`);
-    for (const retired of ['Operations', 'Sessions', 'Grid', 'History', 'Signals', 'Tasks', 'Changes', 'Overview']) {
+    const developerAt = navigation.indexOf('Developer tools');
+    expect(developerAt).toBeGreaterThan(navigation.indexOf('<span>Home</span>'));
+    for (const label of ['Overview', 'Work', 'Review', 'Usage']) expect(navigation.indexOf(`<span>${label}</span>`)).toBeGreaterThan(developerAt);
+    expect(navigation).toContain('role="group" aria-label="Developer tools"');
+    for (const retired of ['Operations', 'Sessions', 'Grid', 'History', 'Signals', 'Tasks', 'Changes']) {
       expect(html).not.toContain(retired);
     }
     expect(html).toContain('<strong>Settings</strong>');
     expect(html).toContain('<strong>Start work</strong>');
     expect(html).not.toContain('New run');
     expect(html).not.toContain('New session');
+  });
+
+  it('marks the open developer destination as the current page', () => {
+    const html = render({ activeView: 'overview' });
+    expect(html).toMatch(/aria-current="page"[^>]*title="Overview"/);
   });
 
   it('mirrors the Needs You and review counts as badges', () => {
