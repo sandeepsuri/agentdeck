@@ -22,7 +22,7 @@ _All screenshot data is fictional._
 - Focus and message mapped Terminal.app, iTerm2, and VS Code integrated terminals.
 - Coordinate parallel work through file claims, progress events, blockers, task dependencies, and conflict warnings.
 - Invite collaborators with scoped repository and Profile access; they get a repository-first workspace to track Runs and Sessions and answer agent questions, without approval or publishing authority.
-- Keep active agents and attention prompts visible through the native MacBook notch or menu-bar companion.
+- See active Sessions, attention prompts, and indexed usage in a native menu-bar companion.
 
 ## Shared session chat
 

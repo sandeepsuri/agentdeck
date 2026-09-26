@@ -66,7 +66,13 @@ export function deriveAttentionItems(
     if (item) latest.set(session.id, item);
   }
   for (const session of live) {
-    if (session.status !== 'waiting_input' || latest.has(session.id)) continue;
+    if (session.status === 'working' || session.status === 'starting') {
+      latest.delete(session.id);
+      continue;
+    }
+    if (session.status !== 'waiting_input') continue;
+    const current = latest.get(session.id);
+    if (current && current.kind !== 'reply') continue;
     const repo = session.worktreePath ?? session.repoId ?? session.cwd;
     latest.set(session.id, {
       // Stable per session+kind: a waiting session whose lastActivityAt keeps
@@ -135,19 +141,11 @@ export function deriveCompanionAgents(
   attention = deriveAttentionItems(sessions, events),
 ): CompanionAgent[] {
   const attentionBySession = new Map(attention.map((item) => [item.sessionId, item]));
-  const latestMessage = new Map<string, ArchivedMessage>();
-  const latestProgress = new Map<string, number>();
+  const latestEvent = new Map<string, ArchivedMessage>();
   for (const event of events) {
     const session = sessionForEvent(sessions, event);
     if (!session || Date.parse(event.ts) < Date.parse(session.startedAt)) continue;
-    if (typeof event.progress === 'number' && Number.isFinite(event.progress)
-      && event.progress >= 0 && event.progress <= 100) {
-      latestProgress.set(session.id, event.progress);
-    }
-    if (!event.agent.startsWith('dashboard:') && event.message?.trim()
-      && ['progress', 'status', 'blocked', 'claim', 'done', 'message'].includes(event.event)) {
-      latestMessage.set(session.id, event);
-    }
+    if (!event.agent.startsWith('dashboard:')) latestEvent.set(session.id, event);
   }
 
   return sessions.flatMap((session): CompanionAgent[] => {
@@ -155,24 +153,30 @@ export function deriveCompanionAgents(
     const status = statusFor(session, item);
     if (!status) return [];
     const repo = session.worktreePath ?? session.repoId ?? session.cwd;
+    const currentEvent = latestEvent.get(session.id);
+    const activity = currentEvent?.status === session.status
+      && ['progress', 'status', 'blocked', 'claim', 'done', 'message'].includes(currentEvent.event)
+      ? currentEvent : undefined;
     const task = item?.message?.trim()
-      || latestMessage.get(session.id)?.message?.trim()
-      || session.name?.trim()
-      || session.taskId?.trim()
-      || (status === 'starting' ? 'Starting agent' : `Working in ${path.basename(repo)}`);
+      || activity?.message?.trim()
+      || (status === 'starting' ? 'Starting session' : status === 'working' ? 'Working' : 'Input needed');
     const agent: CompanionAgent = {
       id: session.id,
       agent: session.agent,
+      ...(session.agentSessionId ? {
+        usageSessionId: session.agentSessionId.startsWith(`${session.agent}:`)
+          ? session.agentSessionId.slice(session.agent.length + 1)
+          : session.agentSessionId,
+      } : {}),
       name: session.agent === 'claude' ? 'Claude Code' : 'Codex',
+      sessionName: session.name?.trim() || session.taskId?.trim() || 'Session',
       repo,
       repoName: path.basename(repo),
       task,
       status,
-      updatedAt: item?.occurredAt ?? session.lastActivityAt,
+      updatedAt: item?.occurredAt ?? activity?.ts ?? session.lastActivityAt,
     };
     if (session.branch) agent.branch = session.branch;
-    const progress = latestProgress.get(session.id);
-    if (progress !== undefined) agent.progress = progress;
     if (item) agent.attentionId = item.id;
     return [agent];
   }).sort((a, b) =>

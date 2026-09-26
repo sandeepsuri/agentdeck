@@ -104,7 +104,7 @@ Processing state is derived from persisted request/delivery acknowledgements plu
 
 ### Native companion
 
-The companion is a Swift/SwiftUI macOS executable under `native/AgentDeckNotch/`. It receives live state from the loopback server and presents active agents and attention prompts around a MacBook notch or in a menu-bar fallback.
+The companion is a Swift/SwiftUI macOS executable under `native/AgentDeckNotch/`. It receives live state from the loopback server and presents Session and Run attention in a menu-bar item with an anchored popover on all Macs. A local indexed-usage projection supplies monthly totals and per-Session estimates.
 
 The native companion is built as part of `npm run build`, copied into the distribution tree, and signed locally with an ad hoc signature.
 

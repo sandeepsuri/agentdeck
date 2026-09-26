@@ -323,12 +323,14 @@ export interface CompanionSnapshot {
 export interface CompanionAgent {
   id: string;
   agent: AgentType;
+  /** Provider conversation id, used only to match indexed usage. */
+  usageSessionId?: string;
   name: string;
+  sessionName: string;
   repo: string;
   repoName: string;
   task: string;
   branch?: string;
-  progress?: number;
   status: CompanionAgentStatus;
   updatedAt: string;
   attentionId?: string;

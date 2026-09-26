@@ -44,6 +44,7 @@ export interface UsageAggregateQuery {
   to?: string;
   provider?: UsageProviderFilter;
   groupBy: UsageGroupBy;
+  sessionRefs?: readonly { provider: UsageProvider; sessionId: string }[];
 }
 
 // Buckets use SQLite's 'localtime', i.e. the server process's time zone —
@@ -140,6 +141,14 @@ export class UsageRepository {
     if (query.from) { where.push('occurred_at >= @from'); params.from = query.from; }
     if (query.to) { where.push('occurred_at < @to'); params.to = query.to; }
     if (query.provider && query.provider !== 'all') { where.push('provider = @provider'); params.provider = query.provider; }
+    if (query.sessionRefs) {
+      if (query.sessionRefs.length === 0) return [];
+      where.push(`(${query.sessionRefs.map((ref, index) => {
+        params[`refProvider${index}`] = ref.provider;
+        params[`refSession${index}`] = ref.sessionId;
+        return `(provider = @refProvider${index} AND session_id = @refSession${index})`;
+      }).join(' OR ')})`);
+    }
     const group = GROUP_EXPRESSIONS[query.groupBy];
     const sql = `SELECT provider, model, speed, ${group} AS grp,
         SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cache_read,

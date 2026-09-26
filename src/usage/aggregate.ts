@@ -4,7 +4,7 @@
 import type { UsageAggregateRow, UsageGroupBy, UsageRepository } from '../store/usage.js';
 import { costOf, resolvePrice, type PricingTable } from './pricing.js';
 import type {
-  TokenTotals, UsageBucket, UsageModelRow, UsagePeriod, UsagePeriodSummary, UsageProvider, UsageProviderFilter,
+  CompanionUsage, TokenTotals, UsageBucket, UsageModelRow, UsagePeriod, UsagePeriodSummary, UsageProvider, UsageProviderFilter,
   UsageRange, UsageSessionRow, UsageSummary, UsageTimeseriesPoint,
 } from './types.js';
 
@@ -116,6 +116,29 @@ export class UsageQueries {
     const pricing = this.options.getPricing();
     for (const row of this.rows('none', from, to, provider)) addRow(totals, row, pricing);
     return totals;
+  }
+
+  companion(refs: readonly { provider: UsageProvider; sessionId: string }[]): CompanionUsage {
+    const pricing = this.options.getPricing();
+    const month = this.totals(periodStart('month', this.now()), undefined, 'all');
+    const sessions = new Map<string, UsageSessionRow>();
+    for (const row of this.options.repository.aggregate({ groupBy: 'session', sessionRefs: refs })) {
+      const key = `${row.provider}:${row.group}`;
+      let entry = sessions.get(key);
+      if (!entry) {
+        entry = {
+          ...emptyTotals(), provider: row.provider, sessionId: row.group, models: [],
+          startedAt: row.firstAt, lastActivityAt: row.lastAt,
+        };
+        sessions.set(key, entry);
+      }
+      addRow(entry, row, pricing);
+      if (!entry.models.includes(row.model)) entry.models.push(row.model);
+      if (row.firstAt < entry.startedAt) entry.startedAt = row.firstAt;
+      if (row.lastAt > entry.lastActivityAt) entry.lastActivityAt = row.lastAt;
+    }
+    const indexedAt = this.options.status?.().indexedAt;
+    return { month, sessions: [...sessions.values()], ...(indexedAt ? { indexedAt } : {}) };
   }
 
   summary(provider: UsageProviderFilter = 'all'): UsageSummary {

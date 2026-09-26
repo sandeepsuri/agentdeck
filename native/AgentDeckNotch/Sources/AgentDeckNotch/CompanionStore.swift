@@ -7,164 +7,67 @@ import UserNotifications
 final class CompanionStore: ObservableObject {
     @Published private(set) var agents: [CompanionAgent] = []
     @Published private(set) var attention: [AttentionItem] = []
-    /// Ticket 07: managed Run approval/input requests — a distinct list from
-    /// `attention` (Session attention) so NotchView can render/regress-test
-    /// the two independently, per AC6.
     @Published private(set) var runAttention: [RunAttentionItem] = []
+    @Published private(set) var usage: CompanionUsage?
     @Published private(set) var connected = false
     @Published private(set) var uiVisible = false
-    @Published private(set) var hovered = false
-    @Published private(set) var pinned = false
-    @Published private(set) var attentionExpanded = false
-    @Published private(set) var attentionGlow = false
     @Published private(set) var preferences = CompanionPreferences.load()
-
     let port: Int
     var onShowSettings: (() -> Void)?
-
+    weak var notifications: NotificationCoordinator?
     private var socket: URLSessionWebSocketTask?
     private var reconnectWork: DispatchWorkItem?
-    private var attentionWork: DispatchWorkItem?
-    private var glowWork: DispatchWorkItem?
-    private var hoverWork: DispatchWorkItem?
-    private var announcedAttentionIds = Set<String>()
-    weak var notifications: NotificationCoordinator?
+    private var usageTimer: Timer?
+    private var usageGeneration = 0
 
     init(port: Int, initialAgents: [CompanionAgent] = [], initialRunAttention: [RunAttentionItem] = []) {
         self.port = port
-        self.agents = initialAgents
-        self.runAttention = initialRunAttention
+        agents = initialAgents
+        runAttention = initialRunAttention
     }
-
-    var sortedAgents: [CompanionAgent] {
-        sortedCompanionAgents(agents)
-    }
-
-    var repoGroups: [RepoGroup] {
-        groupedCompanionAgents(agents)
-    }
-
-    var priorityAgent: CompanionAgent? {
-        sortedAgents.first
-    }
-
-    var otherRunningCount: Int {
-        otherRunningAgentCount(agents, hasPriorityAgent: priorityAgent != nil)
-    }
-
-    var isExpanded: Bool {
-        companionShouldExpand(hovered: hovered, pinned: pinned, attentionExpanded: attentionExpanded)
-    }
-
-    var bodyHeight: CGFloat {
-        NotchGeometry.bodyHeight(groups: repoGroups.count, agents: agents.count, runAttentionCount: runAttention.count)
-    }
-
+    var display: CompanionDisplay { CompanionDisplay(agents: agents, runs: runAttention, connected: connected) }
     func start() {
         fetchSnapshot()
         connect()
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshUsage() }
+        }
     }
-
     func stop() {
         reconnectWork?.cancel()
-        attentionWork?.cancel()
-        glowWork?.cancel()
-        hoverWork?.cancel()
+        usageTimer?.invalidate()
         socket?.cancel(with: .goingAway, reason: nil)
     }
-
-    func setHovered(_ value: Bool) {
-        hoverWork?.cancel()
-        if value {
-            hovered = true
-            return
-        }
-        let work = DispatchWorkItem { [weak self] in self?.hovered = false }
-        hoverWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
-    }
-
-    func togglePinned() {
-        pinned.toggle()
-    }
-
-    func showSettings() {
-        onShowSettings?()
-    }
-
+    func showSettings() { onShowSettings?() }
     func setNotificationsEnabled(_ enabled: Bool) {
         preferences.notificationsEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "notificationsEnabled")
         objectWillChange.send()
     }
-
-    func setAttentionExpansionEnabled(_ enabled: Bool) {
-        preferences.attentionExpansionEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "attentionExpansionEnabled")
-        objectWillChange.send()
+    func openSession(_ id: String) { openAgentDeck([URLQueryItem(name: "session", value: id), URLQueryItem(name: "view", value: "terminal")]) }
+    func openRun(_ id: String) { openAgentDeck([URLQueryItem(name: "run", value: id), URLQueryItem(name: "view", value: "operations")]) }
+    func openAllAgents() { openAgentDeck([URLQueryItem(name: "view", value: "operations")]) }
+    private func openAgentDeck(_ items: [URLQueryItem]) {
+        var url = URLComponents()
+        url.scheme = "http"
+        url.host = "127.0.0.1"
+        url.port = port
+        url.path = "/"
+        url.queryItems = items
+        if let destination = url.url { NSWorkspace.shared.open(destination) }
     }
-
-    func openSession(_ sessionId: String) {
-        openAgentDeck([
-            URLQueryItem(name: "session", value: sessionId),
-            URLQueryItem(name: "view", value: "terminal"),
-        ])
-    }
-
-    func openAllAgents() {
-        openAgentDeck([URLQueryItem(name: "view", value: "operations")])
-    }
-
-    /// Ticket 07: deep-links to the Run so an operator can approve/deny or
-    /// provide input in the full AgentDeck UI — the notch itself never
-    /// resolves a Run attention request in place, same as openSession never
-    /// answers a Session prompt in place, only navigates there.
-    func openRun(_ runId: String) {
-        openAgentDeck([
-            URLQueryItem(name: "run", value: runId),
-            URLQueryItem(name: "view", value: "operations"),
-        ])
-    }
-
-    private func openAgentDeck(_ queryItems: [URLQueryItem]) {
-        var components = URLComponents()
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        components.port = port
-        components.path = "/"
-        components.queryItems = queryItems
-        if let url = components.url { NSWorkspace.shared.open(url) }
-    }
-
-    private func triggerAttentionExpansion() {
-        guard preferences.attentionExpansionEnabled else { return }
-        attentionWork?.cancel()
-        glowWork?.cancel()
-        attentionExpanded = true
-        attentionGlow = true
-        let glow = DispatchWorkItem { [weak self] in self?.attentionGlow = false }
-        glowWork = glow
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: glow)
-        let expansion = DispatchWorkItem { [weak self] in self?.attentionExpanded = false }
-        attentionWork = expansion
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7, execute: expansion)
-    }
-
     private func connect() {
         guard let url = URL(string: "ws://127.0.0.1:\(port)/ws") else { return }
-        let socket = URLSession.shared.webSocketTask(with: url)
-        self.socket = socket
-        socket.resume()
+        socket = URLSession.shared.webSocketTask(with: url)
+        socket?.resume()
         receive()
     }
-
     private func receive() {
         socket?.receive { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 switch result {
                 case .success(let message):
-                    self.connected = true
                     let data: Data?
                     switch message {
                     case .string(let text): data = text.data(using: .utf8)
@@ -172,30 +75,25 @@ final class CompanionStore: ObservableObject {
                     @unknown default: data = nil
                     }
                     if let data, let envelope = try? JSONDecoder().decode(ServerEnvelope.self, from: data) {
+                        self.connected = true
                         if let snapshot = envelope.snapshot { self.apply(snapshot, announce: true) }
-                        if envelope.t == "ui_presence", let visible = envelope.visible {
-                            self.uiVisible = visible
-                        }
+                        if envelope.t == "ui_presence", let visible = envelope.visible { self.uiVisible = visible }
                     }
                     self.receive()
                 case .failure:
                     self.connected = false
+                    self.usage = nil
                     self.scheduleReconnect()
                 }
             }
         }
     }
-
     private func scheduleReconnect() {
         reconnectWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.fetchSnapshot()
-            self?.connect()
-        }
+        let work = DispatchWorkItem { [weak self] in self?.fetchSnapshot(); self?.connect() }
         reconnectWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
     }
-
     private func fetchSnapshot() {
         guard let url = URL(string: "http://127.0.0.1:\(port)/api/companion") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
@@ -203,38 +101,39 @@ final class CompanionStore: ObservableObject {
                 Task { @MainActor in self?.connected = false }
                 return
             }
-            Task { @MainActor in
-                self?.connected = true
-                self?.apply(snapshot, announce: false)
-            }
+            Task { @MainActor in self?.connected = true; self?.apply(snapshot, announce: false) }
         }.resume()
     }
-
     private func apply(_ snapshot: CompanionSnapshot, announce: Bool) {
+        let previous = Set(agents.compactMap { agent in agent.usageSessionId.map { "\(agent.agent):\($0)" } })
         agents = snapshot.agents
         attention = snapshot.attention
         runAttention = snapshot.runAttention
         uiVisible = snapshot.uiVisible
-        guard announce else { return }
-        notifications?.process(
-            snapshot.attention,
-            uiVisible: snapshot.uiVisible,
-            enabled: preferences.notificationsEnabled
-        )
-        // Ticket 07: a pending Run attention request expands the notch the
-        // same way a new Session attention item does — its own id namespace
-        // ("run-attention-agentdeck.com/attentionId" would collide only in
-        // the unlikely case a Session attention item shared the identical
-        // raw id, which announcedAttentionIds already tolerates fine since
-        // both are just "new id, never seen before" signals) — Session
-        // notifications themselves stay exactly as before (no Run attention
-        // system notification is sent here; NotchView surfaces it visually).
-        let currentIds = Set(snapshot.attention.map(\.id)).union(snapshot.runAttention.map(\.id))
-        let newIds = currentIds.subtracting(announcedAttentionIds)
-        announcedAttentionIds.formUnion(currentIds)
-        if !snapshot.uiVisible && !newIds.isEmpty {
-            triggerAttentionExpansion()
+        let current = Set(agents.compactMap { agent in agent.usageSessionId.map { "\(agent.agent):\($0)" } })
+        if usage == nil || current != previous { refreshUsage() }
+        if announce { notifications?.process(snapshot.attention, uiVisible: snapshot.uiVisible, enabled: preferences.notificationsEnabled) }
+    }
+    func refreshUsage() {
+        guard connected, let url = URL(string: "http://127.0.0.1:\(port)/api/usage/companion") else { return }
+        let refs = agents.compactMap { agent -> [String: String]? in
+            guard let id = agent.usageSessionId else { return nil }
+            return ["provider": agent.agent, "sessionId": id]
         }
+        guard let body = try? JSONSerialization.data(withJSONObject: ["sessions": refs]) else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        usageGeneration += 1
+        let generation = usageGeneration
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            let result = data.flatMap { try? JSONDecoder().decode(CompanionUsage.self, from: $0) }
+            Task { @MainActor in
+                guard let self, generation == self.usageGeneration else { return }
+                self.usage = result
+            }
+        }.resume()
     }
 }
 
