@@ -82,4 +82,21 @@ describe('UsageQueries', () => {
     expect(first?.outputCostUsd).toBeCloseTo(2.5 + 1);
     expect(second?.sessionId).toBe('b');
   });
+
+  it('projects indexed monthly and exact provider plus session usage, including partial pricing', () => {
+    seed([
+      event({ provider: 'claude', sessionId: 'same', model: 'claude-sonnet-5' }),
+      event({ provider: 'claude', sessionId: 'same', model: 'unpriced-model', inputTokens: 50, outputTokens: 0 }),
+      event({ provider: 'codex', sessionId: 'same', model: 'gpt-5', inputTokens: 20, outputTokens: 0 }),
+      event({ provider: 'codex', sessionId: 'old', occurredAt: '2026-08-12T10:00:00.000Z' }),
+    ]);
+    const result = queries().companion([{ provider: 'claude', sessionId: 'same' }, { provider: 'codex', sessionId: 'same' }]);
+    expect(result.month.events).toBe(3);
+    expect(result.sessions).toHaveLength(2);
+    expect(result.sessions.find((row) => row.provider === 'claude')).toMatchObject({
+      models: expect.arrayContaining(['claude-sonnet-5', 'unpriced-model']), unpricedTokens: 50,
+    });
+    expect(result.sessions.find((row) => row.provider === 'codex')?.totalTokens).toBe(20);
+    expect(queries().companion([{ provider: 'codex', sessionId: 'absent' }]).sessions).toEqual([]);
+  });
 });

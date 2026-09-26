@@ -116,3 +116,9 @@ export interface UsageSessionRow extends TokenTotals {
   startedAt: string;
   lastActivityAt: string;
 }
+
+export interface CompanionUsage {
+  month: TokenTotals;
+  indexedAt?: string;
+  sessions: UsageSessionRow[];
+}

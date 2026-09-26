@@ -63,7 +63,7 @@ describe('deriveAttentionItems', () => {
       .toMatchObject([{ sessionId: 'managed-1', kind: 'action_required' }]);
   });
 
-  it('normalizes active agents, explicit progress, task copy, and status priority', () => {
+  it('normalizes current activity and status priority without stale percentages', () => {
     const working = { ...session, id: 'working', status: 'working', agentSessionId: 'codex:work', agent: 'codex' } satisfies Session;
     const starting = { ...session, id: 'starting', status: 'starting', agentSessionId: 'claude:start' } satisfies Session;
     const idle = { ...session, id: 'idle', status: 'idle', agentSessionId: 'claude:idle' } satisfies Session;
@@ -79,7 +79,7 @@ describe('deriveAttentionItems', () => {
       },
     ] satisfies (AgentMessage & { eventId: number })[];
     expect(deriveCompanionAgents([idle, starting, working], events)).toMatchObject([
-      { id: 'working', name: 'Codex', task: 'Refactoring session list', progress: 48, status: 'working' },
+      { id: 'working', name: 'Codex', task: 'Refactoring session list', usageSessionId: 'work', status: 'working' },
       { id: 'starting', name: 'Claude Code', task: 'Booting dev server', status: 'starting' },
     ]);
   });
@@ -97,5 +97,30 @@ describe('deriveAttentionItems', () => {
       { id: 'working', status: 'working' },
     ]);
     expect(agents[1]).not.toHaveProperty('progress');
+  });
+
+  it('discards a stale waiting request when the Session is working again', () => {
+    const events = [{
+      eventId: 1, ts: '2026-07-23T10:03:00.000Z', agent: 'claude:abc',
+      repo: session.cwd, event: 'status', status: 'waiting_input',
+      attention: 'action_required', message: 'Approve command?', progress: 42,
+    }] satisfies (AgentMessage & { eventId: number })[];
+    const working = { ...session, status: 'working', lastActivityAt: '2026-07-23T10:05:00.000Z' } satisfies Session;
+    expect(deriveAttentionItems([working], events)).toEqual([]);
+    expect(deriveCompanionAgents([working], events)[0]).toMatchObject({ status: 'working', task: 'Working' });
+    expect(deriveCompanionAgents([working], events)[0]).not.toHaveProperty('progress');
+  });
+
+  it('does not reuse activity from an earlier Working phase', () => {
+    const events = [
+      { eventId: 1, ts: '2026-07-23T10:01:00.000Z', agent: 'claude:abc', repo: session.cwd,
+        event: 'status', status: 'working', message: 'Old implementation' },
+      { eventId: 2, ts: '2026-07-23T10:03:00.000Z', agent: 'claude:abc', repo: session.cwd,
+        event: 'status', status: 'waiting_input', message: 'Which approach?' },
+    ] satisfies (AgentMessage & { eventId: number })[];
+    const current = { ...session, status: 'working', lastActivityAt: '2026-07-23T10:05:00.000Z' } satisfies Session;
+    expect(deriveCompanionAgents([current], events)[0]).toMatchObject({
+      task: 'Working', updatedAt: '2026-07-23T10:05:00.000Z',
+    });
   });
 });

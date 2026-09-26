@@ -215,6 +215,6 @@ Repository access lets a collaborator answer ordinary agent questions in shared 
 
 ## Native companion
 
-The native companion starts with a production build unless `AGENTDECK_NOTCH=0` is set. On a notched MacBook it appears around the camera housing; on other displays it falls back to a menu-bar pill and detached panel.
+The native companion starts with a production build unless `AGENTDECK_NOTCH=0` is set. It appears as one menu-bar item on notched and non-notched Macs. Click it to open a popover with monthly indexed usage, Session activity, and requests needing input.
 
-Hover to inspect active agents, pin the expanded view, or use **Open Session** to jump to the corresponding terminal. macOS may request notification permission when an agent first replies or requires approval.
+Click the item again, click outside, or press Escape to close the popover. Use **Open Session** or **Open Run** to jump to the corresponding work. macOS may request notification permission when a Session first replies or requires input.

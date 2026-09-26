@@ -25,6 +25,17 @@ export interface UsageRouteContext {
 }
 
 export function registerUsageRoutes(app: FastifyInstance, ctx: UsageRouteContext): void {
+  app.post('/api/usage/companion', async (req, reply) => {
+    const body = req.body as { sessions?: unknown } | null;
+    const refs = body?.sessions;
+    if (!Array.isArray(refs) || refs.length > 100 || !refs.every((ref) =>
+      ref && typeof ref === 'object'
+      && (ref.provider === 'claude' || ref.provider === 'codex')
+      && typeof ref.sessionId === 'string' && ref.sessionId.length > 0 && ref.sessionId.length <= 256)) {
+      return reply.code(400).send({ error: 'invalid sessions' });
+    }
+    return ctx.queries.companion(refs);
+  });
   app.get('/api/usage/summary', async (req, reply) => {
     const provider = oneOf((req.query as Record<string, unknown>).provider, PROVIDERS, 'all');
     if (!provider) return reply.code(400).send({ error: 'invalid provider' });
