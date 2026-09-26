@@ -111,6 +111,16 @@ When a Run's result includes servable static HTML, a **Preview** button opens it
 
 Publishing is an explicit, admin-only step, never automatic. Once a Run completes with a delivery commit, choose **Push branch** or **Push and open draft pull request**. The publication settles as succeeded, failed (fix the cause and publish again), or ambiguous (check the remote, then reconcile and retry). This is separate from the manual **Commit staged** / **Create PR** actions in the Changes workspace described below, which act on the working tree directly and are not tied to a Run.
 
+## Personal tasks
+
+Personal tasks work on your own files, not on a repository. Open **Personal tasks** from the sidebar on this Mac. They are not available from a phone or to collaborators.
+
+1. Choose **Choose a folder…**. A macOS folder dialog opens on this Mac. Pick one specific folder, such as a folder of statements. AgentDeck refuses whole-disk, home-folder, and Library selections.
+2. AgentDeck lists the PDFs in that folder. Links and hidden files are skipped. Uncheck any you do not want inspected, then choose **Inspect**.
+3. The task shows its activity as each file is read. When it finishes, it shows each PDF's pages, size, PDF version, and fingerprint.
+
+AgentDeck reads the files itself. No agent sees them. Choose **Revoke access** to stop all further reads of a folder, including by a task that is already running. A task that fails, for example because the folder was moved, can be retried under the same task. If AgentDeck stops mid-task, the task runs again when AgentDeck restarts, and no result is shown until a run completes.
+
 ## Launching a managed session
 
 Quick mode in **Start work** covers most sessions. For full control:

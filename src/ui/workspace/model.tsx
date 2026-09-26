@@ -4,12 +4,13 @@ import type { Repo, Session, SessionStatus } from '../../types.js';
 /**
  * Redesign spec §03, extended by Everyday 04 (#79): Home is the everyday
  * entry (Ask, Needs you, Tasks); the developer destinations sit together
- * under "Developer tools". Settings is a separate layer, not a view.
+ * under "Developer tools". Personal tasks (#80) sit beside Home. Settings is a separate layer, not a view.
  */
-export type WorkspaceView = 'home' | 'overview' | 'work' | 'review' | 'usage';
+export type WorkspaceView = 'home' | 'personal' | 'overview' | 'work' | 'review' | 'usage';
 
 export const WORKSPACE_VIEWS: { id: WorkspaceView; label: string; group: 'everyday' | 'developer' }[] = [
   { id: 'home', label: 'Home', group: 'everyday' },
+  { id: 'personal', label: 'Personal tasks', group: 'everyday' },
   { id: 'overview', label: 'Overview', group: 'developer' },
   { id: 'work', label: 'Work', group: 'developer' },
   { id: 'review', label: 'Review', group: 'developer' },

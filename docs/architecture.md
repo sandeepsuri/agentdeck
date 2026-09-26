@@ -72,6 +72,22 @@ A confined CLI runs under `sandbox-exec` with a generated deny-by-default profil
 
 Developer Sessions and Runs never go through this path. See [decision 0003](decisions/0003-personal-task-confinement.md).
 
+### Personal tasks
+
+`src/personal-tasks/` runs Personal tasks for the owner. They are kept apart from Runs and Sessions and stored in their own tables (migration 023).
+
+- **Grant.** The owner creates a Folder grant with `POST /api/personal/grants/pick`, which opens the native macOS folder dialog on this Mac. The browser never sends a path. The chosen folder is stored by `realpath`. The filesystem root, top-level folders, the home folder and its ancestors, `~/Library`, and AgentDeck's data directory are refused.
+- **Reads.** Every read goes through `openGrantedPdf`, which:
+  - re-checks that the grant root still resolves to itself;
+  - refuses traversal and absolute paths;
+  - refuses any symlink on the path, even one that points back inside the grant;
+  - opens with `O_NOFOLLOW` and matches the file identity;
+  - accepts only `.pdf` files that start with `%PDF-`.
+- **Inventory.** The PDF inventory is deterministic and bounded: at most 100 files per task and 50 MB per file. AgentDeck's own code reports size, SHA-256, PDF version, page count, and encryption. No agent process runs, so the confinement gate is not consulted. A later agent-driven step must consult it.
+- **Attempts and activity.** Each task advances through Attempts and records ordered activity. The result is written in the same transaction that completes an Attempt. The grant is re-read before each file, so revoking it stops the next read and fails the task.
+- **Recovery.** At boot, an Attempt left running is ended as interrupted, with no result, and the task runs again as a new Attempt under the same id.
+- **Access.** `/api/personal/*` is owner-only. The routes are on neither remote allowlist in `app.ts`, and each handler requires a local connection. A collaborator device and the shared tailnet token are both refused. Browser projections show the folder name and a `~`-relative path, never the absolute path or principal and device ids.
+
 ### Coordination and hooks
 
 Claude Code hooks and Codex notifications are normalized into shared session and coordination events. Repository-local JSONL files provide claims, progress, blockers, dependencies, and queued Claude messages. See [Coordination](coordination.md) for the event workflow.
@@ -106,6 +122,7 @@ The current schema stores:
 - Tasks and dependencies
 - Runs, Attempts, Work specifications, Run results, feedback, and review decisions
 - Profiles, Collaborators, Device credentials (hashed), and Publications
+- Folder grants, Personal tasks, their Attempts, activity, and results
 - Discovered repositories and worktrees
 - Application settings
 - An archive of ingested coordination events

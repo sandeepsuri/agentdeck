@@ -36,6 +36,10 @@ describe('everyday Home and Developer tools', () => {
     expect(parseInitialNavigation('?view=home')).toEqual({ view: 'home' });
     expect(parseInitialNavigation('?view=overview')).toEqual({ view: 'overview' });
   });
+
+  it('opens Personal tasks by its own deep link (#80)', () => {
+    expect(parseInitialNavigation('?view=personal')).toEqual({ view: 'personal' });
+  });
 });
 
 describe('isInspectorRelevant', () => {

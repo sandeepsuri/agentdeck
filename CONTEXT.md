@@ -104,6 +104,14 @@ _Avoid_: Token, access code
 An individually revocable bearer credential bound to one collaborator's device, minted by exchanging an Invitation. Authenticates a remote request to a Principal and device for audit attribution; stored only as a hash, never in a form that reveals the bearer value after issuance.
 _Avoid_: Token, session, API key
 
+**Personal task**:
+Durable owner work on personal files, such as inventorying PDFs in a granted folder. It keeps one identity across restarts and Attempts and records who asked, from which device, the Folder grant, and the policy version it ran under. It is never a Run or Session, and a collaborator can neither see nor submit one.
+_Avoid_: Run, job
+
+**Folder grant**:
+One folder the owner picked in the native picker on this Mac, stored by canonical path. Every read re-checks that the path is inside the folder and follows no symlink. Revoking the grant stops any further reads, including by a task already running.
+_Avoid_: Permission, workspace, Repository
+
 **Publication**:
 An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.
 _Avoid_: Deploy, release, publish (as a bare verb with no durable record)

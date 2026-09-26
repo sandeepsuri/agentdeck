@@ -1,8 +1,8 @@
 // Everyday 04 (#79): the everyday Home. Three things, in this order: Ask
 // (hands the typed text to the existing Start work flow, unsent), Needs you
 // (the one derived queue, needsYou.ts), and Tasks (real Runs and Sessions,
-// workItems.ts). Personal tasks don't exist yet, so nothing here invents
-// one. Each section tells the truth about its source — still loading,
+// workItems.ts). Personal tasks (#80) live in their own view and are not
+// mixed in here. Each section tells the truth about its source — still loading,
 // unreachable, or genuinely empty. Every action routes through handlers
 // App.tsx already owns (resolveRunAttention, opening work, Start work), so
 // Home adds no write path and changes no authorization. The developer

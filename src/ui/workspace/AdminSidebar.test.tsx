@@ -35,6 +35,14 @@ describe('AdminSidebar', () => {
     expect(html).not.toContain('New session');
   });
 
+  it('lists Personal tasks beside Home, outside Developer tools (#80)', () => {
+    const html = render();
+    const navigation = html.slice(html.indexOf('aria-label="Admin navigation"'), html.indexOf('aria-label="Repositories"'));
+    const personalAt = navigation.indexOf('<span>Personal tasks</span>');
+    expect(personalAt).toBeGreaterThan(navigation.indexOf('<span>Home</span>'));
+    expect(personalAt).toBeLessThan(navigation.indexOf('Developer tools'));
+  });
+
   it('marks the open developer destination as the current page', () => {
     const html = render({ activeView: 'overview' });
     expect(html).toMatch(/aria-current="page"[^>]*title="Overview"/);

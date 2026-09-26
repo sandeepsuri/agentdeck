@@ -31,6 +31,8 @@ import { UsageQueries } from '../usage/aggregate.js';
 import { UsageIndexer } from '../usage/indexer.js';
 import { ModelNewsService } from '../usage/news.js';
 import { DEFAULT_PRICING } from '../usage/pricing.js';
+import { PersonalTaskService } from '../personal-tasks/service.js';
+import { macFolderPicker } from '../personal-tasks/folder-picker.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -55,6 +57,11 @@ export async function startServer(): Promise<RunningServer> {
   // DurableWorkEngine.recover. Must finish before any route can observe or
   // start a Run.
   await workEngine.recover();
+  // Issue #80: personal tasks are separate from Runs. An attempt interrupted
+  // by the last shutdown is ended without a result and run again under the
+  // same task id; a revoked grant fails it instead of reading.
+  const personalTasks = new PersonalTaskService({ repository: store.personal, protectedRoots: [config.dataDir] });
+  personalTasks.recover();
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than
@@ -132,6 +139,7 @@ export async function startServer(): Promise<RunningServer> {
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators,
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
+    personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
   });
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator

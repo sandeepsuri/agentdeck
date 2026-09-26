@@ -15,6 +15,7 @@ import { registerRoutes, type RouteContext } from './routes.js';
 import { registerCollaboratorRoutes } from './collaborator-routes.js';
 import { registerProfileRoutes } from './profile-routes.js';
 import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
+import { localOwnerActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -166,6 +167,8 @@ export interface AppContext {
   remoteHosts?: readonly string[];
   /** Local token usage and model news — /api/usage/* (usage-routes.ts). Local-only by omission from both allowlists. */
   usage?: UsageRouteContext;
+  /** Issue #80: folder grants and personal tasks — /api/personal/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
+  personalTasks?: Omit<PersonalTaskRouteDeps, 'resolveOwner'>;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -269,6 +272,16 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   ).device?.grantedProfileIds);
 
   if (ctx.usage) registerUsageRoutes(app, ctx.usage);
+
+  // Issue #80: the owner is whoever sits at this Mac. Neither a collaborator
+  // device nor the legacy shared tailnet token resolves to the owner here.
+  if (ctx.personalTasks) registerPersonalTaskRoutes(app, {
+    ...ctx.personalTasks,
+    resolveOwner: (req) => (classify(
+      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+      { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
+    ).kind === 'local' ? localOwnerActor() : undefined),
+  });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

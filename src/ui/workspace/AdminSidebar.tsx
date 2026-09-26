@@ -25,7 +25,7 @@ interface Props {
   onSettings: () => void;
 }
 
-const GLYPHS: Record<WorkspaceView, string> = { home: '⌂', overview: '▦', work: '◉', review: '±', usage: '◔' };
+const GLYPHS: Record<WorkspaceView, string> = { home: '⌂', personal: '▤', overview: '▦', work: '◉', review: '±', usage: '◔' };
 
 const GROUPS = [
   { id: 'everyday', label: null },

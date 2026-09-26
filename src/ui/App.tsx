@@ -28,6 +28,7 @@ import { CommandPalette } from './workspace/CommandPalette.js';
 import { DeveloperOverview } from './workspace/DeveloperOverview.js';
 import { combineSourceStates, HomeView, type HomeSourceState } from './workspace/HomeView.js';
 import { INITIAL_HISTORY_WITNESS_STATE, advanceHistoryWitnessState, splitSessionsForRail } from './workspace/history.js';
+import { PersonalTasksView } from './workspace/PersonalTasksView.js';
 import { InspectorRail } from './workspace/InspectorRail.js';
 import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { ReviewView, type ReviewTarget } from './workspace/ReviewView.js';
@@ -836,6 +837,9 @@ export function App() {
               sources={{ work: combineSourceStates(runsState, sessionsState), repositories: reposState }}
               workItems={workItems}
             />
+          </div>
+          <div className={layerClass('personal')}>
+            <PersonalTasksView active={!showSettings && view === 'personal'} />
           </div>
           <div className={layerClass('overview')}>
             <DeveloperOverview
