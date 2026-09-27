@@ -5,5 +5,8 @@ let package = Package(
     name: "AgentDeckApp",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "AgentDeckApp", targets: ["AgentDeckApp"])],
-    targets: [.executableTarget(name: "AgentDeckApp")]
+    targets: [
+        .executableTarget(name: "AgentDeckApp"),
+        .testTarget(name: "AgentDeckAppTests", dependencies: ["AgentDeckApp"]),
+    ]
 )
