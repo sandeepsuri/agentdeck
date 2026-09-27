@@ -120,6 +120,10 @@ _Avoid_: Filing plan approval, move job
 The owner's approval of one exact Filing proposal, bound to its plan digest, the approving owner, an expiry, and a single initial execution, with an explicit choice for each target it would replace. AgentDeck's own code, never an agent, then moves each file after re-checking the grant, links, and content on disk, and keeps a durable receipt per file: moved, left in place, not moved, or uncertain. Approving again returns the approval on record. A later owner-requested retry uses a durable idempotency key and only receipts recorded as not moved; a settled move is never repeated, even across a restart. Undo restores a recorded move only when the original name is free and the destination still has the recorded file identity.
 _Avoid_: Move job, batch rename, filing run
 
+**Provider readiness**:
+The result of a harmless check that a provider CLI on this Mac is installed, signed in with the provider's own sign-in, and within its plan allowance: ready, missing CLI, signed out, expired, allowance reached, or check failed, each with repair steps. Only this metadata is kept; the credential stays in the provider's own storage.
+_Avoid_: Runtime readiness (the managed-run capability probe), login, auth
+
 **Publication**:
 An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.
 _Avoid_: Deploy, release, publish (as a bare verb with no durable record)

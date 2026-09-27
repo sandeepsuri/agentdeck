@@ -1,4 +1,5 @@
 import type { Server as HttpServer } from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { FastifyRequest } from 'fastify';
@@ -34,6 +35,8 @@ import { DEFAULT_PRICING } from '../usage/pricing.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
 import { macFolderPicker } from '../personal-tasks/folder-picker.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
+import { ProviderSetupService } from '../provider-setup/service.js';
+import { macProviderCommands } from '../provider-setup/commands.js';
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -69,6 +72,13 @@ export async function startServer(): Promise<RunningServer> {
     filingProvider: confinedClaudeProvider({ dataDir: config.dataDir }),
   });
   personalTasks.recover();
+  // Issue #85: provider CLI setup from the Mac app. Only the last readiness
+  // check is persisted; it shows as unconfirmed until re-checked this launch.
+  const providerSetup = new ProviderSetupService({
+    repository: store.providerReadiness,
+    commands: macProviderCommands(),
+    home: os.homedir(),
+  });
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does
   // (ticket 04) — mark still-live-looking managed rows exited rather than
@@ -147,6 +157,7 @@ export async function startServer(): Promise<RunningServer> {
     remoteHosts: remoteAccess.hosts, collaborators,
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
+    providerSetup,
   });
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator
@@ -181,6 +192,7 @@ export async function startServer(): Promise<RunningServer> {
     discovery.stop(); coordination.stop();
     usageIndexer.stop(); modelNews.stop();
     companion?.close();
+    providerSetup.shutdown();
     releaseWakeLock();
     await manager.shutdown();
     if (wss) await closeWs(wss);

@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDeckConfig } from '../config.js';
@@ -16,6 +16,8 @@ import { registerCollaboratorRoutes } from './collaborator-routes.js';
 import { registerProfileRoutes } from './profile-routes.js';
 import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
 import { localOwnerActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
+import { registerProviderSetupRoutes } from './provider-setup-routes.js';
+import type { ProviderSetupService } from '../provider-setup/service.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -169,6 +171,8 @@ export interface AppContext {
   usage?: UsageRouteContext;
   /** Issue #80: folder grants and personal tasks — /api/personal/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
   personalTasks?: Omit<PersonalTaskRouteDeps, 'resolveOwner'>;
+  /** Issue #85: provider CLI setup — /api/provider-setup/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
+  providerSetup?: ProviderSetupService;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -275,13 +279,15 @@ export function buildApp(ctx: AppContext): FastifyInstance {
 
   // Issue #80: the owner is whoever sits at this Mac. Neither a collaborator
   // device nor the legacy shared tailnet token resolves to the owner here.
+  const isLocalOwner = (req: FastifyRequest) => classify(
+    { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
+  ).kind === 'local';
   if (ctx.personalTasks) registerPersonalTaskRoutes(app, {
     ...ctx.personalTasks,
-    resolveOwner: (req) => (classify(
-      { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-      { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
-    ).kind === 'local' ? localOwnerActor() : undefined),
+    resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined),
   });
+  if (ctx.providerSetup) registerProviderSetupRoutes(app, { service: ctx.providerSetup, isOwner: isLocalOwner });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

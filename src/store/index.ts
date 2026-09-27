@@ -18,6 +18,7 @@ import type {
 import { migrate } from './migrate.js';
 import { UsageRepository } from './usage.js';
 import { PersonalTaskRepository } from './personal-tasks.js';
+import { ProviderReadinessRepository } from './provider-readiness.js';
 import type {
   CollaboratorRow, CollaboratorStore, DeviceRow, InvitationRow,
 } from '../collaborators/service.js';
@@ -385,6 +386,7 @@ export class Store implements CollaboratorStore {
     migrate(this.db, MIGRATIONS_DIR);
     this.usage = new UsageRepository(this.db);
     this.personal = new PersonalTaskRepository(this.db);
+    this.providerReadiness = new ProviderReadinessRepository(this.db);
   }
 
   /** Local Claude/Codex token usage and model news (src/usage). */
@@ -392,6 +394,9 @@ export class Store implements CollaboratorStore {
 
   /** Personal tasks and folder grants (src/personal-tasks). */
   readonly personal: PersonalTaskRepository;
+
+  /** The last provider setup readiness check per provider (src/provider-setup). */
+  readonly providerReadiness: ProviderReadinessRepository;
 
   close(): void {
     this.db.close();

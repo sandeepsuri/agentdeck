@@ -4,6 +4,7 @@ import type { Repo } from '../../types.js';
 import { apiFetch, responseJson, responseJsonArray } from '../apiFetch.js';
 import { CollaboratorsPanel } from './CollaboratorsPanel.js';
 import { ProfilesPanel } from './ProfilesPanel.js';
+import { ProviderSetupPanel } from './ProviderSetupPanel.js';
 import { useAccessData } from './useAccessData.js';
 
 interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; error?: string }
@@ -21,9 +22,10 @@ interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; er
  * one-time invitation code all survive a tab switch instead of unmounting
  * and losing state.
  */
-type SettingsTab = 'general' | 'profiles' | 'collaborators';
+type SettingsTab = 'general' | 'providers' | 'profiles' | 'collaborators';
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
+  { id: 'providers', label: 'Providers' },
   { id: 'profiles', label: 'Profiles' },
   { id: 'collaborators', label: 'Collaborators' },
 ];
@@ -91,6 +93,8 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onIns
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const access = useAccessData();
+  const [providersVisited, setProvidersVisited] = useState(false);
+  useEffect(() => { if (tab === 'providers') setProvidersVisited(true); }, [tab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -216,6 +220,11 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onIns
             {saved && !error && <div className="settings-saved">Saved.</div>}
           </>
         )}
+      </div>
+
+      <div aria-labelledby="settings-tab-providers" className="settings-tab-panel" hidden={tab !== 'providers'} id="settings-tabpanel-providers" role="tabpanel">
+        {/* Issue #85: mounted on first open, then kept like the other tabs. */}
+        {(tab === 'providers' || providersVisited) && <ProviderSetupPanel />}
       </div>
 
       <div aria-labelledby="settings-tab-profiles" className="settings-tab-panel" hidden={tab !== 'profiles'} id="settings-tabpanel-profiles" role="tabpanel">

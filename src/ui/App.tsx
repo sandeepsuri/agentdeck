@@ -15,6 +15,7 @@ import { getStoredToken, setStoredToken, tokenStorage } from './connection.js';
 import { exchangeInvitationCode } from './collaborators.js';
 import { LaunchModal } from './components/LaunchModal.js';
 import { SettingsWorkspace } from './components/SettingsWorkspace.js';
+import { HomeProviderSetup } from './components/ProviderSetupPanel.js';
 import { StartWorkModal, type StartWorkDraft } from './components/StartWorkModal.js';
 import { deriveNeedsYou, type NeedsYouItem } from './needsYou.js';
 import {
@@ -832,6 +833,7 @@ export function App() {
               onOpenWork={() => navigateToView('work')}
               onOpenWorkItem={openWorkItem}
               onResolveRunAttention={resolveRunAttention}
+              providerSetup={<HomeProviderSetup />}
               repositoryCount={repos.length}
               runs={runs}
               sources={{ work: combineSourceStates(runsState, sessionsState), repositories: reposState }}

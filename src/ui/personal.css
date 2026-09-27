@@ -74,3 +74,36 @@
   .personal-task-layout { grid-template-columns: 1fr; }
   .personal-grants li { flex-wrap: wrap; }
 }
+
+/* Issue #85: provider setup (Settings › Providers and, until a provider is ready, Home). */
+.provider-setup { display: flex; flex-direction: column; gap: 12px; }
+.provider-setup .field-hint-block { margin: 0; }
+.provider-list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.provider-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-panel); }
+.provider-card header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.provider-card h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.provider-card h4 { margin: 0 0 4px; font-size: 12.5px; font-weight: 600; }
+.provider-tag { color: var(--text-muted); font-size: 11px; }
+.provider-status { margin-left: auto; padding: 1px 8px; border-radius: 999px; background: var(--status-neutral-bg); color: var(--text-secondary); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.provider-status.is-ready { background: var(--status-working-bg); color: var(--status-working); }
+.provider-status.is-attention { background: var(--status-waiting-bg); color: var(--status-waiting); }
+.provider-status.is-running { background: var(--status-running-bg); color: var(--status-running); }
+.provider-detail, .provider-facts, .provider-note { margin: 0; font-size: 12.5px; }
+.provider-facts, .provider-note { color: var(--text-muted); }
+.provider-error { margin: 0; padding: 8px 10px; border: 1px solid var(--status-error); border-radius: var(--radius-sm); background: var(--status-error-bg); color: var(--text-primary); font-size: 12.5px; }
+.provider-allowance { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.provider-allowance li { display: grid; grid-template-columns: minmax(120px, 180px) minmax(60px, 1fr) auto; align-items: center; gap: 10px; color: var(--text-secondary); }
+.provider-meter { height: 6px; overflow: hidden; border-radius: 999px; background: var(--status-neutral-bg); }
+.provider-meter span { display: block; height: 100%; background: var(--status-running); }
+.provider-progress, .provider-repair { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-input); }
+.provider-progress p { margin: 0; font-size: 12.5px; }
+.provider-repair ol { margin: 0; padding-left: 18px; font-size: 12.5px; }
+.provider-repair li + li { margin-top: 3px; }
+.provider-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-code { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.provider-code-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-code-row input { min-width: 0; flex: 1 1 220px; }
+@media (max-width: 560px) {
+  .provider-allowance li { grid-template-columns: 1fr; gap: 3px; }
+  .provider-status { margin-left: 0; }
+}

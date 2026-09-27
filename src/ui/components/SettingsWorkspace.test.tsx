@@ -97,14 +97,16 @@ describe('SettingsWorkspace', () => {
     expect(backCount).toBe(1);
   });
 
-  it('switches between General, Profiles, and Collaborators tabs, hiding the inactive panels', async () => {
+  it('switches between General, Providers, Profiles, and Collaborators tabs, hiding the inactive panels', async () => {
     vi.stubGlobal('fetch', baseFetchMock());
     const host = await mount();
 
     const general = host.querySelector('#settings-tabpanel-general') as HTMLElement;
     const profiles = host.querySelector('#settings-tabpanel-profiles') as HTMLElement;
     const collaborators = host.querySelector('#settings-tabpanel-collaborators') as HTMLElement;
+    const providers = host.querySelector('#settings-tabpanel-providers') as HTMLElement;
     expect(general.hidden).toBe(false);
+    expect(providers.hidden).toBe(true);
     expect(profiles.hidden).toBe(true);
     expect(collaborators.hidden).toBe(true);
 

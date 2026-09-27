@@ -36,6 +36,8 @@ export interface HomeViewProps {
   onOpenWork: () => void;
   onOpenSettings: () => void;
   onResolveRunAttention: (runId: string, attentionId: string, decision: AttentionDecisionInput) => Promise<void> | void;
+  /** Issue #85: provider setup, shown above Ask while no provider is ready. */
+  providerSetup?: ReactNode;
 }
 
 /** Most pressing first; archived work stays in Work. */
@@ -181,12 +183,14 @@ function SourceNote({ state, hasItems, loading, unreachable, stale, empty }: {
 
 export function HomeView({
   needsYou, workItems, runs, sources, repositoryCount,
-  onAsk, onOpenNeedsYou, onOpenWorkItem, onOpenWork, onOpenSettings, onResolveRunAttention,
+  onAsk, onOpenNeedsYou, onOpenWorkItem, onOpenWork, onOpenSettings, onResolveRunAttention, providerSetup,
 }: HomeViewProps) {
   const tasks = homeTasks(workItems);
   return (
     <section className="workspace-scroll home-view">
       <div className="view-heading home-heading"><h1>Home</h1></div>
+
+      {providerSetup}
 
       <AskSection onAsk={onAsk} onOpenSettings={onOpenSettings} repositoriesState={sources.repositories} repositoryCount={repositoryCount} />
 
