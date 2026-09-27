@@ -175,18 +175,23 @@ const RECEIPT_LABEL: Record<FilingReceiptState, string> = {
 
 function filingHeadline(filing: FilingApprovalView): string {
   const planned = filing.receipts.filter((receipt) => receipt.state !== 'skipped');
-  const moved = planned.filter((receipt) => receipt.state === 'moved').length;
+  const moved = planned.filter((receipt) => receipt.state === 'moved' && receipt.undoState !== 'undone').length;
+  const restored = planned.filter((receipt) => receipt.undoState === 'undone').length;
+  const uncertain = planned.filter((receipt) => receipt.state === 'uncertain').length;
   if (filing.state === 'approved' || filing.state === 'executing') return `Moving… ${moved} of ${planned.length} moved so far.`;
   if (filing.state === 'expired') return 'The approval expired before the moves started. Nothing was moved.';
-  const notMoved = planned.length - moved;
-  return `Moved ${moved} of ${planned.length} PDF${planned.length === 1 ? '' : 's'}${notMoved ? ` · ${notMoved} not moved` : ''}.`;
+  const notMoved = planned.length - moved - restored - uncertain;
+  return `Moved ${moved} of ${planned.length} PDF${planned.length === 1 ? '' : 's'}`
+    + `${restored ? ` · ${restored} restored` : ''}${notMoved ? ` · ${notMoved} not moved` : ''}`
+    + `${uncertain ? ` · ${uncertain} uncertain` : ''}.`;
 }
 
 /** Rendered only from the typed plan entries, digests, and receipts; the agent's own words never appear here. */
-function FilingProposal({ result, filing, onApprove }: {
+function FilingProposal({ result, filing, onApprove, onFilingAction }: {
   result: FilingProposalResult;
   filing?: FilingApprovalView;
   onApprove: (overwrite: string[]) => Promise<void>;
+  onFilingAction: (action: 'retry' | 'undo') => Promise<void>;
 }) {
   const [replace, setReplace] = useState<ReadonlySet<string>>(new Set());
   const [approving, setApproving] = useState(false);
@@ -254,6 +259,7 @@ function FilingProposal({ result, filing, onApprove }: {
                         <>
                           <span className={`personal-receipt-state is-${receipt.state}`}>{RECEIPT_LABEL[receipt.state]}</span>
                           {receipt.reason && <small>{receipt.reason}</small>}
+                          {receipt.undoState && <small>{receipt.undoState === 'undone' ? 'Restored to original name' : receipt.undoState === 'undoing' ? 'Restoring…' : `Undo conflict: ${receipt.undoReason}`}</small>}
                         </>
                       ) : '—'}
                     </td>
@@ -275,10 +281,13 @@ function FilingProposal({ result, filing, onApprove }: {
         </ul>
       )}
       {filing ? (
-        <p className="personal-note">
-          Approved by {filing.approvedBy.displayName} on {filing.approvedBy.device} at {time(filing.approvedAt)} for plan{' '}
-          <code title={filing.planDigest}>{filing.planDigest.slice(0, 12)}</code>. A plan is carried out once; ask for a new proposal to file anything left.
-        </p>
+        <div className="personal-approve">
+          <p className="personal-note">Approved by {filing.approvedBy.displayName} on {filing.approvedBy.device} at {time(filing.approvedAt)} for plan <code title={filing.planDigest}>{filing.planDigest.slice(0, 12)}</code>.</p>
+          {filing.state === 'finished' && <div className="personal-pdf-actions">
+            {filing.receipts.some((receipt) => receipt.state === 'failed') && <button className="button" onClick={() => void onFilingAction('retry')} type="button">Retry files not moved</button>}
+            {filing.receipts.some((receipt) => receipt.state === 'moved' && receipt.undoState !== 'undone') && <button className="button" onClick={() => void onFilingAction('undo')} type="button">Undo recorded moves</button>}
+          </div>}
+        </div>
       ) : (
         <div className="personal-approve">
           <button className="button button-primary" disabled={approving || moving === 0} onClick={() => void approve()} type="button">
@@ -295,10 +304,11 @@ function FilingProposal({ result, filing, onApprove }: {
   );
 }
 
-function TaskDetail({ task, onRetry, onApprove }: {
+function TaskDetail({ task, onRetry, onApprove, onFilingAction }: {
   task: PersonalTaskView;
   onRetry: () => void;
   onApprove: (overwrite: string[]) => Promise<void>;
+  onFilingAction: (action: 'retry' | 'undo') => Promise<void>;
 }) {
   return (
     <article aria-labelledby={`personal-task-${task.id}`} className="personal-task-detail">
@@ -322,7 +332,7 @@ function TaskDetail({ task, onRetry, onApprove }: {
       )}
 
       {task.result && (isFilingProposal(task.result)
-        ? <FilingProposal key={task.id} onApprove={onApprove} result={task.result} {...(task.filing ? { filing: task.filing } : {})} />
+        ? <FilingProposal key={task.id} onApprove={onApprove} onFilingAction={onFilingAction} result={task.result} {...(task.filing ? { filing: task.filing } : {})} />
         : <InventoryResult result={task.result} />)}
 
       <section aria-label="Activity">
@@ -413,6 +423,11 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
     await refresh();
   });
 
+  const filingAction = (task: PersonalTaskView, action: 'retry' | 'undo') => run(async () => {
+    await post(`/api/personal/tasks/${encodeURIComponent(task.id)}/filing/${action}`, { idempotencyKey: crypto.randomUUID() });
+    await refresh();
+  });
+
   return (
     <section className="workspace-scroll personal-view">
       <div className="view-heading">
@@ -486,7 +501,7 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
               ))}
             </ul>
             {selectedTask && (
-              <TaskDetail onApprove={(overwrite) => approve(selectedTask, overwrite)} onRetry={() => void retry(selectedTask)} task={selectedTask} />
+              <TaskDetail onApprove={(overwrite) => approve(selectedTask, overwrite)} onFilingAction={(action) => filingAction(selectedTask, action)} onRetry={() => void retry(selectedTask)} task={selectedTask} />
             )}
           </div>
         )}

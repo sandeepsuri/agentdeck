@@ -309,6 +309,8 @@ describe('everyone else', () => {
       { method: 'POST' as const, url: '/api/personal/grants/pick' },
       { method: 'POST' as const, url: `/api/personal/grants/${grant.id}/revoke` },
       { method: 'POST' as const, url: `/api/personal/tasks/${id}/filing/approve`, payload: { planDigest: 'x' } },
+      { method: 'POST' as const, url: `/api/personal/tasks/${id}/filing/retry`, payload: { idempotencyKey: 'retry-test-001' } },
+      { method: 'POST' as const, url: `/api/personal/tasks/${id}/filing/undo`, payload: { idempotencyKey: 'undo-test-001' } },
     ];
     for (const request of requests) {
       const response = await app.inject({ ...request, headers: remote });

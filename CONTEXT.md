@@ -117,7 +117,7 @@ A Personal task whose result is a reviewable plan to rename and file granted PDF
 _Avoid_: Filing plan approval, move job
 
 **Filing approval**:
-The owner's approval of one exact Filing proposal, bound to its plan digest, the approving owner, an expiry, and a single execution, with an explicit choice for each target it would replace. AgentDeck's own code, never an agent, then moves each file after re-checking the grant, links, and content on disk, and keeps a durable receipt per file: moved, left in place, not moved, or uncertain. Approving again returns the approval on record; nothing is ever moved twice, even across a restart.
+The owner's approval of one exact Filing proposal, bound to its plan digest, the approving owner, an expiry, and a single initial execution, with an explicit choice for each target it would replace. AgentDeck's own code, never an agent, then moves each file after re-checking the grant, links, and content on disk, and keeps a durable receipt per file: moved, left in place, not moved, or uncertain. Approving again returns the approval on record. A later owner-requested retry uses a durable idempotency key and only receipts recorded as not moved; a settled move is never repeated, even across a restart. Undo restores a recorded move only when the original name is free and the destination still has the recorded file identity.
 _Avoid_: Move job, batch rename, filing run
 
 **Publication**:

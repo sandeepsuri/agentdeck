@@ -26,7 +26,8 @@ import { DEFAULT_MAX_PDF_BYTES } from './pdf-inventory.js';
 import type { FilingReceipt } from './types.js';
 
 /** What one move needs: the receipt's source, digests, target, and the owner's replacement decision. */
-export type FilingMoveItem = Pick<FilingReceipt, 'source' | 'sourceSha256' | 'target' | 'overwrite' | 'targetSha256'>;
+export type FilingMoveItem = Pick<FilingReceipt, 'source' | 'sourceSha256' | 'target' | 'overwrite' | 'targetSha256'>
+  & Partial<Pick<FilingReceipt, 'movedDev' | 'movedIno' | 'replaced'>>;
 
 export type FilingMoveOutcome =
   | { state: 'moved'; replaced: boolean }
@@ -37,7 +38,7 @@ export type FilingMoveOutcome =
 export interface MoveOptions {
   maxBytes?: number;
   /** Called once, after every check passes and before the first change on disk; the caller persists its intent here. */
-  beforeEffect?: () => void;
+  beforeEffect?: (source: FileFingerprint) => void;
 }
 
 /** Re-validates a target exactly as the plan builder did, refusing anything it would not have produced. */
@@ -106,7 +107,7 @@ export function moveGrantedPdf(root: string, item: FilingMoveItem, options: Move
       if (fingerprintGrantedFile(root, item.target, maxBytes).sha256 !== item.targetSha256) {
         return { state: 'failed', reason: 'The file at this name has changed since you approved replacing it; nothing was replaced.' };
       }
-      options.beforeEffect?.();
+      options.beforeEffect?.(source);
       touched = true;
       fs.renameSync(sourcePath, targetPath);
       if (!sameFile(fs.lstatSync(targetPath), source)) {
@@ -119,7 +120,7 @@ export function moveGrantedPdf(root: string, item: FilingMoveItem, options: Move
       // rename(2) between two links to one file does nothing, so never claim it moved.
       return { state: 'failed', reason: 'The file at this name is another link to this same file; nothing was changed.' };
     }
-    options.beforeEffect?.();
+    options.beforeEffect?.(source);
     touched = true;
     if (existing) {
       // The same directory entry under a name that differs only by case or Unicode form.
@@ -191,6 +192,12 @@ export function reconcileMove(root: string, item: FilingMoveItem): ReconciledMov
   }
   const source = observe(root, item.source);
   const target = observe(root, item.target);
+  const recorded = (file: Observed) => typeof file === 'object'
+    && (item.movedDev === undefined || file.dev === item.movedDev)
+    && (item.movedIno === undefined || file.ino === item.movedIno);
+  if ((typeof source === 'object' && !recorded(source)) || (typeof target === 'object' && target.sha256 === item.sourceSha256 && !recorded(target))) {
+    return uncertain;
+  }
   if (typeof source === 'object' && typeof target === 'object' && sameFile(source, target) && source.sha256 === item.sourceSha256) {
     if (source.nlink === 1) return { state: 'moved' };
     if (source.nlink !== 2) return uncertain;
@@ -206,4 +213,49 @@ export function reconcileMove(root: string, item: FilingMoveItem): ReconciledMov
     && (target === 'missing' || (item.overwrite && typeof target === 'object' && target.sha256 === item.targetSha256));
   if (untouched) return { state: 'failed', reason: 'AgentDeck stopped before this file was moved; it was left where it was.' };
   return uncertain;
+}
+
+/** Restores a recorded move only while the exact moved inode remains at its target. */
+export function undoGrantedPdf(root: string, item: FilingMoveItem, beforeEffect: () => void): ReconciledMove {
+  if (item.replaced ?? item.overwrite) return { state: 'failed', reason: 'This move replaced a previous file. Its original destination cannot be restored automatically.' };
+  if (item.movedDev === undefined || item.movedIno === undefined) {
+    return { state: 'failed', reason: 'This older move has no recorded file identity, so undo cannot prove the destination is still the moved file.' };
+  }
+  try {
+    assertGrantRoot(root);
+    checkTarget(item.target);
+    const moved = fingerprintGrantedFile(root, item.target, DEFAULT_MAX_PDF_BYTES);
+    if (moved.nlink !== 1) return { state: 'failed', reason: 'The destination has another hard link, so undo cannot prove it is safe to restore.' };
+    if (moved.sha256 !== item.sourceSha256 || moved.dev !== item.movedDev || moved.ino !== item.movedIno) {
+      return { state: 'failed', reason: 'The destination changed after filing; nothing was overwritten.' };
+    }
+    const source = observe(root, item.source);
+    if (source !== 'missing') return { state: 'failed', reason: 'The original name is occupied or cannot be checked; nothing was overwritten.' };
+    const outcome = moveGrantedPdf(root, {
+      source: item.target, sourceSha256: item.sourceSha256, target: item.source, overwrite: false,
+    }, { beforeEffect });
+    return outcome.state === 'moved' ? { state: 'moved' } : outcome;
+  } catch (error) {
+    return { state: 'failed', reason: error instanceof Error ? error.message : 'The original and destination names could not be checked.' };
+  }
+}
+
+/** A crash during undo is settled from both names and the recorded inode. */
+export function reconcileUndo(root: string, item: FilingMoveItem): ReconciledMove {
+  if (item.movedDev === undefined || item.movedIno === undefined) return { state: 'uncertain', reason: 'The file identity was not recorded before undo.' };
+  const source = observe(root, item.source);
+  const target = observe(root, item.target);
+  const matches = (file: Observed) => typeof file === 'object' && file.sha256 === item.sourceSha256
+    && file.dev === item.movedDev && file.ino === item.movedIno;
+  if (matches(source) && target === 'missing') return { state: 'moved' };
+  if (source === 'missing' && matches(target)) return { state: 'failed', reason: 'Undo stopped before the file was restored; the destination is unchanged.' };
+  if (matches(source) && matches(target)) {
+    try {
+      assertGrantRoot(root);
+      if (!matches(observe(root, item.source)) || !matches(observe(root, item.target))) return { state: 'uncertain', reason: 'One of the names changed during undo recovery; check both names.' };
+      fs.unlinkSync(path.join(root, ...item.target.split('/')));
+      return { state: 'moved' };
+    } catch { /* leave both names for inspection */ }
+  }
+  return { state: 'uncertain', reason: 'Undo stopped with conflicting files. Check both names; nothing was overwritten.' };
 }

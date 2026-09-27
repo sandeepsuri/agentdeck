@@ -121,6 +121,8 @@ Personal tasks work on your own files, not on a repository. Open **Personal task
 
 AgentDeck reads the files itself. No agent sees them. Choose **Revoke access** to stop all further reads of a folder, including by a task that is already running. A task that fails, for example because the folder was moved, can be retried under the same task. If AgentDeck stops mid-task, the task runs again when AgentDeck restarts, and no result is shown until a run completes.
 
+For filing, choose **Propose filing** after selecting PDFs. Review the proposed names, folders, and replacement warnings. Approve the exact plan to let AgentDeck move files. Each file then shows whether it moved or stayed in place. After a partial failure, choose **Retry files not moved**; it checks the original plan and the files again, including after a restart. Choose **Undo recorded moves** to restore safe moves. If the old name is occupied, the destination changed, or a move replaced a previous file, the receipt explains the conflict and leaves both names untouched.
+
 ## Launching a managed session
 
 Quick mode in **Start work** covers most sessions. For full control:

@@ -9,8 +9,9 @@ import type { RunActorDevice, RunPrincipal } from '../work-engine/types.js';
  * records the rules it ran under. 2: a filing proposal may let a confined
  * agent read granted PDFs through the broker (issue #81). 3: the owner may
  * approve a proposal, and AgentDeck then moves the approved files (issue #82).
+ * 4: keyed retry and safe undo of recorded filing moves (issue #83).
  */
-export const PERSONAL_TASK_POLICY_VERSION = 'personal-files/3';
+export const PERSONAL_TASK_POLICY_VERSION = 'personal-files/4';
 
 /** The only workspace personal tasks live in today: the owner's own, never a Repository. */
 export const OWNER_WORKSPACE = 'owner';
@@ -63,7 +64,11 @@ export type PersonalActivityKind =
   | 'filing-approved'
   | 'file-moved'
   | 'move-failed'
-  | 'filing-finished';
+  | 'filing-finished'
+  | 'filing-retry-requested'
+  | 'filing-undo-requested'
+  | 'file-restored'
+  | 'undo-conflict';
 
 export interface PersonalTaskActivity {
   readonly sequence: number;
@@ -181,6 +186,12 @@ export interface FilingReceipt {
   readonly state: FilingReceiptState;
   readonly reason?: string;
   readonly updatedAt: string;
+  readonly movedDev?: number;
+  readonly movedIno?: number;
+  /** Whether this move actually displaced a target, which can differ from approval to replace. */
+  readonly replaced?: boolean;
+  readonly undoState?: 'undoing' | 'undone' | 'conflict';
+  readonly undoReason?: string;
 }
 
 export type FilingApprovalState = 'approved' | 'executing' | 'finished' | 'expired';
@@ -261,6 +272,8 @@ export interface FilingReceiptView {
   state: FilingReceiptState;
   reason?: string;
   updatedAt: string;
+  undoState?: 'undoing' | 'undone' | 'conflict';
+  undoReason?: string;
 }
 
 export interface FilingApprovalView {

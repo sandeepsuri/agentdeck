@@ -141,6 +141,14 @@ describe('reconcileMove', () => {
     expect(reconcileMove(root, item())).toEqual({ state: 'moved' });
   });
 
+  it('does not reconcile a matching-content replacement as the recorded move', () => {
+    const stat = fs.statSync(at('power.pdf'));
+    const recorded = item({ movedDev: stat.dev, movedIno: stat.ino });
+    fs.writeFileSync(at('Bills/Power 2026-03.pdf'), POWER);
+    fs.rmSync(at('power.pdf'));
+    expect(reconcileMove(root, recorded).state).toBe('uncertain');
+  });
+
   it('finishes a move interrupted between link and unlink', () => {
     fs.linkSync(at('power.pdf'), at('Bills/Power 2026-03.pdf'));
     expect(reconcileMove(root, item())).toEqual({ state: 'moved' });

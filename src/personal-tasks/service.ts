@@ -15,13 +15,13 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { NewFilingApproval, PersonalTaskRepository } from '../store/personal-tasks.js';
+import type { FilingOperation, NewFilingApproval, PersonalTaskRepository } from '../store/personal-tasks.js';
 import type { FilingProvider, FilingProviderAccess } from './confined-provider.js';
 import { FILING_BROKER_MCP_TOOLS, startFilingBroker, type BrokerDocument, type FilingBrokerEvent } from './filing-broker.js';
-import { moveGrantedPdf, reconcileMove } from './filing-execution.js';
+import { moveGrantedPdf, reconcileMove, reconcileUndo, undoGrantedPdf } from './filing-execution.js';
 import { buildFilingPlan, filingPlanDigest, type FilingSource } from './filing-plan.js';
 import {
-  assertGrantRoot, canonicalGrantRoot, GrantPathError, listGrantedPdfs, listGrantFolders, openGrantedPdf, type GrantedPdfListing,
+  assertGrantRoot, canonicalGrantRoot, fingerprintGrantedFile, GrantPathError, listGrantedPdfs, listGrantFolders, openGrantedPdf, type GrantedPdfListing,
 } from './folder-grant.js';
 import { inspectPdf, PdfTooLargeError, readGrantedPdf, readPdfFacts, type InspectLimits } from './pdf-inventory.js';
 import { extractPdfText } from './pdf-text.js';
@@ -242,6 +242,32 @@ export class PersonalTaskService {
     for (const approval of this.repository.listUnsettledFilingApprovals()) {
       if (approval.state === 'approved') this.scheduleFilingExecution(approval.taskId);
       else this.reconcileFiling(approval);
+    }
+    for (const operation of this.repository.listPendingFilingOperations()) {
+      const approval = this.repository.getFilingApprovalById(operation.approvalId);
+      if (!approval) continue;
+      const grant = this.repository.getGrant(approval.grantId);
+      for (const receipt of approval.receipts.filter((entry) => operation.sequences.includes(entry.sequence))) {
+        if (!grant || grant.revokedAt) {
+          if (operation.kind === 'retry' && receipt.state === 'moving') {
+            this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'moving', 'uncertain', this.at(), 'Access was revoked before the interrupted move could be checked.');
+          }
+          if (operation.kind === 'undo' && receipt.undoState === 'undoing') {
+            this.repository.setUndo(approval.id, receipt.sequence, 'undoing', 'conflict', this.at(), 'Access was revoked before the interrupted undo could be checked.');
+          }
+          continue;
+        }
+        if (operation.kind === 'retry' && receipt.state === 'moving') {
+          const result = reconcileMove(grant.rootPath, receipt);
+          this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'moving', result.state, this.at(), 'reason' in result ? result.reason : undefined);
+        }
+        if (operation.kind === 'undo' && receipt.undoState === 'undoing') {
+          const result = reconcileUndo(grant.rootPath, receipt);
+          this.repository.setUndo(approval.id, receipt.sequence, 'undoing', result.state === 'moved' ? 'undone' : 'conflict', this.at(), 'reason' in result ? result.reason : undefined);
+        }
+      }
+      this.repository.finishFilingOperation(operation.id, this.at());
+      this.repository.appendActivity(approval.taskId, { at: this.at(), kind: 'interrupted', message: `${operation.kind === 'retry' ? 'Retry' : 'Undo'} was interrupted; check each receipt before another action.` });
     }
   }
 
@@ -590,8 +616,8 @@ export class PersonalTaskService {
         let from: 'pending' | 'moving' = 'pending';
         const outcome = moveGrantedPdf(grant.rootPath, receipt, {
           ...(this.options.maxPdfBytes !== undefined ? { maxBytes: this.options.maxPdfBytes } : {}),
-          beforeEffect: () => {
-            if (!this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'pending', 'moving', this.at())) {
+          beforeEffect: (source) => {
+            if (!this.repository.recordMoveIdentity(approval.id, receipt.sequence, 'pending', this.at(), source.dev, source.ino)) {
               throw new Error('The receipt was already settled.');
             }
             from = 'moving';
@@ -599,7 +625,7 @@ export class PersonalTaskService {
         });
         if (outcome.state === 'moved') {
           const reason = outcome.replaced ? 'Replaced the previous file at this name, as you approved.' : undefined;
-          this.repository.settleFilingReceipt(approval.id, receipt.sequence, from, 'moved', this.at(), reason);
+          this.repository.settleFilingReceipt(approval.id, receipt.sequence, from, 'moved', this.at(), reason, outcome.replaced);
           this.repository.appendActivity(taskId, {
             at: this.at(), kind: 'file-moved', message: `Moved ${path.basename(receipt.source)} → ${receipt.target}.`, path: receipt.source,
           });
@@ -661,6 +687,78 @@ export class PersonalTaskService {
         : { state: 'uncertain' as const, reason: 'The move was interrupted, and access to the folder has since been revoked.' };
       this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'moving', outcome.state, this.at(), 'reason' in outcome ? outcome.reason : undefined);
     }
+  }
+
+  /** Durable owner action. Replaying the same key returns its recorded outcome. */
+  filingAction(taskId: string, kind: FilingOperation['kind'], key: unknown): PersonalTaskView {
+    if (typeof key !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(key)) {
+      throw new PersonalTaskError('invalid-input', 'An idempotency key of 8–100 plain characters is required.');
+    }
+    const approval = this.repository.getFilingApproval(taskId);
+    if (!approval) throw new PersonalTaskError('not-found', 'No filing approval for this task.');
+    const old = this.repository.getFilingOperation(approval.id, key);
+    if (old) {
+      if (old.kind !== kind) throw new PersonalTaskError('invalid-input', 'This idempotency key was used for another action.');
+      return this.get(taskId)!;
+    }
+    if (approval.state !== 'finished') throw new PersonalTaskError('invalid-state', 'Wait for filing to finish before retry or undo.');
+    this.activeGrant(approval.grantId);
+    const eligible = approval.receipts.filter((receipt) => kind === 'retry'
+      ? receipt.state === 'failed' && receipt.undoState === undefined
+      : receipt.state === 'moved' && receipt.undoState !== 'undone');
+    if (eligible.length === 0) throw new PersonalTaskError('invalid-state', `There are no files to ${kind}.`);
+    const operation = this.repository.createFilingOperation(approval.id, key, kind, eligible.map((receipt) => receipt.sequence), this.at(), {
+      at: this.at(), kind: kind === 'retry' ? 'filing-retry-requested' : 'filing-undo-requested',
+      message: `${kind === 'retry' ? 'Retry' : 'Undo'} requested for ${plural(eligible.length, 'PDF')}.`,
+    });
+    this.executeFilingOperation(operation, approval);
+    return this.get(taskId)!;
+  }
+
+  private executeFilingOperation(operation: FilingOperation, approval: FilingApproval): void {
+    for (const receipt of approval.receipts.filter((entry) => operation.sequences.includes(entry.sequence))) {
+      const grant = this.repository.getGrant(approval.grantId);
+      if (!grant || grant.revokedAt) {
+        const reason = 'Access to the folder was revoked before this action; no further files were changed.';
+        if (operation.kind === 'retry' && receipt.state === 'failed') {
+          this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'failed', 'failed', this.at(), reason);
+        }
+        if (operation.kind === 'undo' && receipt.state === 'moved' && receipt.undoState !== 'undone') {
+          this.repository.setUndo(approval.id, receipt.sequence, receipt.undoState ?? null, 'conflict', this.at(), reason);
+        }
+        continue;
+      }
+      if (operation.kind === 'retry' && receipt.state === 'failed') {
+        let from: 'failed' | 'moving' = 'failed';
+        const result = moveGrantedPdf(grant.rootPath, receipt, {
+          ...(this.options.maxPdfBytes !== undefined ? { maxBytes: this.options.maxPdfBytes } : {}),
+          beforeEffect: (source) => {
+            if (!this.repository.recordMoveIdentity(approval.id, receipt.sequence, 'failed', this.at(), source.dev, source.ino)) throw new Error('Receipt changed.');
+            from = 'moving';
+          },
+        });
+        const reason = result.state === 'moved' && result.replaced ? 'Replaced the previous file at this name, as you approved.'
+          : 'reason' in result ? result.reason : undefined;
+        this.repository.settleFilingReceipt(approval.id, receipt.sequence, from, result.state, this.at(), reason,
+          result.state === 'moved' ? result.replaced : undefined);
+        this.repository.appendActivity(approval.taskId, { at: this.at(), kind: result.state === 'moved' ? 'file-moved' : 'move-failed',
+          message: `${result.state === 'moved' ? 'Moved' : 'Did not move'} ${receipt.source} on retry${'reason' in result ? `: ${result.reason}` : '.'}`, path: receipt.source });
+      } else if (operation.kind === 'undo' && receipt.state === 'moved' && receipt.undoState !== 'undone') {
+        let started = false;
+        const result = undoGrantedPdf(grant.rootPath, receipt, () => {
+          const file = fingerprintGrantedFile(grant.rootPath, receipt.target, this.options.maxPdfBytes ?? 50 * 1024 * 1024);
+          if (file.dev !== receipt.movedDev || file.ino !== receipt.movedIno || file.nlink !== 1) throw new Error('The destination changed or gained another link just before undo.');
+          if (!this.repository.setUndo(approval.id, receipt.sequence, receipt.undoState ?? null, 'undoing', this.at())) throw new Error('Undo receipt changed.');
+          started = true;
+        });
+        this.repository.setUndo(approval.id, receipt.sequence, started ? 'undoing' : receipt.undoState ?? null,
+          result.state === 'moved' ? 'undone' : 'conflict', this.at(), 'reason' in result ? result.reason : undefined);
+        this.repository.appendActivity(approval.taskId, { at: this.at(), kind: result.state === 'moved' ? 'file-restored' : 'undo-conflict',
+          message: result.state === 'moved' ? `Restored ${receipt.source} from ${receipt.target}.` : `Could not restore ${receipt.source}: ${'reason' in result ? result.reason : 'Check both names.'}`,
+          path: receipt.source });
+      }
+    }
+    this.repository.finishFilingOperation(operation.id, this.at());
   }
 
   // -- projections --
@@ -726,6 +824,8 @@ export class PersonalTaskService {
           state: receipt.state,
           ...(receipt.reason ? { reason: receipt.reason } : {}),
           updatedAt: receipt.updatedAt,
+          ...(receipt.undoState ? { undoState: receipt.undoState } : {}),
+          ...(receipt.undoReason ? { undoReason: receipt.undoReason } : {}),
         })),
       },
     };

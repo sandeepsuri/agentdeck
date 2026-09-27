@@ -24,7 +24,10 @@ interface ApprovalRow {
 interface ReceiptRow {
   sequence: number; source: string; source_sha256: string; target: string; overwrite: number; target_sha256: string | null;
   state: string; reason: string | null; updated_at: string;
+  moved_dev: number | null; moved_ino: number | null; replaced: number | null; undo_state: string | null; undo_reason: string | null;
 }
+export interface FilingOperation { id: string; approvalId: string; kind: 'retry' | 'undo'; sequences: number[]; state: 'pending' | 'finished' }
+interface OperationRow { id: string; approval_id: string; kind: 'retry' | 'undo'; sequences: string; state: 'pending' | 'finished' }
 
 export type NewPersonalActivity = Omit<PersonalTaskActivity, 'sequence'>;
 
@@ -87,6 +90,11 @@ function rowToReceipt(r: ReceiptRow): FilingReceipt {
     state: r.state as FilingReceiptState,
     ...(r.reason !== null ? { reason: r.reason } : {}),
     updatedAt: r.updated_at,
+    ...(r.moved_dev !== null ? { movedDev: r.moved_dev } : {}),
+    ...(r.moved_ino !== null ? { movedIno: r.moved_ino } : {}),
+    ...(r.replaced !== null ? { replaced: r.replaced === 1 } : {}),
+    ...(r.undo_state !== null ? { undoState: r.undo_state as FilingReceipt['undoState'] } : {}),
+    ...(r.undo_reason !== null ? { undoReason: r.undo_reason } : {}),
   };
 }
 
@@ -251,6 +259,11 @@ export class PersonalTaskRepository {
     return row && this.rowToApproval(row);
   }
 
+  getFilingApprovalById(id: string): FilingApproval | undefined {
+    const row = this.db.prepare('SELECT * FROM personal_filing_approvals WHERE id = ?').get(id) as ApprovalRow | undefined;
+    return row && this.rowToApproval(row);
+  }
+
   /** Approvals whose execution has not finished: not yet started, or under way when the process stopped. */
   listUnsettledFilingApprovals(): FilingApproval[] {
     return (this.db.prepare(
@@ -267,11 +280,56 @@ export class PersonalTaskRepository {
 
   /** Moves one receipt on only from the state the caller expects. False if it had already moved on. */
   settleFilingReceipt(
-    approvalId: string, sequence: number, from: FilingReceiptState, to: FilingReceiptState, at: string, reason?: string,
+    approvalId: string, sequence: number, from: FilingReceiptState, to: FilingReceiptState, at: string, reason?: string, replaced?: boolean,
   ): boolean {
     return this.db.prepare(
-      'UPDATE personal_filing_receipts SET state = ?, reason = ?, updated_at = ? WHERE approval_id = ? AND sequence = ? AND state = ?',
+      'UPDATE personal_filing_receipts SET state = ?, reason = ?, replaced = COALESCE(?, replaced), updated_at = ? WHERE approval_id = ? AND sequence = ? AND state = ?',
+    ).run(to, reason ?? null, replaced === undefined ? null : replaced ? 1 : 0, at, approvalId, sequence, from).changes > 0;
+  }
+
+  recordMoveIdentity(approvalId: string, sequence: number, from: FilingReceiptState, at: string, dev: number, ino: number): boolean {
+    return this.db.prepare(
+      'UPDATE personal_filing_receipts SET state = ?, moved_dev = ?, moved_ino = ?, updated_at = ? WHERE approval_id = ? AND sequence = ? AND state = ?',
+    ).run('moving', dev, ino, at, approvalId, sequence, from).changes > 0;
+  }
+
+  setUndo(approvalId: string, sequence: number, from: string | null, to: string, at: string, reason?: string): boolean {
+    return this.db.prepare(
+      'UPDATE personal_filing_receipts SET undo_state = ?, undo_reason = ?, updated_at = ? WHERE approval_id = ? AND sequence = ? AND undo_state IS ?',
     ).run(to, reason ?? null, at, approvalId, sequence, from).changes > 0;
+  }
+
+  createFilingOperation(approvalId: string, key: string, kind: FilingOperation['kind'], sequences: number[], at: string, activity: NewPersonalActivity): FilingOperation {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM personal_filing_operations WHERE approval_id = ? AND idempotency_key = ?')
+        .get(approvalId, key) as OperationRow | undefined;
+      if (existing) return this.rowToOperation(existing);
+      const id = `${approvalId}:${key}`;
+      this.db.prepare('INSERT INTO personal_filing_operations (id, approval_id, kind, idempotency_key, sequences, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, approvalId, kind, key, JSON.stringify(sequences), 'pending', at);
+      const approval = this.db.prepare('SELECT task_id FROM personal_filing_approvals WHERE id = ?').get(approvalId) as { task_id: string };
+      this.insertActivity(approval.task_id, activity);
+      return { id, approvalId, kind, sequences, state: 'pending' as const };
+    })();
+  }
+
+  getFilingOperation(approvalId: string, key: string): FilingOperation | undefined {
+    const row = this.db.prepare('SELECT * FROM personal_filing_operations WHERE approval_id = ? AND idempotency_key = ?')
+      .get(approvalId, key) as OperationRow | undefined;
+    return row && this.rowToOperation(row);
+  }
+
+  listPendingFilingOperations(): FilingOperation[] {
+    return (this.db.prepare("SELECT * FROM personal_filing_operations WHERE state = 'pending' ORDER BY created_at, id").all() as OperationRow[])
+      .map((row) => this.rowToOperation(row));
+  }
+
+  finishFilingOperation(id: string, at: string): void {
+    this.db.prepare("UPDATE personal_filing_operations SET state = 'finished', finished_at = ? WHERE id = ? AND state = 'pending'").run(at, id);
+  }
+
+  private rowToOperation(row: OperationRow): FilingOperation {
+    return { id: row.id, approvalId: row.approval_id, kind: row.kind, sequences: JSON.parse(row.sequences) as number[], state: row.state };
   }
 
   /** Ends an approval as finished or expired; any receipt still pending is settled with `pendingReason`. */

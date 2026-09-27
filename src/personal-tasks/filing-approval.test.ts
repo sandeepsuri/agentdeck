@@ -267,6 +267,114 @@ describe('approving a filing proposal', () => {
 });
 
 describe('restart recovery', () => {
+  it('keeps partial outcomes, retries only the failed receipt with one key, and restores the safe move', async () => {
+    const file = path.join(base, 'recovery.db');
+    store.close();
+    store = new Store(file);
+    const task = await propose(makeService());
+    fs.writeFileSync(at('Bills/Water 2026-04.pdf'), buildTextPdf(['changed after review']));
+    const service = makeService();
+    service.approveFiling(task.id, { planDigest: proposal(task).planDigest, overwrite: ['water.pdf'] }, owner);
+    await service.whenIdle();
+    expect(service.get(task.id)!.filing!.receipts.map((receipt) => receipt.state)).toEqual(['moved', 'failed']);
+    store.close();
+    store = new Store(file);
+    const restarted = makeService();
+    restarted.recover();
+    await restarted.whenIdle();
+    const partial = restarted.get(task.id)!;
+    expect(partial.activity.some((event) => event.kind === 'file-moved')).toBe(true);
+    expect(partial.filing!.receipts[1]!.reason).toMatch(/changed since you approved/);
+
+    fs.writeFileSync(at('Bills/Water 2026-04.pdf'), OLD_WATER);
+    const retried = restarted.filingAction(task.id, 'retry', 'retry-water-001');
+    expect(retried.filing!.receipts.map((receipt) => receipt.state)).toEqual(['moved', 'moved']);
+    expect(fs.existsSync(at('water.pdf'))).toBe(false);
+    fs.writeFileSync(at('water.pdf'), WATER);
+    store.close();
+    store = new Store(file);
+    const afterRetry = makeService();
+    afterRetry.recover();
+    await afterRetry.whenIdle();
+    const replayed = afterRetry.filingAction(task.id, 'retry', 'retry-water-001');
+    expect(replayed.filing).toEqual(afterRetry.get(task.id)!.filing);
+    expect(fs.existsSync(at('water.pdf'))).toBe(true);
+
+    const undone = afterRetry.filingAction(task.id, 'undo', 'undo-power-001');
+    expect(undone.filing!.receipts[0]!.undoState).toBe('undone');
+    expect(undone.filing!.receipts[1]!.undoState).toBe('conflict');
+    expect(fs.readFileSync(at('power.pdf'))).toEqual(POWER);
+    expect(fs.existsSync(at('Bills/Power/Power 2026-03.pdf'))).toBe(false);
+    expect(undone.filing!.receipts[1]!.undoReason).toMatch(/replaced a previous file/);
+  });
+
+  it('explains an occupied original name and a changed destination without overwriting either', async () => {
+    const task = await propose(makeService(), ['power.pdf']);
+    const service = makeService();
+    service.approveFiling(task.id, { planDigest: proposal(task).planDigest }, owner);
+    await service.whenIdle();
+    const replacement = buildTextPdf(['new file at original name']);
+    fs.writeFileSync(at('power.pdf'), replacement);
+    let result = service.filingAction(task.id, 'undo', 'undo-conflict-001');
+    expect(result.filing!.receipts[0]!.undoReason).toMatch(/original name is occupied/);
+    expect(fs.readFileSync(at('power.pdf'))).toEqual(replacement);
+    fs.rmSync(at('power.pdf'));
+    fs.writeFileSync(at('Bills/Power/Power 2026-03.pdf'), buildTextPdf(['edited destination']));
+    result = service.filingAction(task.id, 'undo', 'undo-conflict-002');
+    expect(result.filing!.receipts[0]!.undoReason).toMatch(/destination changed/);
+    expect(fs.existsSync(at('power.pdf'))).toBe(false);
+  });
+
+  it('undoes a replacement-approved move when no file was actually replaced', async () => {
+    const task = await propose(makeService(), ['water.pdf']);
+    const service = makeService({ autoRun: false });
+    service.approveFiling(task.id, { planDigest: proposal(task).planDigest, overwrite: ['water.pdf'] }, owner);
+    fs.rmSync(at('Bills/Water 2026-04.pdf'));
+    service.recover();
+    await service.whenIdle();
+    expect(store.personal.getFilingApproval(task.id)!.receipts[0]!.replaced).toBe(false);
+    const undone = service.filingAction(task.id, 'undo', 'undo-empty-target-001');
+    expect(undone.filing!.receipts[0]!.undoState).toBe('undone');
+    expect(fs.readFileSync(at('water.pdf'))).toEqual(WATER);
+  });
+
+  it('refuses undo when another hard link names the recorded destination', async () => {
+    const task = await propose(makeService(), ['power.pdf']);
+    const service = makeService();
+    service.approveFiling(task.id, { planDigest: proposal(task).planDigest }, owner);
+    await service.whenIdle();
+    fs.linkSync(at('Bills/Power/Power 2026-03.pdf'), at('also-power.pdf'));
+    const outcome = service.filingAction(task.id, 'undo', 'undo-hardlink-001');
+    expect(outcome.filing!.receipts[0]!.undoReason).toMatch(/hard link/);
+    expect(fs.existsSync(at('power.pdf'))).toBe(false);
+  });
+
+  it('reconciles an undo interrupted between link and unlink without replaying it', async () => {
+    const file = path.join(base, 'undo-recovery.db');
+    store.close();
+    store = new Store(file);
+    const task = await propose(makeService(), ['power.pdf']);
+    const service = makeService();
+    service.approveFiling(task.id, { planDigest: proposal(task).planDigest }, owner);
+    await service.whenIdle();
+    const approval = store.personal.getFilingApproval(task.id)!;
+    store.personal.createFilingOperation(approval.id, 'undo-crash-001', 'undo', [1], clock.toISOString(), {
+      at: clock.toISOString(), kind: 'filing-undo-requested', message: 'Undo requested.',
+    });
+    store.personal.setUndo(approval.id, 1, null, 'undoing', clock.toISOString());
+    fs.linkSync(at('Bills/Power/Power 2026-03.pdf'), at('power.pdf'));
+    store.close();
+    store = new Store(file);
+    const recovered = makeService();
+    recovered.recover();
+    await recovered.whenIdle();
+    expect(recovered.get(task.id)!.filing!.receipts[0]!.undoState).toBe('undone');
+    expect(fs.readFileSync(at('power.pdf'))).toEqual(POWER);
+    expect(fs.existsSync(at('Bills/Power/Power 2026-03.pdf'))).toBe(false);
+    recovered.filingAction(task.id, 'undo', 'undo-crash-001');
+    expect(fs.existsSync(at('Bills/Power/Power 2026-03.pdf'))).toBe(false);
+  });
+
   it('reconciles a move interrupted mid-way from the disk and never repeats a move', async () => {
     const file = path.join(base, 'agentdeck.db');
     store.close();

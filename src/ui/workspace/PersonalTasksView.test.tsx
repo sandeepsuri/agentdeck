@@ -103,6 +103,7 @@ function stubServer(server: Server) {
         server.grants = [{ ...grant, revokedAt: '2026-09-25T11:00:00.000Z' }];
         return json({ grant: server.grants[0] });
       }
+      if (url.endsWith('/filing/retry') || url.endsWith('/filing/undo')) return json(server.tasks[0]);
       if (url.endsWith('/retry')) return json(server.tasks[0]);
       if (url.endsWith('/filing/approve')) {
         server.tasks = [{ ...server.tasks[0]!, filing: filed() }];
@@ -223,6 +224,22 @@ describe('PersonalTasksView', () => {
     expect(detail.querySelector('.personal-replace')).toBeNull();
     expect([...host.querySelectorAll('button')].some((candidate) => candidate.textContent?.includes('Approve'))).toBe(false);
     expect(detail.textContent).toContain('Approved by owner on This Mac');
+  });
+
+  it('shows partial filing outcomes and sends keyed retry and undo actions', async () => {
+    const server: Server = { grants: [grant], tasks: [proposalTask({ filing: filed() })], posts: [] };
+    stubServer(server);
+    await render();
+    expect(host.textContent).toContain('Retry files not moved');
+    expect(host.textContent).toContain('Undo recorded moves');
+    await click(button('Retry files not moved'));
+    await flush();
+    expect(server.posts[0]!.url).toBe('/api/personal/tasks/t1/filing/retry');
+    expect(server.posts[0]!.body).toMatchObject({ idempotencyKey: expect.any(String) });
+    await click(button('Undo recorded moves'));
+    await flush();
+    expect(server.posts[1]!.url).toBe('/api/personal/tasks/t1/filing/undo');
+    expect(server.posts[1]!.body).toMatchObject({ idempotencyKey: expect.any(String) });
   });
 
   it('revokes a folder grant', async () => {

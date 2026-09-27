@@ -129,6 +129,18 @@ export function registerPersonalTaskRoutes(app: FastifyInstance, deps: PersonalT
     }
   });
 
+  app.post('/api/personal/tasks/:id/filing/:action', async (request, reply) => {
+    if (!owner(request, reply)) return reply;
+    const { id, action } = request.params as { id: string; action: string };
+    if (action !== 'retry' && action !== 'undo') return reply.code(404).send({ error: 'No such filing action.' });
+    const body = (request.body ?? {}) as { idempotencyKey?: unknown };
+    try {
+      return service.filingAction(id, action, body.idempotencyKey);
+    } catch (error) {
+      return sendError(error, reply);
+    }
+  });
+
   app.post('/api/personal/tasks/:id/retry', async (request, reply) => {
     if (!owner(request, reply)) return reply;
     try {
