@@ -15,7 +15,7 @@ export class FolderPickerUnavailableError extends Error {
   }
 }
 
-export function macFolderPicker(): FolderPicker {
+export function macFolderPicker(prompt = 'Choose one folder AgentDeck may read'): FolderPicker {
   return () => new Promise((resolve, reject) => {
     if (process.platform !== 'darwin') {
       reject(new FolderPickerUnavailableError('Choosing a folder needs macOS.'));
@@ -23,7 +23,7 @@ export function macFolderPicker(): FolderPicker {
     }
     execFile(
       '/usr/bin/osascript',
-      ['-e', 'activate', '-e', 'POSIX path of (choose folder with prompt "Choose one folder AgentDeck may read")'],
+      ['-e', 'activate', '-e', `POSIX path of (choose folder with prompt ${JSON.stringify(prompt)})`],
       { timeout: PICKER_TIMEOUT_MS },
       (error, stdout, stderr) => {
         if (!error) {

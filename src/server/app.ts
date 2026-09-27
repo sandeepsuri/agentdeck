@@ -1,7 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentDeckConfig } from '../config.js';
+import { saveConfig, type AgentDeckConfig } from '../config.js';
+import type { FolderPicker } from '../personal-tasks/folder-picker.js';
+import { registerFolderAccessRoutes } from './folder-access-routes.js';
 import type { SessionManager } from '../sessions/manager.js';
 import type { Store } from '../store/index.js';
 import type { TerminalRegistry } from '../discovery/terminals/index.js';
@@ -147,6 +149,10 @@ const MIME: Record<string, string> = {
 
 export interface AppContext {
   config: AgentDeckConfig;
+  /** Native folder picker for Settings → Folder access. Undefined where no picker exists (tests, non-macOS). */
+  pickAccessFolder?: FolderPicker;
+  /** Injectable config.json writer for tests; defaults to the real owner-only file. */
+  saveConfig?: RouteContext['saveConfig'];
   manager?: SessionManager;
   store?: Store;
   terminals?: TerminalRegistry;
@@ -246,6 +252,12 @@ export function buildApp(ctx: AppContext): FastifyInstance {
 
   app.get('/api/health', async () => ({ ok: true }));
 
+  registerFolderAccessRoutes(app, {
+    config: ctx.config,
+    saveConfig: ctx.saveConfig ?? saveConfig,
+    ...(ctx.pickAccessFolder ? { pickFolder: ctx.pickAccessFolder } : {}),
+  });
+
   if (ctx.manager) registerRoutes(app, {
     manager: ctx.manager,
     config: ctx.config,
@@ -260,6 +272,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     workEngine: ctx.workEngine,
     remoteHosts: ctx.remoteHosts,
     collaborators: ctx.collaborators,
+    saveConfig: ctx.saveConfig,
   });
 
   // Ticket 11: local-admin-only management routes plus the one

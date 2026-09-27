@@ -34,6 +34,7 @@ import { ModelNewsService } from '../usage/news.js';
 import { DEFAULT_PRICING } from '../usage/pricing.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
 import { macFolderPicker } from '../personal-tasks/folder-picker.js';
+import { folderAccess } from '../folder-access.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 import { ProviderSetupService } from '../provider-setup/service.js';
 import { macProviderCommands } from '../provider-setup/commands.js';
@@ -158,7 +159,9 @@ export async function startServer(): Promise<RunningServer> {
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
     providerSetup,
+    pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
   });
+  const access = folderAccess(config, () => store.listRepos());
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator
   // device's grants, or undefined (unrestricted) for local and the legacy
@@ -168,6 +171,10 @@ export async function startServer(): Promise<RunningServer> {
     { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
   );
   registerWorkRoutes(app, workEngine, {
+    repositoryAllowed: (repositoryId) => {
+      const repository = store.listRepos().find((repo) => repo.id === repositoryId);
+      return repository === undefined || access.allows(repository.path);
+    },
     resolveGrantedRepositoryIds: (req) => requestTrust(req).device?.grantedRepositoryIds,
     resolveActor: (req) => {
       const device = requestTrust(req).device;

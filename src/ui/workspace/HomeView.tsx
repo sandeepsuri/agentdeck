@@ -154,7 +154,7 @@ function AskSection({ repositoryCount, repositoriesState, onAsk, onOpenSettings 
         <div className="home-ask-footer">
           <p className="home-ask-help" id="home-ask-help">
             {noRepository
-              ? <>Add a repository before asking for work. <button className="text-button" onClick={onOpenSettings} type="button">Open Settings</button></>
+              ? <>Choose a folder of projects AgentDeck may use before asking for work. <button className="text-button" onClick={onOpenSettings} type="button">Open Settings</button></>
               : repositoriesState === 'error'
                 ? 'Couldn’t load your repositories. You can still continue and choose one in Start work.'
                 : 'Continue opens Start work to choose a repository and agent. Nothing starts until you confirm there.'}

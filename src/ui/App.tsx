@@ -903,7 +903,7 @@ export function App() {
             />
           </div>
           <div className={layerClass('usage')}><UsageView active={!showSettings && view === 'usage'} onSelectSession={openSession} repos={repos} sessions={sessions} /></div>
-          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} onInstallHooks={() => void installHooks()} repos={repos} />}</div>
+          <div className={showSettings ? 'workspace-layer is-active' : 'workspace-layer'}>{(showSettings || settingsVisited) && <SettingsWorkspace appearanceControl={<ThemeControl />} onBack={() => setShowSettings(false)} onFolderAccessChange={() => void refreshRepos()} onInstallHooks={() => void installHooks()} repos={repos} />}</div>
         </main>
         <div className={`inspector-dock${inspectorCollapsed ? ' is-collapsed' : ''}`} hidden={!inspectorRelevant}>
           <button

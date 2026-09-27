@@ -120,6 +120,14 @@ describe('work routes', () => {
     expect(listed.json()).toEqual([run]);
   });
 
+  it('POST /api/runs refuses a Repository outside the folders chosen in Settings → Folder access', async () => {
+    const { app, repoPath } = makeApp(undefined, { repositoryAllowed: () => false });
+    const refused = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: 'folder-access' });
+    expect((await app.inject({ method: 'GET', url: '/api/runs' })).json()).toEqual([]);
+  });
+
   it('GET /api/runs/:id/activity reports the durable activity trail for admin observability (ticket 12 AC5)', async () => {
     const { app, repoPath } = makeApp();
     const created = await app.inject({ method: 'POST', url: '/api/runs', payload: submittedIntent(repoPath) });

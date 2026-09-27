@@ -827,3 +827,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
   .admin-sidebar:not(.collab-sidebar) .sidebar-repositories { display: none; }
   .admin-sidebar:not(.collab-sidebar) .sidebar-start-work { justify-content: center; padding-inline: 0; }
 }
+.folder-access-list { display: grid; gap: 6px; margin: 0 0 10px; padding: 0; list-style: none; }
+.folder-access-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); }
+.folder-access-list code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-access-list .button { flex: none; }
