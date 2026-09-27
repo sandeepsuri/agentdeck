@@ -741,7 +741,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         } else if (spec.permissionMode === 'plan') {
           spec.initialPrompt = spec.initialPrompt ? `/plan ${spec.initialPrompt}` : '/plan';
         }
-        spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify(['node', HOOK_PATH])}`];
+        spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify([process.execPath, HOOK_PATH])}`];
       }
       const session = await manager.launch(spec);
       return reply.code(201).send(publicSession(session));

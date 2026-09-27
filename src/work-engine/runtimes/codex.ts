@@ -17,7 +17,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
-import { resolveAgentExecutable } from '../../sessions/executable.js';
+import { agentPath, resolveAgentExecutable } from '../../sessions/executable.js';
 import { filterEnvironment } from '../envelope.js';
 import { readThreadId } from './codex-protocol.js';
 import type { AttentionDecisionInput, AttemptEvent, AttentionRequestKind } from '../types.js';
@@ -236,6 +236,7 @@ export function createCodexAttemptAdapter(
     }
 
     const env = filterEnvironment(context.profile, process.env);
+    if ('PATH' in env) env.PATH = agentPath(executable, env.PATH);
     // `codex app-server` itself takes no --experimental flag (only its
     // generate-json-schema subcommand does — see the readiness probe in
     // sessions/runtime-readiness.ts). The experimental surface thread/start

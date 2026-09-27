@@ -3,7 +3,7 @@ import * as pty from 'node-pty';
 import type { LaunchSpec } from '../types.js';
 import { TERMINAL_COLS, TERMINAL_ROWS } from '../protocol.js';
 import type { Handle, SessionBackend } from './backend.js';
-import { resolveAgentExecutable } from './executable.js';
+import { agentPath, resolveAgentExecutable } from './executable.js';
 
 export interface CommandSpec {
   file: string;
@@ -39,6 +39,7 @@ export class PtyBackend implements SessionBackend {
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined && !/^CLAUDE(CODE|_CODE_)/.test(k)) env[k] = v;
     }
+    env.PATH = agentPath(file, env.PATH);
     Object.assign(env, spec.env ?? {});
 
     const proc = pty.spawn(file, args, {
