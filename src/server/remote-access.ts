@@ -23,6 +23,9 @@ export async function configureRemoteAccess(
     generateToken?: () => string;
   } = {},
 ): Promise<RemoteAccess> {
+  // The installed Mac app deliberately exposes its service only to this Mac.
+  // Keep the CLI's optional collaborator listener unchanged.
+  if (process.env.AGENTDECK_LOCAL_ONLY === '1') return { hosts: [] };
   const tailscale = await (deps.detect ?? detectTailscaleInterface)();
   let generatedToken: string | undefined;
   if (!config.tailscaleToken) {

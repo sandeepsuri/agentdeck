@@ -51,6 +51,8 @@ npm start
 
 The build performs TypeScript checking, builds the Vite UI and Node output, packages the VS Code helper, and builds the native Swift companion.
 
+To build a local, ad hoc signed Mac app for testing, run `npm run package:mac`. For Developer ID signing and notarization, see [Mac app distribution](mac-app.md). The app package does not change the CLI development flow.
+
 Set `AGENTDECK_NOTCH=0` to disable the companion while running the production server:
 
 ```bash

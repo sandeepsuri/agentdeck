@@ -109,6 +109,10 @@ The companion is a Swift/SwiftUI macOS executable under `native/AgentDeckNotch/`
 
 The native companion is built as part of `npm run build`, copied into the distribution tree, and signed locally with an ad hoc signature.
 
+### Installed Mac app
+
+`native/AgentDeckApp/` is the standalone SwiftUI launcher. Its package carries the production UI, Node service, runtime dependencies, migrations, and the existing menu bar companion. The launcher owns the service process, checks `/api/health`, opens the workspace in a WebKit window, and offers log and retry actions on startup failure. The installed app sets `AGENTDECK_LOCAL_ONLY=1`, so its service never probes or binds a Tailscale interface. The CLI production path retains its existing optional tailnet listener and collaborator access.
+
 ### VS Code helper
 
 The bundled extension under `extensions/vscode/` connects to AgentDeck over a loopback WebSocket. It reports integrated terminal process IDs so AgentDeck can target the correct split terminal for focus and messaging.

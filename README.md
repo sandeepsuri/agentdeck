@@ -73,6 +73,12 @@ npm run build
 npm start
 ```
 
+### Install the Mac app
+
+The packaged Mac app includes the browser workspace, local service, Node runtime, and menu bar companion. It needs no Node, Git, or terminal setup to open. Download the signed and notarized `AgentDeck-<architecture>.zip` release, unzip it, move `AgentDeck.app` to Applications, and open it. The app starts its own loopback service and shows a repair screen if startup fails. Agent CLIs are optional and are only needed to run their corresponding agent work.
+
+Release packaging and clean-account validation are described in [Mac app distribution](docs/mac-app.md).
+
 To run only the browser application without the native companion:
 
 ```bash

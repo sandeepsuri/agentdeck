@@ -1,8 +1,19 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig } from '../config.js';
 import { configureRemoteAccess, tailscaleHosts } from './remote-access.js';
 
 describe('remote access bootstrap', () => {
+  afterEach(() => { delete process.env.AGENTDECK_LOCAL_ONLY; });
+
+  it('keeps the installed app on loopback without probing Tailscale or changing the CLI token', async () => {
+    process.env.AGENTDECK_LOCAL_ONLY = '1';
+    const config = defaultConfig();
+    const detect = vi.fn(async () => ({ ip: '100.101.102.103' }));
+    const save = vi.fn();
+    expect(await configureRemoteAccess(config, { detect, save })).toEqual({ hosts: [] });
+    expect(detect).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
   it('keeps both MagicDNS and raw IP as accepted hosts', () => {
     expect(tailscaleHosts({ ip: '100.101.102.103', hostname: 'mac.tail.example.ts.net' }))
       .toEqual(['mac.tail.example.ts.net', '100.101.102.103']);

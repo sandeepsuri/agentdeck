@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .native-build/
+.mac-build/
 .build/
 .swiftpm/
 DerivedData/
