@@ -21,3 +21,5 @@ docs/tickets/
 docs/evolution-roadmap.md
 .codex-*.html
 /docs
+scripts/spikes/email/gmail-oauth-client.json
+docs/
