@@ -78,6 +78,7 @@ Run the Swift tests:
 
 ```bash
 npm run test:notch
+npm run test:mac-app
 ```
 
 Run static checking and a full build:

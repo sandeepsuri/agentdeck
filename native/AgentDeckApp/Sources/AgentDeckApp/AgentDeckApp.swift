@@ -8,19 +8,53 @@ struct AgentDeckApp: App {
     var body: some Scene { Settings { EmptyView() } }
 }
 
-@MainActor
-final class ServiceController: ObservableObject {
+struct ServiceLifecycle {
     enum Status: Equatable {
         case starting
         case ready
         case failed(String)
     }
 
-    @Published private(set) var status: Status = .starting
-    private var process: Process?
-    private var timer: Timer?
+    private(set) var status: Status = .starting
+    private(set) var active = false
     private var startedAt = Date()
     private var consecutiveFailures = 0
+
+    mutating func start(at date: Date = Date()) {
+        active = true
+        startedAt = date
+        consecutiveFailures = 0
+        status = .starting
+    }
+
+    mutating func fail(_ reason: String) {
+        guard active else { return }
+        status = .failed(reason)
+    }
+
+    mutating func healthCheck(succeeded: Bool, at date: Date = Date(), port: Int) {
+        guard active else { return }
+        if succeeded {
+            consecutiveFailures = 0
+            status = .ready
+        } else {
+            consecutiveFailures += 1
+            if date.timeIntervalSince(startedAt) > 20 ||
+                (status == .ready && consecutiveFailures >= 3) {
+                status = .failed("The local service is not responding. Port \(port) may be in use, or startup may have failed.")
+            }
+        }
+    }
+
+    mutating func stop() { active = false }
+}
+
+@MainActor
+final class ServiceController: ObservableObject {
+    @Published private(set) var status: ServiceLifecycle.Status = .starting
+    private var process: Process?
+    private var timer: Timer?
+    private var lifecycle = ServiceLifecycle()
     private let logURL: URL
     let serviceURL: URL
 
@@ -40,12 +74,11 @@ final class ServiceController: ObservableObject {
 
     func start() {
         stopProcess()
-        status = .starting
-        startedAt = Date()
-        consecutiveFailures = 0
+        lifecycle.start()
+        status = lifecycle.status
 
         guard let resources = Bundle.main.resourceURL else {
-            status = .failed("The app resources are missing. Reinstall AgentDeck.")
+            fail("The app resources are missing. Reinstall AgentDeck.")
             return
         }
         let service = resources.appendingPathComponent("service", isDirectory: true)
@@ -53,7 +86,7 @@ final class ServiceController: ObservableObject {
         let entry = service.appendingPathComponent("bin/agentdeck.mjs")
         guard FileManager.default.isExecutableFile(atPath: node.path),
               FileManager.default.fileExists(atPath: entry.path) else {
-            status = .failed("The bundled service is incomplete. Reinstall AgentDeck.")
+            fail("The bundled service is incomplete. Reinstall AgentDeck.")
             return
         }
 
@@ -84,30 +117,28 @@ final class ServiceController: ObservableObject {
             }
             checkHealth()
         } catch {
-            status = .failed("Could not launch the bundled service: \(error.localizedDescription)")
+            fail("Could not launch the bundled service: \(error.localizedDescription)")
         }
+    }
+
+    private func fail(_ reason: String) {
+        lifecycle.fail(reason)
+        status = lifecycle.status
     }
 
     private func checkHealth() {
         guard let process else { return }
         if !process.isRunning {
-            status = .failed("The service stopped during startup. Check the log, then try Repair Startup.")
+            fail("The service stopped. Check the log, then try Repair Startup.")
             timer?.invalidate()
             return
         }
         URLSession.shared.dataTask(with: serviceURL.appendingPathComponent("api/health")) { [weak self] _, response, _ in
             Task { @MainActor in
                 guard let self, self.process === process, process.isRunning else { return }
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    self.consecutiveFailures = 0
-                    self.status = .ready
-                } else {
-                    self.consecutiveFailures += 1
-                    if Date().timeIntervalSince(self.startedAt) > 20 ||
-                        (self.status == .ready && self.consecutiveFailures >= 3) {
-                    self.status = .failed("The local service is not responding. Port \(self.serviceURL.port ?? 4040) may be in use, or startup may have failed.")
-                    }
-                }
+                self.lifecycle.healthCheck(succeeded: (response as? HTTPURLResponse)?.statusCode == 200,
+                                           port: self.serviceURL.port ?? 4040)
+                self.status = self.lifecycle.status
             }
         }.resume()
     }
@@ -122,6 +153,7 @@ final class ServiceController: ObservableObject {
     }
 
     func stopProcess() {
+        lifecycle.stop()
         timer?.invalidate()
         timer = nil
         if let process, process.isRunning {
