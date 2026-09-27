@@ -8,6 +8,7 @@ import { type ResolvedTheme, useTheme } from '../theme.js';
 interface Props {
   ws: WebSocket;
   sessionId: string;
+  active: boolean;
 }
 
 const XTERM_THEMES: Record<ResolvedTheme, ITheme> = {
@@ -204,7 +205,7 @@ const XTERM_THEMES: Record<ResolvedTheme, ITheme> = {
  * resized by the viewer; the host div centers it, so a pane larger than the
  * grid shows empty margin instead of stretching the terminal to fill it.
  */
-export function Terminal({ ws, sessionId }: Props) {
+export function Terminal({ ws, sessionId, active }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const { resolvedTheme } = useTheme();
@@ -259,6 +260,14 @@ export function Terminal({ ws, sessionId }: Props) {
     if (terminalRef.current) terminalRef.current.options.theme = XTERM_THEMES[resolvedTheme];
   }, [resolvedTheme]);
 
+  useEffect(() => {
+    if (!active) return;
+    // Kept-mounted terminals receive output while hidden. Repaint after the
+    // CSS display toggle so xterm measures and draws the visible canvas again.
+    const frame = requestAnimationFrame(() => terminalRef.current?.refresh(0, TERMINAL_ROWS - 1));
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
+
   return (
     <div
       ref={hostRef}
@@ -266,8 +275,6 @@ export function Terminal({ ws, sessionId }: Props) {
         width: '100%',
         height: '100%',
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
         overflow: 'auto',
       }}
     />

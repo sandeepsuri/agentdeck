@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { LaunchSpec } from '../types.js';
 import { TERMINAL_COLS, TERMINAL_ROWS } from '../protocol.js';
-import { PtyBackend } from './pty.js';
+import { defaultCommandFor, PtyBackend } from './pty.js';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -27,6 +27,14 @@ function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
 const spec: LaunchSpec = { agent: 'claude', cwd: '/tmp' };
 
 describe('PtyBackend', () => {
+  it('starts managed Codex inline for scrollback while preserving explicit arguments', () => {
+    const command = defaultCommandFor({ agent: 'codex', cwd: '/tmp', extraArgs: ['--model', 'gpt-6-sol'] });
+    expect(command.args).toEqual(['--model', 'gpt-6-sol', '--no-alt-screen']);
+    expect(defaultCommandFor({ agent: 'codex', cwd: '/tmp', extraArgs: ['--no-alt-screen'] }).args)
+      .toEqual(['--no-alt-screen']);
+    expect(defaultCommandFor({ agent: 'claude', cwd: '/tmp' }).args).toEqual([]);
+  });
+
   it('spawns at the pinned TERMINAL_COLS x TERMINAL_ROWS size — there is no per-session size hint', async () => {
     const backend = new PtyBackend({
       commandFor: () => ({ file: 'bash', args: ['-c', 'stty size; sleep 3'] }),

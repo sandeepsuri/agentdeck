@@ -193,6 +193,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .terminal-view-stack { position: absolute; inset: 8px 4px 8px 10px; pointer-events: none; }
 .terminal-view { position: absolute; inset: 0; display: none; }
 .terminal-view.is-active { display: flex; pointer-events: auto; }
+.terminal-view .xterm { flex: none; margin: auto; }
 .terminal-loading { height: 100%; display: grid; place-items: center; color: var(--text-muted); }
 .external-terminal-overview { height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--text-muted); }.external-terminal-overview strong { color: var(--text-primary); }.external-terminal-glyph { font: 20px var(--font-mono); }
 .terminal-prompt-card { flex: none; margin: 0 14px 10px; padding: 11px 14px; border-left: 3px solid var(--status-waiting); background: var(--status-waiting-bg); border-radius: 0 5px 5px 0; }

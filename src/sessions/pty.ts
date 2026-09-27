@@ -12,7 +12,11 @@ export interface CommandSpec {
 
 /** agent → executable. Overridable so tests can substitute bash/cat. */
 export function defaultCommandFor(spec: LaunchSpec): CommandSpec {
-  return { file: resolveAgentExecutable(spec.agent) ?? spec.agent, args: spec.extraArgs ?? [] };
+  const args = [...(spec.extraArgs ?? [])];
+  // Codex's alternate screen has no terminal scrollback. Inline mode keeps
+  // its TUI output in xterm's normal buffer so wheel/PageUp can inspect it.
+  if (spec.agent === 'codex' && !args.includes('--no-alt-screen')) args.push('--no-alt-screen');
+  return { file: resolveAgentExecutable(spec.agent) ?? spec.agent, args };
 }
 
 export interface PtyBackendOptions {

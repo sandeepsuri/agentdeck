@@ -79,7 +79,7 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
             <div className="terminal-view-stack">
               {mountedIds.map((id) => (
                 <div className={id === session.id ? 'terminal-view is-active' : 'terminal-view'} key={id}>
-                  {ws && <Terminal key={terminalKeys[id]} sessionId={id} ws={ws} />}
+                  {ws && <Terminal active={view === 'terminal' && id === session.id} key={terminalKeys[id]} sessionId={id} ws={ws} />}
                 </div>
               ))}
             </div>
