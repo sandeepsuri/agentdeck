@@ -54,12 +54,21 @@
 .personal-warnings ul { margin: 0; padding-left: 14px; }
 .personal-warnings li { color: var(--warning); }
 .personal-warnings li.is-new-folder, .personal-warnings li.is-unchanged { color: var(--text-muted); }
+.personal-replace { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: var(--text-primary); font-size: 12px; }
+.personal-result td.personal-receipt { min-width: 180px; white-space: normal; }
+.personal-receipt small { display: block; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
+.personal-receipt-state { font-weight: 600; }
+.personal-receipt-state.is-moved { color: var(--status-completed); }
+.personal-receipt-state.is-failed, .personal-receipt-state.is-uncertain { color: var(--status-error); }
+.personal-receipt-state.is-skipped, .personal-receipt-state.is-pending { color: var(--text-muted); }
+.personal-receipt-state.is-moving { color: var(--status-running); }
+.personal-approve { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 10px; }
 .personal-skipped { margin: 8px 0 0; padding-left: 18px; color: var(--warning); font-size: 12px; }
 .personal-activity { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
 .personal-activity li { display: flex; gap: 10px; }
 .personal-activity time { flex: none; color: var(--text-muted); font: 11px var(--font-mono); }
 .personal-activity li.is-failed span, .personal-activity li.is-interrupted span { color: var(--status-error); }
-.personal-activity li.is-file-skipped span, .personal-activity li.is-broker-refused span { color: var(--warning); }
+.personal-activity li.is-file-skipped span, .personal-activity li.is-broker-refused span, .personal-activity li.is-move-failed span { color: var(--warning); }
 
 @media (max-width: 720px) {
   .personal-task-layout { grid-template-columns: 1fr; }

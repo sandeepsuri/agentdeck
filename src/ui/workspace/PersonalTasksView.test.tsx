@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 // Issue #80: the owner's personal-task view — grant a folder through the
 // server-side picker, choose PDFs, submit, and read activity and results from
-// the durable projection. fetch is stubbed per route.
+// the durable projection, and (issue #82) approve a filing plan and read its
+// per-file receipts. fetch is stubbed per route.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { FolderGrantView, PersonalTaskView } from '../../personal-tasks/types.js';
+import type { FilingApprovalView, FolderGrantView, PersonalTaskView } from '../../personal-tasks/types.js';
 import { PersonalTasksView } from './PersonalTasksView.js';
 
 beforeAll(() => { (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
@@ -44,6 +45,38 @@ function task(overrides: Partial<PersonalTaskView> = {}): PersonalTaskView {
   };
 }
 
+function proposalTask(overrides: Partial<PersonalTaskView> = {}): PersonalTaskView {
+  return task({
+    kind: 'pdf-filing-proposal',
+    title: 'Propose filing for 2 PDFs in Statements',
+    result: {
+      kind: 'pdf-filing-proposal', attemptId: 'a1', completedAt: '2026-09-25T10:01:01.000Z', planDigest: 'cd'.repeat(32),
+      provider: { runtime: 'claude', cliVersion: '2.1.283 (Claude Code)', confinement: 'macos-seatbelt' },
+      entries: [
+        { source: 'march.pdf', sourceSha256: 'ab'.repeat(32), newName: 'Power 2026-03.pdf', destination: 'Bills', target: 'Bills/Power 2026-03.pdf',
+          warnings: [{ kind: 'overwrite', message: 'A different file already has this name and would be replaced.' }] },
+        { source: 'april.pdf', sourceSha256: 'ef'.repeat(32), newName: 'Water.pdf', destination: '', target: 'Water.pdf', warnings: [] },
+      ],
+      unplanned: [{ path: 'may.pdf', reason: 'No filing was proposed; the file stays where it is.' }],
+      skipped: [],
+    },
+    ...overrides,
+  });
+}
+
+function filed(): FilingApprovalView {
+  const at = '2026-09-25T10:05:00.000Z';
+  return {
+    state: 'finished', planDigest: 'cd'.repeat(32), approvedBy: { displayName: 'owner', device: 'This Mac' },
+    approvedAt: at, expiresAt: '2026-09-25T10:15:00.000Z', startedAt: at, finishedAt: at,
+    receipts: [
+      { sequence: 1, source: 'march.pdf', target: 'Bills/Power 2026-03.pdf', overwrite: true, state: 'failed',
+        reason: 'The file has changed since the plan was proposed; it was left where it is.', updatedAt: at },
+      { sequence: 2, source: 'april.pdf', target: 'Water.pdf', overwrite: false, state: 'moved', updatedAt: at },
+    ],
+  };
+}
+
 interface Server {
   grants: FolderGrantView[];
   tasks: PersonalTaskView[];
@@ -71,6 +104,10 @@ function stubServer(server: Server) {
         return json({ grant: server.grants[0] });
       }
       if (url.endsWith('/retry')) return json(server.tasks[0]);
+      if (url.endsWith('/filing/approve')) {
+        server.tasks = [{ ...server.tasks[0]!, filing: filed() }];
+        return json(server.tasks[0]);
+      }
     }
     if (url === '/api/personal/grants') return json(server.grants);
     if (url === '/api/personal/tasks') return json(server.tasks);
@@ -147,32 +184,45 @@ describe('PersonalTasksView', () => {
   });
 
   it('shows every source, new name, destination and warning of a proposal, and that nothing moved', async () => {
-    const proposal = task({
-      kind: 'pdf-filing-proposal',
-      title: 'Propose filing for 2 PDFs in Statements',
-      result: {
-        kind: 'pdf-filing-proposal', attemptId: 'a1', completedAt: '2026-09-25T10:01:01.000Z', planDigest: 'cd'.repeat(32),
-        provider: { runtime: 'claude', cliVersion: '2.1.283 (Claude Code)', confinement: 'macos-seatbelt' },
-        entries: [
-          { source: 'march.pdf', sourceSha256: 'ab'.repeat(32), newName: 'Power 2026-03.pdf', destination: 'Bills', target: 'Bills/Power 2026-03.pdf',
-            warnings: [{ kind: 'overwrite', message: 'A different file already has this name and would be replaced.' }] },
-          { source: 'april.pdf', sourceSha256: 'ef'.repeat(32), newName: 'Water.pdf', destination: '', target: 'Water.pdf', warnings: [] },
-        ],
-        unplanned: [{ path: 'may.pdf', reason: 'No filing was proposed; the file stays where it is.' }],
-        skipped: [],
-      },
-    });
-    stubServer({ grants: [grant], tasks: [proposal], posts: [] });
+    stubServer({ grants: [grant], tasks: [proposalTask()], posts: [] });
     await render();
     const detail = host.querySelector('[aria-label="Filing proposal"]')!;
     expect(detail.textContent).toContain('Nothing has been moved.');
     expect([...detail.querySelectorAll('tbody tr')].map((row) => [...row.children].map((cell) => cell.textContent))).toEqual([
-      ['march.pdf', 'Power 2026-03.pdf', 'Bills', 'A different file already has this name and would be replaced.'],
+      ['march.pdf', 'Power 2026-03.pdf', 'Bills', 'A different file already has this name and would be replaced.Replace the existing file'],
       ['april.pdf', 'Water.pdf', 'Top of folder', '—'],
     ]);
     expect(detail.querySelector('[aria-label="Left in place"]')?.textContent).toContain('may.pdf');
     expect(detail.textContent).toContain('cdcdcdcdcdcd');
     expect(detail.querySelector('.personal-result-summary')?.textContent).toContain('1 with warnings');
+  });
+
+  it('approves the exact plan it shows, with only the replacements the owner ticked', async () => {
+    const server: Server = { grants: [grant], tasks: [proposalTask()], posts: [] };
+    stubServer(server);
+    await render();
+    expect(button('Approve and move').textContent).toBe('Approve and move 1 PDF');
+    await click(host.querySelector('.personal-replace input')!);
+    expect(button('Approve and move').textContent).toBe('Approve and move 2 PDFs');
+    await click(button('Approve and move'));
+    await flush();
+    expect(server.posts).toEqual([
+      { url: '/api/personal/tasks/t1/filing/approve', body: { planDigest: 'cd'.repeat(32), overwrite: ['march.pdf'] } },
+    ]);
+  });
+
+  it('shows what moved and what did not once the plan was carried out, and offers no second approval', async () => {
+    stubServer({ grants: [grant], tasks: [proposalTask({ filing: filed() })], posts: [] });
+    await render();
+    const detail = host.querySelector('[aria-label="Filing proposal"]')!;
+    expect(detail.querySelector('.personal-result-summary')?.textContent).toContain('Moved 1 of 2 PDFs · 1 not moved.');
+    expect([...detail.querySelectorAll('tbody tr')].map((row) => row.lastElementChild?.textContent)).toEqual([
+      'Not movedThe file has changed since the plan was proposed; it was left where it is.',
+      'Moved',
+    ]);
+    expect(detail.querySelector('.personal-replace')).toBeNull();
+    expect([...host.querySelectorAll('button')].some((candidate) => candidate.textContent?.includes('Approve'))).toBe(false);
+    expect(detail.textContent).toContain('Approved by owner on This Mac');
   });
 
   it('revokes a folder grant', async () => {

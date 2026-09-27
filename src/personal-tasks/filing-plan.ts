@@ -7,8 +7,8 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertGrantRoot, GrantPathError } from './folder-grant.js';
-import { PdfTooLargeError, readGrantedPdf } from './pdf-inventory.js';
+import { assertGrantRoot, fingerprintGrantedFile, GrantPathError } from './folder-grant.js';
+import { DEFAULT_MAX_PDF_BYTES } from './pdf-inventory.js';
 import type { FilingPlanEntry, FilingWarning } from './types.js';
 
 export const MAX_FILE_NAME_LENGTH = 120;
@@ -107,7 +107,13 @@ function join(destination: string, name: string): string {
   return destination ? `${destination}/${name}` : name;
 }
 
-function existingTarget(root: string, target: string, source: FilingSource, maxBytes?: number): FilingWarning | undefined {
+interface ExistingTarget {
+  warning: FilingWarning;
+  /** The content already at the target, when it could be read (issue #82 binds a replacement to it). */
+  sha256?: string;
+}
+
+function existingTarget(root: string, target: string, source: FilingSource, maxBytes?: number): ExistingTarget | undefined {
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(path.join(root, ...target.split('/')));
@@ -115,14 +121,16 @@ function existingTarget(root: string, target: string, source: FilingSource, maxB
     return undefined;
   }
   if (!stat.isFile()) throw new FilingPlanError('Something other than a file already has that name.');
+  let sha256: string | undefined;
   try {
-    if (readGrantedPdf(root, target, { maxBytes }).sha256 === source.sha256) {
-      return { kind: 'already-filed', message: 'A file with identical content is already at this name; filing would replace it with the same bytes.' };
-    }
+    sha256 = fingerprintGrantedFile(root, target, maxBytes ?? DEFAULT_MAX_PDF_BYTES).sha256;
   } catch (error) {
-    if (!(error instanceof GrantPathError) && !(error instanceof PdfTooLargeError)) throw error;
+    if (!(error instanceof GrantPathError)) throw error;
   }
-  return { kind: 'overwrite', message: 'A different file already has this name and would be replaced.' };
+  if (sha256 === source.sha256) {
+    return { sha256, warning: { kind: 'already-filed', message: 'A file with identical content is already at this name; filing would replace it with the same bytes.' } };
+  }
+  return { ...(sha256 ? { sha256 } : {}), warning: { kind: 'overwrite', message: 'A different file already has this name and would be replaced.' } };
 }
 
 /**
@@ -149,6 +157,7 @@ export function buildFilingPlan(
       const destination = validateDestination(request.destination);
       const target = join(destination, newName);
       const warnings: FilingWarning[] = [];
+      let existingSha256: string | undefined;
       if (fold(target) === fold(source.path)) {
         warnings.push({ kind: 'unchanged', message: 'The file already has this name and folder.' });
       } else {
@@ -156,10 +165,16 @@ export function buildFilingPlan(
         if (!exists) warnings.push({ kind: 'new-folder', message: `The folder "${destination}" does not exist yet and would be created.` });
         else {
           const existing = existingTarget(root, target, source, options.maxBytes);
-          if (existing) warnings.push(existing);
+          if (existing) {
+            warnings.push(existing.warning);
+            existingSha256 = existing.sha256;
+          }
         }
       }
-      entries.push({ source: source.path, sourceSha256: source.sha256, newName, destination, target, warnings });
+      entries.push({
+        source: source.path, sourceSha256: source.sha256, newName, destination, target, warnings,
+        ...(existingSha256 ? { existingTargetSha256: existingSha256 } : {}),
+      });
     } catch (error) {
       if (!(error instanceof FilingPlanError) && !(error instanceof GrantPathError)) throw error;
       unplanned.push({ path: source.path, reason: `The proposal was refused: ${error.message}` });
@@ -179,10 +194,14 @@ export function buildFilingPlan(
   return { entries, unplanned };
 }
 
-/** A stable digest of what the plan would do, bound to the grant and to each source's content. */
+/**
+ * A stable digest of what the plan would do, bound to the grant, to each
+ * source's content, and to the content of any file a move would replace.
+ */
 export function filingPlanDigest(grantId: string, entries: readonly FilingPlanEntry[]): string {
   const canonical = [...entries]
-    .map((entry) => [entry.source, entry.sourceSha256, entry.destination, entry.newName])
+    .map((entry) => [entry.source, entry.sourceSha256, entry.destination, entry.newName,
+      ...(entry.existingTargetSha256 ? [entry.existingTargetSha256] : [])])
     .sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0));
   return createHash('sha256').update(JSON.stringify({ v: 1, grantId, entries: canonical })).digest('hex');
 }

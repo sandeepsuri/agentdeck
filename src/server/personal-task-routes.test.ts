@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CollaboratorService } from '../collaborators/service.js';
 import { defaultConfig } from '../config.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
-import type { FolderGrantView, PersonalTaskView } from '../personal-tasks/types.js';
+import type { FilingProvider } from '../personal-tasks/confined-provider.js';
+import { isFilingProposal, type FolderGrantView, type PersonalTaskView } from '../personal-tasks/types.js';
+import { scriptedFilingProvider, type BrokerCall } from '../test-fixtures/filing-agent.js';
 import { Store } from '../store/index.js';
 import { buildApp } from './app.js';
 import { TOKEN_HEADER } from './connection-trust.js';
@@ -29,6 +31,7 @@ let collaborators: CollaboratorService;
 let service: PersonalTaskService;
 let app: FastifyInstance;
 let picked: string | undefined;
+let filingProvider: FilingProvider | undefined;
 
 function write(file: string, content = PDF): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -38,7 +41,7 @@ function write(file: string, content = PDF): void {
 function boot(): void {
   store = new Store(dbFile);
   collaborators = new CollaboratorService(store);
-  service = new PersonalTaskService({ repository: store.personal, homeDir: home });
+  service = new PersonalTaskService({ repository: store.personal, homeDir: home, ...(filingProvider ? { filingProvider } : {}) });
   service.recover();
   app = buildApp({
     config: { ...defaultConfig(), tailscaleToken: SHARED_TOKEN },
@@ -66,6 +69,7 @@ beforeEach(() => {
   write(path.join(folder, 'readme.txt'), 'text');
   write(path.join(home, 'Private', 'secret.pdf'));
   picked = folder;
+  filingProvider = undefined;
   boot();
 });
 
@@ -213,6 +217,81 @@ describe('filing proposals (issue #81)', () => {
   });
 });
 
+/** Files january.pdf into Bills as "January.pdf" through the real broker. */
+const fileJanuary = async (call: BrokerCall) => {
+  const documents = JSON.parse((await call('list_documents')).text) as { document: string; name: string }[];
+  for (const document of documents) {
+    await call('read_document', { document: document.document });
+    await call('propose_filing', { document: document.document, new_name: `${document.name[0]!.toUpperCase()}${document.name.slice(1)}`, destination: 'Bills' });
+  }
+};
+
+async function proposeJanuary(): Promise<{ id: string; planDigest: string }> {
+  await shutdown();
+  filingProvider = scriptedFilingProvider({ script: fileJanuary });
+  boot();
+  const grant = await pickGrant();
+  const created = await app.inject({
+    method: 'POST', url: '/api/personal/tasks', headers: LOCAL, payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: ['january.pdf'] },
+  });
+  await service.whenIdle();
+  const task = service.get((created.json() as PersonalTaskView).id)!;
+  if (!task.result || !isFilingProposal(task.result)) throw new Error(`no proposal: ${task.failure}`);
+  return { id: task.id, planDigest: task.result.planDigest };
+}
+
+describe('carrying out a filing proposal (issue #82)', () => {
+  it('moves the approved plan, survives restart, and a repeated approve moves nothing again', async () => {
+    const { id, planDigest } = await proposeJanuary();
+    const approve = () => app.inject({ method: 'POST', url: `/api/personal/tasks/${id}/filing/approve`, headers: LOCAL, payload: { planDigest } });
+
+    const first = await approve();
+    expect(first.statusCode).toBe(200);
+    await service.whenIdle();
+    expect(fs.existsSync(path.join(folder, 'Bills', 'January.pdf'))).toBe(true);
+    expect(fs.existsSync(path.join(folder, 'january.pdf'))).toBe(false);
+
+    const done = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${id}`, headers: LOCAL })).json() as PersonalTaskView;
+    expect(done.filing).toMatchObject({ state: 'finished', receipts: [{ source: 'january.pdf', target: 'Bills/January.pdf', state: 'moved' }] });
+    expect(JSON.stringify(done)).not.toContain(base);
+
+    await shutdown();
+    boot();
+    write(path.join(folder, 'january.pdf'));
+    const again = await approve();
+    expect(again.statusCode).toBe(200);
+    await service.whenIdle();
+    expect((again.json() as PersonalTaskView).filing).toEqual(done.filing);
+    expect(fs.existsSync(path.join(folder, 'january.pdf'))).toBe(true);
+  });
+
+  it('refuses a plan fingerprint that is not the one on record', async () => {
+    const { id } = await proposeJanuary();
+    const response = await app.inject({ method: 'POST', url: `/api/personal/tasks/${id}/filing/approve`, headers: LOCAL, payload: { planDigest: 'stale' } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ code: 'stale-plan' });
+    const missing = await app.inject({ method: 'POST', url: `/api/personal/tasks/${id}/filing/approve`, headers: LOCAL, payload: {} });
+    expect(missing.statusCode).toBe(400);
+    expect(fs.existsSync(path.join(folder, 'january.pdf'))).toBe(true);
+  });
+
+  it('a collaborator device or the shared token can never approve or carry out a plan', async () => {
+    const { id, planDigest } = await proposeJanuary();
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const { token } = collaborators.exchangeInvitation(code, 'phone');
+    for (const credential of [token, SHARED_TOKEN]) {
+      const response = await app.inject({
+        method: 'POST', url: `/api/personal/tasks/${id}/filing/approve`, headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: credential }, payload: { planDigest },
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.body).not.toContain('january');
+    }
+    await service.whenIdle();
+    expect(service.get(id)!.filing).toBeUndefined();
+    expect(fs.existsSync(path.join(folder, 'january.pdf'))).toBe(true);
+  });
+});
+
 describe('everyone else', () => {
   it('a collaborator device can neither read nor submit owner personal work', async () => {
     const grant = await pickGrant();
@@ -229,6 +308,7 @@ describe('everyone else', () => {
       { method: 'POST' as const, url: '/api/personal/tasks', payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: ['january.pdf'] } },
       { method: 'POST' as const, url: '/api/personal/grants/pick' },
       { method: 'POST' as const, url: `/api/personal/grants/${grant.id}/revoke` },
+      { method: 'POST' as const, url: `/api/personal/tasks/${id}/filing/approve`, payload: { planDigest: 'x' } },
     ];
     for (const request of requests) {
       const response = await app.inject({ ...request, headers: remote });

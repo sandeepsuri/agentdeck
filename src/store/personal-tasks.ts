@@ -5,7 +5,7 @@
 // attempt behind it.
 import type { Database } from 'better-sqlite3';
 import type {
-  FolderGrant, PersonalActivityKind, PersonalActor, PersonalAttemptOutcome, PersonalTask,
+  FilingApproval, FilingApprovalState, FilingReceipt, FilingReceiptState, FolderGrant, PersonalActivityKind, PersonalActor, PersonalAttemptOutcome, PersonalTask,
   PersonalTaskActivity, PersonalTaskAttempt, PersonalTaskKind, PersonalTaskResult, PersonalTaskStatus,
 } from '../personal-tasks/types.js';
 
@@ -16,6 +16,15 @@ interface TaskRow {
 }
 interface AttemptRow { id: string; sequence: number; started_at: string; ended_at: string | null; outcome: string | null }
 interface ActivityRow { sequence: number; at: string; kind: string; message: string; attempt_id: string | null; path: string | null }
+
+interface ApprovalRow {
+  id: string; task_id: string; grant_id: string; plan_digest: string; approved_by: string; approved_at: string; expires_at: string;
+  state: string; started_at: string | null; finished_at: string | null; updated_at: string;
+}
+interface ReceiptRow {
+  sequence: number; source: string; source_sha256: string; target: string; overwrite: number; target_sha256: string | null;
+  state: string; reason: string | null; updated_at: string;
+}
 
 export type NewPersonalActivity = Omit<PersonalTaskActivity, 'sequence'>;
 
@@ -66,6 +75,24 @@ function rowToActivity(r: ActivityRow): PersonalTaskActivity {
     ...(r.path !== null ? { path: r.path } : {}),
   };
 }
+
+function rowToReceipt(r: ReceiptRow): FilingReceipt {
+  return {
+    sequence: r.sequence,
+    source: r.source,
+    sourceSha256: r.source_sha256,
+    target: r.target,
+    overwrite: r.overwrite === 1,
+    ...(r.target_sha256 !== null ? { targetSha256: r.target_sha256 } : {}),
+    state: r.state as FilingReceiptState,
+    ...(r.reason !== null ? { reason: r.reason } : {}),
+    updatedAt: r.updated_at,
+  };
+}
+
+export type NewFilingApproval = Omit<FilingApproval, 'receipts' | 'startedAt' | 'finishedAt' | 'updatedAt'> & {
+  receipts: readonly Omit<FilingReceipt, 'updatedAt'>[];
+};
 
 export class PersonalTaskRepository {
   constructor(private readonly db: Database) {}
@@ -189,6 +216,96 @@ export class PersonalTaskRepository {
       if (changed) this.insertActivity(taskId, activity);
       return changed;
     })();
+  }
+
+  // -- filing approvals (issue #82) --
+
+  /**
+   * Records the approval and every receipt, with its activity, in one
+   * transaction, before anything moves. Returns false, writing nothing, when
+   * the task already has an approval: a proposal is approved at most once.
+   */
+  createFilingApproval(approval: NewFilingApproval, activity: NewPersonalActivity): boolean {
+    return this.db.transaction(() => {
+      if (this.db.prepare('SELECT 1 FROM personal_filing_approvals WHERE task_id = ?').get(approval.taskId)) return false;
+      this.db.prepare(
+        `INSERT INTO personal_filing_approvals (id, task_id, grant_id, plan_digest, approved_by, approved_at, expires_at, state, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(approval.id, approval.taskId, approval.grantId, approval.planDigest, JSON.stringify(approval.approvedBy),
+        approval.approvedAt, approval.expiresAt, approval.state, approval.approvedAt);
+      const insert = this.db.prepare(
+        `INSERT INTO personal_filing_receipts (approval_id, sequence, source, source_sha256, target, overwrite, target_sha256, state, reason, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const receipt of approval.receipts) {
+        insert.run(approval.id, receipt.sequence, receipt.source, receipt.sourceSha256, receipt.target, receipt.overwrite ? 1 : 0,
+          receipt.targetSha256 ?? null, receipt.state, receipt.reason ?? null, approval.approvedAt);
+      }
+      this.insertActivity(approval.taskId, activity);
+      return true;
+    })();
+  }
+
+  getFilingApproval(taskId: string): FilingApproval | undefined {
+    const row = this.db.prepare('SELECT * FROM personal_filing_approvals WHERE task_id = ?').get(taskId) as ApprovalRow | undefined;
+    return row && this.rowToApproval(row);
+  }
+
+  /** Approvals whose execution has not finished: not yet started, or under way when the process stopped. */
+  listUnsettledFilingApprovals(): FilingApproval[] {
+    return (this.db.prepare(
+      "SELECT * FROM personal_filing_approvals WHERE state IN ('approved', 'executing') ORDER BY approved_at, id",
+    ).all() as ApprovalRow[]).map((row) => this.rowToApproval(row));
+  }
+
+  /** The single-execution guard: moves an approval from approved to executing. False if anything else already did. */
+  startFilingExecution(approvalId: string, at: string): boolean {
+    return this.db.prepare(
+      "UPDATE personal_filing_approvals SET state = 'executing', started_at = ?, updated_at = ? WHERE id = ? AND state = 'approved'",
+    ).run(at, at, approvalId).changes > 0;
+  }
+
+  /** Moves one receipt on only from the state the caller expects. False if it had already moved on. */
+  settleFilingReceipt(
+    approvalId: string, sequence: number, from: FilingReceiptState, to: FilingReceiptState, at: string, reason?: string,
+  ): boolean {
+    return this.db.prepare(
+      'UPDATE personal_filing_receipts SET state = ?, reason = ?, updated_at = ? WHERE approval_id = ? AND sequence = ? AND state = ?',
+    ).run(to, reason ?? null, at, approvalId, sequence, from).changes > 0;
+  }
+
+  /** Ends an approval as finished or expired; any receipt still pending is settled with `pendingReason`. */
+  finishFilingApproval(
+    approval: Pick<FilingApproval, 'id' | 'taskId'>, state: Extract<FilingApprovalState, 'finished' | 'expired'>, at: string,
+    pendingReason: string, activity: NewPersonalActivity,
+  ): void {
+    this.db.transaction(() => {
+      this.db.prepare(
+        "UPDATE personal_filing_receipts SET state = 'failed', reason = ?, updated_at = ? WHERE approval_id = ? AND state = 'pending'",
+      ).run(pendingReason, at, approval.id);
+      this.db.prepare('UPDATE personal_filing_approvals SET state = ?, finished_at = ?, updated_at = ? WHERE id = ?')
+        .run(state, at, at, approval.id);
+      this.insertActivity(approval.taskId, activity);
+    })();
+  }
+
+  private rowToApproval(r: ApprovalRow): FilingApproval {
+    const receipts = (this.db.prepare('SELECT * FROM personal_filing_receipts WHERE approval_id = ? ORDER BY sequence').all(r.id) as ReceiptRow[])
+      .map(rowToReceipt);
+    return {
+      id: r.id,
+      taskId: r.task_id,
+      grantId: r.grant_id,
+      planDigest: r.plan_digest,
+      approvedBy: JSON.parse(r.approved_by) as PersonalActor,
+      approvedAt: r.approved_at,
+      expiresAt: r.expires_at,
+      state: r.state as FilingApprovalState,
+      ...(r.started_at !== null ? { startedAt: r.started_at } : {}),
+      ...(r.finished_at !== null ? { finishedAt: r.finished_at } : {}),
+      updatedAt: r.updated_at,
+      receipts,
+    };
   }
 
   private insertActivity(taskId: string, activity: NewPersonalActivity): void {

@@ -107,6 +107,7 @@ describe('filing proposal', () => {
       {
         source: 'water.pdf', sourceSha256: digest(WATER), newName: 'Water 2026-04.pdf', destination: 'Bills', target: 'Bills/Water 2026-04.pdf',
         warnings: [{ kind: 'overwrite', message: expect.stringMatching(/would be replaced/) }],
+        existingTargetSha256: digest(fs.readFileSync(path.join(folder, 'Bills', 'Water 2026-04.pdf'))),
       },
     ]);
     expect(result).toMatchObject({ planDigest: expect.stringMatching(/^[0-9a-f]{64}$/), unplanned: [], skipped: [], provider: { runtime: 'claude', confinement: 'macos-seatbelt' } });

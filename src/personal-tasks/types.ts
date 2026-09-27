@@ -7,9 +7,10 @@ import type { RunActorDevice, RunPrincipal } from '../work-engine/types.js';
 /**
  * Bumped whenever the rules a personal task runs under change, so each task
  * records the rules it ran under. 2: a filing proposal may let a confined
- * agent read granted PDFs through the broker (issue #81).
+ * agent read granted PDFs through the broker (issue #81). 3: the owner may
+ * approve a proposal, and AgentDeck then moves the approved files (issue #82).
  */
-export const PERSONAL_TASK_POLICY_VERSION = 'personal-files/2';
+export const PERSONAL_TASK_POLICY_VERSION = 'personal-files/3';
 
 /** The only workspace personal tasks live in today: the owner's own, never a Repository. */
 export const OWNER_WORKSPACE = 'owner';
@@ -57,7 +58,12 @@ export type PersonalActivityKind =
   | 'document-read'
   | 'filing-proposed'
   | 'broker-refused'
-  | 'proposal-ready';
+  | 'proposal-ready'
+  // Approving and carrying out a proposal (issue #82).
+  | 'filing-approved'
+  | 'file-moved'
+  | 'move-failed'
+  | 'filing-finished';
 
 export interface PersonalTaskActivity {
   readonly sequence: number;
@@ -126,6 +132,11 @@ export interface FilingPlanEntry {
   /** destination/newName, relative to the grant. */
   target: string;
   warnings: FilingWarning[];
+  /**
+   * The content already at the target, when the plan would replace it
+   * (issue #82). A replacement is approved only for these exact bytes.
+   */
+  existingTargetSha256?: string;
 }
 
 export interface FilingProposalResult {
@@ -133,8 +144,8 @@ export interface FilingProposalResult {
   readonly attemptId: string;
   readonly completedAt: string;
   /**
-   * SHA-256 over the grant id and every entry's source, digest, destination
-   * and name. Any change to the plan changes it, so a decision bound to one
+   * SHA-256 over the grant id and every entry's source, digest, destination,
+   * name, and the digest of any file it would replace. Any change to the plan changes it, so a decision bound to one
    * digest cannot carry over to a different plan.
    */
   readonly planDigest: string;
@@ -149,6 +160,50 @@ export type PersonalTaskResult = PdfInventoryResult | FilingProposalResult;
 
 export function isFilingProposal(result: PersonalTaskResult): result is FilingProposalResult {
   return 'kind' in result && result.kind === 'pdf-filing-proposal';
+}
+
+/**
+ * Where one planned file stands. 'moving' is written immediately before
+ * the one change on disk, so a receipt left 'moving' by a crash is
+ * reconciled from the disk rather than moved again.
+ */
+export type FilingReceiptState = 'pending' | 'moving' | 'moved' | 'skipped' | 'failed' | 'uncertain';
+
+export interface FilingReceipt {
+  readonly sequence: number;
+  readonly source: string;
+  readonly sourceSha256: string;
+  readonly target: string;
+  /** True only when the owner approved replacing what is at the target. */
+  readonly overwrite: boolean;
+  /** The content at the target that the proposal showed and the owner agreed to replace. */
+  readonly targetSha256?: string;
+  readonly state: FilingReceiptState;
+  readonly reason?: string;
+  readonly updatedAt: string;
+}
+
+export type FilingApprovalState = 'approved' | 'executing' | 'finished' | 'expired';
+
+/**
+ * The owner's approval of one exact proposal (issue #82), bound to its
+ * task, grant, plan digest, the approving actor, an expiry, and a single
+ * execution.
+ */
+export interface FilingApproval {
+  readonly id: string;
+  readonly taskId: string;
+  readonly grantId: string;
+  readonly planDigest: string;
+  readonly approvedBy: PersonalActor;
+  readonly approvedAt: string;
+  /** The execution must start before this. */
+  readonly expiresAt: string;
+  readonly state: FilingApprovalState;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly updatedAt: string;
+  readonly receipts: readonly FilingReceipt[];
 }
 
 export interface PersonalTask {
@@ -194,4 +249,27 @@ export interface PersonalTaskView {
   activity: readonly PersonalTaskActivity[];
   failure?: string;
   result?: PersonalTaskResult;
+  /** The owner's approval and what it moved; only on a filing proposal. */
+  filing?: FilingApprovalView;
+}
+
+export interface FilingReceiptView {
+  sequence: number;
+  source: string;
+  target: string;
+  overwrite: boolean;
+  state: FilingReceiptState;
+  reason?: string;
+  updatedAt: string;
+}
+
+export interface FilingApprovalView {
+  state: FilingApprovalState;
+  planDigest: string;
+  approvedBy: { displayName: string; device: string };
+  approvedAt: string;
+  expiresAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  receipts: FilingReceiptView[];
 }

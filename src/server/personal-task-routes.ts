@@ -1,5 +1,6 @@
 // Issue #80: owner-only routes for folder grants and personal tasks
-// (inventories, and filing proposals from issue #81). None of
+// (inventories, filing proposals from issue #81, and approving and carrying
+// out a proposal from issue #82). None of
 // these paths is on app.ts's remote or collaborator allowlists, so a remote
 // request is refused before it reaches here; resolveOwner repeats the check
 // so the routes stay owner-only even if an allowlist later widens.
@@ -26,6 +27,7 @@ const PERSONAL_TASK_ERROR_STATUS: Record<PersonalTaskError['code'], number> = {
   'grant-revoked': 409,
   'invalid-input': 400,
   'invalid-state': 409,
+  'stale-plan': 409,
 };
 
 function sendError(error: unknown, reply: FastifyReply): FastifyReply {
@@ -109,6 +111,19 @@ export function registerPersonalTaskRoutes(app: FastifyInstance, deps: PersonalT
     try {
       const input = { grantId: body.grantId, files: body.files as string[] };
       return reply.code(201).send(body.kind === 'pdf-inventory' ? service.submitInventory(input, actor) : service.submitFilingProposal(input, actor));
+    } catch (error) {
+      return sendError(error, reply);
+    }
+  });
+
+  // Issue #82: approve the exact plan the owner reviewed (by its digest) and
+  // carry it out. Repeating the same approval returns the one on record.
+  app.post('/api/personal/tasks/:id/filing/approve', async (request, reply) => {
+    const actor = owner(request, reply);
+    if (!actor) return reply;
+    const body = (request.body ?? {}) as { planDigest?: unknown; overwrite?: unknown };
+    try {
+      return service.approveFiling((request.params as { id: string }).id, { planDigest: body.planDigest, overwrite: body.overwrite }, actor);
     } catch (error) {
       return sendError(error, reply);
     }

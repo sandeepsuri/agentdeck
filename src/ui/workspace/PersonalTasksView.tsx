@@ -2,13 +2,15 @@
 // Sessions. The owner grants one folder through the native macOS picker
 // (the browser never names a path), chooses PDFs in it, and submits an
 // inventory that AgentDeck performs itself, or (issue #81) asks a confined
-// agent for a filing proposal that moves nothing. Activity and results come
+// agent for a filing proposal that moves nothing until the owner approves
+// that exact plan (issue #82); AgentDeck then moves the files itself and
+// shows a receipt for each one. Activity and results come
 // from the durable server projection, so a reload or restart reopens the
 // same task.
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { GrantedPdfListing } from '../../personal-tasks/folder-grant.js';
 import {
-  isFilingProposal, type FilingProposalResult, type FolderGrantView, type PdfInventoryResult, type PersonalTaskKind,
+  isFilingProposal, type FilingApprovalView, type FilingPlanEntry, type FilingProposalResult, type FilingReceiptState, type FolderGrantView, type PdfInventoryResult, type PersonalTaskKind,
   type PersonalTaskStatus, type PersonalTaskView,
 } from '../../personal-tasks/types.js';
 import { apiFetch } from '../apiFetch.js';
@@ -121,7 +123,7 @@ function PdfSelection({ grant, onSubmitted, onError }: {
           {busy === 'pdf-filing-proposal' ? 'Submitting…' : 'Propose filing plan'}
         </button>
       </div>
-      <p className="personal-note">A filing plan lets a confined agent read the selected PDFs through AgentDeck and suggest names and folders. Nothing is moved.</p>
+      <p className="personal-note">A filing plan lets a confined agent read the selected PDFs through AgentDeck and suggest names and folders. Nothing is moved until you approve the plan.</p>
     </form>
   );
 }
@@ -158,37 +160,107 @@ function InventoryResult({ result }: { result: PdfInventoryResult }) {
   );
 }
 
-/** Rendered only from the typed plan entries and digests; the agent's own words never appear here. */
-function FilingProposal({ result }: { result: FilingProposalResult }) {
+const REPLACES = new Set(['overwrite', 'already-filed']);
+const replacesFile = (entry: FilingPlanEntry) => entry.warnings.some((warning) => REPLACES.has(warning.kind));
+const unchanged = (entry: FilingPlanEntry) => entry.warnings.some((warning) => warning.kind === 'unchanged');
+
+const RECEIPT_LABEL: Record<FilingReceiptState, string> = {
+  pending: 'Waiting',
+  moving: 'Moving',
+  moved: 'Moved',
+  skipped: 'Left in place',
+  failed: 'Not moved',
+  uncertain: 'Check folder',
+};
+
+function filingHeadline(filing: FilingApprovalView): string {
+  const planned = filing.receipts.filter((receipt) => receipt.state !== 'skipped');
+  const moved = planned.filter((receipt) => receipt.state === 'moved').length;
+  if (filing.state === 'approved' || filing.state === 'executing') return `Moving… ${moved} of ${planned.length} moved so far.`;
+  if (filing.state === 'expired') return 'The approval expired before the moves started. Nothing was moved.';
+  const notMoved = planned.length - moved;
+  return `Moved ${moved} of ${planned.length} PDF${planned.length === 1 ? '' : 's'}${notMoved ? ` · ${notMoved} not moved` : ''}.`;
+}
+
+/** Rendered only from the typed plan entries, digests, and receipts; the agent's own words never appear here. */
+function FilingProposal({ result, filing, onApprove }: {
+  result: FilingProposalResult;
+  filing?: FilingApprovalView;
+  onApprove: (overwrite: string[]) => Promise<void>;
+}) {
+  const [replace, setReplace] = useState<ReadonlySet<string>>(new Set());
+  const [approving, setApproving] = useState(false);
   const warned = result.entries.filter((entry) => entry.warnings.some((warning) => warning.kind !== 'new-folder')).length;
+  const receipts = new Map(filing?.receipts.map((receipt) => [receipt.source, receipt]));
+  const moving = result.entries.filter((entry) => !unchanged(entry) && (!replacesFile(entry) || replace.has(entry.source))).length;
+
+  const toggle = (source: string) => setReplace((current) => {
+    const next = new Set(current);
+    if (next.has(source)) next.delete(source); else next.add(source);
+    return next;
+  });
+
+  const approve = async () => {
+    setApproving(true);
+    try {
+      await onApprove(result.entries.filter((entry) => replace.has(entry.source)).map((entry) => entry.source));
+    } finally {
+      setApproving(false);
+    }
+  };
+
   return (
     <section aria-label="Filing proposal" className="personal-result">
       <p className="personal-result-summary">
         {result.entries.length} PDF{result.entries.length === 1 ? '' : 's'} to file
         {warned > 0 ? ` · ${warned} with warnings` : ''}
         {result.unplanned.length > 0 ? ` · ${result.unplanned.length} left in place` : ''}
-        {' · '}<strong>Nothing has been moved.</strong>
+        {' · '}<strong>{filing ? filingHeadline(filing) : 'Nothing has been moved.'}</strong>
       </p>
       <div className="personal-table-scroll">
         <table>
-          <thead><tr><th scope="col">Now</th><th scope="col">New name</th><th scope="col">Folder</th><th scope="col">Warnings</th></tr></thead>
+          <thead>
+            <tr>
+              <th scope="col">Now</th><th scope="col">New name</th><th scope="col">Folder</th><th scope="col">Warnings</th>
+              {filing && <th scope="col">Outcome</th>}
+            </tr>
+          </thead>
           <tbody>
-            {result.entries.map((entry) => (
-              <tr key={entry.source}>
-                <th scope="row" title={`${entry.source} · ${entry.sourceSha256}`}>{entry.source}</th>
-                <td>{entry.newName}</td>
-                <td>{entry.destination || 'Top of folder'}</td>
-                <td className="personal-warnings">
-                  {entry.warnings.length === 0 ? '—' : (
-                    <ul>
-                      {entry.warnings.map((warning) => (
-                        <li className={`is-${warning.kind}`} key={warning.kind}>{warning.message}</li>
-                      ))}
-                    </ul>
+            {result.entries.map((entry) => {
+              const receipt = receipts.get(entry.source);
+              return (
+                <tr key={entry.source}>
+                  <th scope="row" title={`${entry.source} · ${entry.sourceSha256}`}>{entry.source}</th>
+                  <td>{entry.newName}</td>
+                  <td>{entry.destination || 'Top of folder'}</td>
+                  <td className="personal-warnings">
+                    {entry.warnings.length === 0 ? '—' : (
+                      <ul>
+                        {entry.warnings.map((warning) => (
+                          <li className={`is-${warning.kind}`} key={warning.kind}>{warning.message}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {!filing && replacesFile(entry) && (
+                      <label className="personal-replace">
+                        <input checked={replace.has(entry.source)} onChange={() => toggle(entry.source)} type="checkbox" />
+                        Replace the existing file
+                      </label>
+                    )}
+                  </td>
+                  {filing && (
+                    <td className="personal-receipt">
+                      {receipt ? (
+                        <>
+                          <span className={`personal-receipt-state is-${receipt.state}`}>{RECEIPT_LABEL[receipt.state]}</span>
+                          {receipt.reason && <small>{receipt.reason}</small>}
+                        </>
+                      ) : '—'}
+                    </td>
                   )}
-                </td>
-              </tr>
-            ))}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -202,14 +274,32 @@ function FilingProposal({ result }: { result: FilingProposalResult }) {
           {result.skipped.map((entry) => <li key={entry.path}><strong>{entry.path}</strong>: {entry.reason}</li>)}
         </ul>
       )}
-      <p className="personal-note">
-        Proposed by confined Claude Code {result.provider.cliVersion.split(' ')[0]}. Plan fingerprint <code title={result.planDigest}>{result.planDigest.slice(0, 12)}</code>
-      </p>
+      {filing ? (
+        <p className="personal-note">
+          Approved by {filing.approvedBy.displayName} on {filing.approvedBy.device} at {time(filing.approvedAt)} for plan{' '}
+          <code title={filing.planDigest}>{filing.planDigest.slice(0, 12)}</code>. A plan is carried out once; ask for a new proposal to file anything left.
+        </p>
+      ) : (
+        <div className="personal-approve">
+          <button className="button button-primary" disabled={approving || moving === 0} onClick={() => void approve()} type="button">
+            {approving ? 'Approving…' : `Approve and move ${moving} PDF${moving === 1 ? '' : 's'}`}
+          </button>
+          <p className="personal-note">
+            Approves exactly this plan (fingerprint <code title={result.planDigest}>{result.planDigest.slice(0, 12)}</code>), once.
+            AgentDeck moves the files itself and checks each one again first: a file that changed, a link, or a name that is now taken is left where it is.
+            Proposed by confined Claude Code {result.provider.cliVersion.split(' ')[0]}.
+          </p>
+        </div>
+      )}
     </section>
   );
 }
 
-function TaskDetail({ task, onRetry }: { task: PersonalTaskView; onRetry: () => void }) {
+function TaskDetail({ task, onRetry, onApprove }: {
+  task: PersonalTaskView;
+  onRetry: () => void;
+  onApprove: (overwrite: string[]) => Promise<void>;
+}) {
   return (
     <article aria-labelledby={`personal-task-${task.id}`} className="personal-task-detail">
       <header>
@@ -232,7 +322,7 @@ function TaskDetail({ task, onRetry }: { task: PersonalTaskView; onRetry: () => 
       )}
 
       {task.result && (isFilingProposal(task.result)
-        ? <FilingProposal result={task.result} />
+        ? <FilingProposal key={task.id} onApprove={onApprove} result={task.result} {...(task.filing ? { filing: task.filing } : {})} />
         : <InventoryResult result={task.result} />)}
 
       <section aria-label="Activity">
@@ -275,7 +365,8 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
 
   useEffect(() => { if (active) void refresh(); }, [active, refresh]);
 
-  const unsettled = tasks?.some((task) => task.status === 'queued' || task.status === 'running') ?? false;
+  const unsettled = tasks?.some((task) => task.status === 'queued' || task.status === 'running'
+    || task.filing?.state === 'approved' || task.filing?.state === 'executing') ?? false;
   useEffect(() => {
     if (!active || !unsettled) return undefined;
     const id = setInterval(() => void refresh(), POLL_MS);
@@ -315,12 +406,19 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
     await refresh();
   });
 
+  const approve = (task: PersonalTaskView, overwrite: string[]) => run(async () => {
+    const result = task.result;
+    if (!result || !isFilingProposal(result)) return;
+    await post(`/api/personal/tasks/${encodeURIComponent(task.id)}/filing/approve`, { planDigest: result.planDigest, overwrite });
+    await refresh();
+  });
+
   return (
     <section className="workspace-scroll personal-view">
       <div className="view-heading">
         <div className="view-heading-copy">
           <h1>Personal tasks</h1>
-          <span>AgentDeck reads only the folder you choose. An agent sees these files only for a filing plan you ask for, and never moves them.</span>
+          <span>AgentDeck reads only the folder you choose. An agent sees these files only for a filing plan you ask for, and never moves them; only a plan you approve is moved, by AgentDeck itself.</span>
         </div>
       </div>
 
@@ -387,7 +485,9 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
                 </li>
               ))}
             </ul>
-            {selectedTask && <TaskDetail onRetry={() => void retry(selectedTask)} task={selectedTask} />}
+            {selectedTask && (
+              <TaskDetail onApprove={(overwrite) => approve(selectedTask, overwrite)} onRetry={() => void retry(selectedTask)} task={selectedTask} />
+            )}
           </div>
         )}
       </section>

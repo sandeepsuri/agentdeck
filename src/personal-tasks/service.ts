@@ -6,13 +6,19 @@
 //   selected PDFs through the filing broker and proposes names and folders.
 //   Each Attempt consults the confinement gate first; if it does not pass,
 //   no agent process starts and the task says why. Nothing is moved.
+// - carrying out a proposal (issue #82): the owner approves the exact plan
+//   by its digest, and AgentDeck's own code moves each file, re-checking
+//   it on disk first (filing-execution.ts). Intent and per-file receipts are
+//   durable before and after every move, so a repeat or restart never
+//   moves a file twice.
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { PersonalTaskRepository } from '../store/personal-tasks.js';
+import type { NewFilingApproval, PersonalTaskRepository } from '../store/personal-tasks.js';
 import type { FilingProvider, FilingProviderAccess } from './confined-provider.js';
 import { FILING_BROKER_MCP_TOOLS, startFilingBroker, type BrokerDocument, type FilingBrokerEvent } from './filing-broker.js';
+import { moveGrantedPdf, reconcileMove } from './filing-execution.js';
 import { buildFilingPlan, filingPlanDigest, type FilingSource } from './filing-plan.js';
 import {
   assertGrantRoot, canonicalGrantRoot, GrantPathError, listGrantedPdfs, listGrantFolders, openGrantedPdf, type GrantedPdfListing,
@@ -20,13 +26,17 @@ import {
 import { inspectPdf, PdfTooLargeError, readGrantedPdf, readPdfFacts, type InspectLimits } from './pdf-inventory.js';
 import { extractPdfText } from './pdf-text.js';
 import {
-  OWNER_WORKSPACE, PERSONAL_TASK_POLICY_VERSION, type FolderGrant, type FolderGrantView, type PdfInventoryEntry,
-  type PersonalActivityKind, type PersonalActor, type PersonalTask, type PersonalTaskKind, type PersonalTaskView,
+  isFilingProposal, OWNER_WORKSPACE, PERSONAL_TASK_POLICY_VERSION, type FilingApproval, type FilingApprovalView, type FilingReceipt,
+  type FolderGrant, type FolderGrantView, type PdfInventoryEntry, type PersonalActivityKind, type PersonalActor, type PersonalTask,
+  type PersonalTaskKind, type PersonalTaskView,
 } from './types.js';
 
 export const DEFAULT_MAX_FILES_PER_TASK = 100;
 
-export type PersonalTaskErrorCode = 'not-found' | 'grant-revoked' | 'invalid-input' | 'invalid-state';
+/** How long after approval the moves may start; a later start expires the approval instead. */
+export const FILING_APPROVAL_TTL_MS = 10 * 60 * 1000;
+
+export type PersonalTaskErrorCode = 'not-found' | 'grant-revoked' | 'invalid-input' | 'invalid-state' | 'stale-plan';
 
 export class PersonalTaskError extends Error {
   constructor(readonly code: PersonalTaskErrorCode, message: string, readonly path?: string) {
@@ -229,6 +239,10 @@ export class PersonalTaskService {
       }
       if (rerun || open.length === 0) this.schedule(task.id);
     }
+    for (const approval of this.repository.listUnsettledFilingApprovals()) {
+      if (approval.state === 'approved') this.scheduleFilingExecution(approval.taskId);
+      else this.reconcileFiling(approval);
+    }
   }
 
   /** Resolves once every scheduled attempt has settled. */
@@ -238,6 +252,10 @@ export class PersonalTaskService {
 
   private schedule(taskId: string): void {
     this.queue = this.queue.then(() => this.runAttempt(taskId)).catch(() => undefined);
+  }
+
+  private scheduleFilingExecution(taskId: string): void {
+    this.queue = this.queue.then(() => this.executeFilingApproval(taskId)).catch(() => undefined);
   }
 
   private async runAttempt(taskId: string): Promise<void> {
@@ -451,6 +469,200 @@ export class PersonalTaskService {
     }
   }
 
+  // -- carrying out a filing proposal (issue #82) --
+
+  /**
+   * The owner approves one exact proposal, identified by the plan digest
+   * they reviewed, and chooses which flagged targets may be replaced. The
+   * approval and a receipt per file are stored before anything moves. A
+   * repeat with the same digest returns the approval already on record, so a
+   * double tap, reconnect, or retry never authorizes a second execution.
+   */
+  approveFiling(taskId: string, input: { planDigest: unknown; overwrite?: unknown }, actor: PersonalActor): PersonalTaskView {
+    const task = this.repository.getTask(taskId);
+    if (!task) throw new PersonalTaskError('not-found', 'No such task.');
+    if (task.kind !== 'pdf-filing-proposal' || task.status !== 'completed' || !task.result || !isFilingProposal(task.result)) {
+      throw new PersonalTaskError('invalid-state', 'Only a finished filing proposal can be approved.');
+    }
+    if (typeof input.planDigest !== 'string' || input.planDigest.length === 0) {
+      throw new PersonalTaskError('invalid-input', 'The plan fingerprint you reviewed is required.');
+    }
+    const existing = this.repository.getFilingApproval(taskId);
+    if (existing) {
+      if (existing.planDigest !== input.planDigest) throw new PersonalTaskError('stale-plan', 'This proposal was already approved as a different plan.');
+      return this.get(taskId)!;
+    }
+    const result = task.result;
+    if (input.planDigest !== result.planDigest || filingPlanDigest(task.grantId, result.entries) !== result.planDigest) {
+      throw new PersonalTaskError('stale-plan', 'The plan changed since you reviewed it. Review the current plan and approve again.');
+    }
+    if (result.entries.length === 0) throw new PersonalTaskError('invalid-state', 'This proposal has nothing to file.');
+    const overwrite = input.overwrite ?? [];
+    if (!Array.isArray(overwrite) || overwrite.some((source) => typeof source !== 'string')) {
+      throw new PersonalTaskError('invalid-input', 'Replacements must be a list of files from the plan.');
+    }
+    const replaceable = (source: string) => result.entries.some((entry) => entry.source === source
+      && entry.warnings.some((warning) => warning.kind === 'overwrite' || warning.kind === 'already-filed'));
+    const refused = (overwrite as string[]).find((source) => !replaceable(source));
+    if (refused !== undefined) {
+      throw new PersonalTaskError('invalid-input', 'Only a file the plan warned would replace another can be approved to replace it.', refused);
+    }
+    const grant = this.activeGrant(task.grantId);
+    try {
+      assertGrantRoot(grant.rootPath);
+    } catch (error) {
+      throw new PersonalTaskError('grant-revoked', error instanceof Error ? error.message : 'The granted folder is unavailable.');
+    }
+
+    const at = this.at();
+    const fold = (relative: string) => relative.normalize('NFC').toLowerCase();
+    const claimed = new Set<string>();
+    const receipts: NewFilingApproval['receipts'] = result.entries.map((entry, index) => {
+      const base = { sequence: index + 1, source: entry.source, sourceSha256: entry.sourceSha256, target: entry.target };
+      const skip = (reason: string) => ({ ...base, overwrite: false, state: 'skipped' as const, reason });
+      if (entry.warnings.some((warning) => warning.kind === 'unchanged')) return skip('Already has this name and folder; nothing to move.');
+      if (claimed.has(fold(entry.target))) return skip('Not moved: an earlier file in this plan is going to the same name.');
+      if (replaceable(entry.source)) {
+        if (!(overwrite as string[]).includes(entry.source)) return skip('Not moved: you did not approve replacing the file already at this name.');
+        if (result.entries.some((other) => other !== entry && fold(other.source) === fold(entry.target))) {
+          return skip('Not moved: the file at this name is also part of this plan.');
+        }
+        if (!entry.existingTargetSha256) return skip('Not moved: the file at this name could not be read when the plan was made, so replacing it cannot be checked. Ask for a new proposal.');
+      }
+      claimed.add(fold(entry.target));
+      return replaceable(entry.source)
+        ? { ...base, overwrite: true, targetSha256: entry.existingTargetSha256!, state: 'pending' as const }
+        : { ...base, overwrite: false, state: 'pending' as const };
+    });
+    const moving = receipts.filter((receipt) => receipt.state === 'pending').length;
+    const created = this.repository.createFilingApproval({
+      id: randomUUID(),
+      taskId,
+      grantId: task.grantId,
+      planDigest: result.planDigest,
+      approvedBy: actor,
+      approvedAt: at,
+      expiresAt: new Date(this.now().getTime() + FILING_APPROVAL_TTL_MS).toISOString(),
+      state: 'approved',
+      receipts,
+    }, {
+      at,
+      kind: 'filing-approved',
+      message: `${actor.principal.displayName} approved plan ${result.planDigest.slice(0, 12)} on ${actor.device.label}: `
+        + `${plural(moving, 'PDF')} to move${receipts.length > moving ? `, ${receipts.length - moving} left in place` : ''}.`,
+    });
+    if (created && this.options.autoRun !== false) this.scheduleFilingExecution(taskId);
+    return this.get(taskId)!;
+  }
+
+  /** The one execution of an approval. Only an approval still in 'approved' state can start it. */
+  private async executeFilingApproval(taskId: string): Promise<void> {
+    const approval = this.repository.getFilingApproval(taskId);
+    if (!approval || approval.state !== 'approved') return;
+    if (this.now().getTime() >= Date.parse(approval.expiresAt)) {
+      const reason = 'The approval expired before the move started; nothing was moved.';
+      this.repository.finishFilingApproval(approval, 'expired', this.at(), reason, { at: this.at(), kind: 'failed', message: reason });
+      return;
+    }
+    const task = this.repository.getTask(taskId);
+    const result = task?.result && isFilingProposal(task.result) ? task.result : undefined;
+    if (!task || !result || result.planDigest !== approval.planDigest || filingPlanDigest(task.grantId, result.entries) !== approval.planDigest) {
+      const reason = 'The plan on record no longer matches what you approved; nothing was moved.';
+      this.repository.finishFilingApproval(approval, 'expired', this.at(), reason, { at: this.at(), kind: 'failed', message: reason });
+      return;
+    }
+    if (!this.repository.startFilingExecution(approval.id, this.at())) return;
+
+    let stopped: { summary: string; reason: string } | undefined;
+    try {
+      for (const receipt of approval.receipts) {
+        if (receipt.state !== 'pending') continue;
+        // Yield so a revocation or shutdown can land between files.
+        await new Promise((resolve) => setImmediate(resolve));
+        const grant = this.repository.getGrant(approval.grantId);
+        if (!grant || grant.revokedAt) {
+          stopped = {
+            summary: 'Access to the folder was revoked.',
+            reason: 'Access to the folder was revoked before this file was moved; it was left where it was.',
+          };
+          break;
+        }
+        let from: 'pending' | 'moving' = 'pending';
+        const outcome = moveGrantedPdf(grant.rootPath, receipt, {
+          ...(this.options.maxPdfBytes !== undefined ? { maxBytes: this.options.maxPdfBytes } : {}),
+          beforeEffect: () => {
+            if (!this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'pending', 'moving', this.at())) {
+              throw new Error('The receipt was already settled.');
+            }
+            from = 'moving';
+          },
+        });
+        if (outcome.state === 'moved') {
+          const reason = outcome.replaced ? 'Replaced the previous file at this name, as you approved.' : undefined;
+          this.repository.settleFilingReceipt(approval.id, receipt.sequence, from, 'moved', this.at(), reason);
+          this.repository.appendActivity(taskId, {
+            at: this.at(), kind: 'file-moved', message: `Moved ${path.basename(receipt.source)} → ${receipt.target}.`, path: receipt.source,
+          });
+        } else {
+          this.repository.settleFilingReceipt(approval.id, receipt.sequence, from, outcome.state, this.at(), outcome.reason);
+          this.repository.appendActivity(taskId, {
+            at: this.at(), kind: 'move-failed', message: `Did not move ${path.basename(receipt.source)}: ${outcome.reason}`, path: receipt.source,
+          });
+        }
+      }
+    } catch {
+      stopped = {
+        summary: 'The moves stopped because of an unexpected error.',
+        reason: 'The moves stopped because of an unexpected error; this file was left where it was.',
+      };
+      this.reconcileMoving(this.repository.getFilingApproval(taskId)!);
+    }
+    const settled = this.repository.getFilingApproval(taskId)!;
+    this.repository.finishFilingApproval(settled, 'finished', this.at(), stopped?.reason ?? 'This file was not moved.', {
+      at: this.at(), kind: 'filing-finished', message: `${this.filingSummary(settled)}${stopped ? ` ${stopped.summary}` : ''}`,
+    });
+  }
+
+  private filingSummary(approval: FilingApproval): string {
+    const count = (state: FilingReceipt['state']) => approval.receipts.filter((receipt) => receipt.state === state).length;
+    const planned = approval.receipts.filter((receipt) => receipt.state !== 'skipped').length;
+    const notMoved = planned - count('moved') - count('uncertain');
+    return `Moved ${count('moved')} of ${plural(planned, 'PDF')}`
+      + `${notMoved ? `; ${notMoved} not moved` : ''}`
+      + `${count('uncertain') ? `; ${count('uncertain')} uncertain, check the folder` : ''}`
+      + `${count('skipped') ? `; ${count('skipped')} left in place` : ''}.`;
+  }
+
+  /**
+   * Boot-time repair of an execution that was under way. A file marked
+   * 'moving' is judged from the disk (reconcileMove) and never moved again;
+   * a file not yet started is left where it is.
+   */
+  private reconcileFiling(approval: FilingApproval): void {
+    this.reconcileMoving(approval);
+    const reason = 'AgentDeck stopped before this file was moved; it was left where it was. Ask for a new proposal to file it.';
+    const settled = this.repository.getFilingApproval(approval.taskId)!;
+    this.repository.finishFilingApproval(settled, 'finished', this.at(), reason, {
+      at: this.at(),
+      kind: 'interrupted',
+      message: `AgentDeck stopped while filing. ${this.filingSummary({
+        ...settled, receipts: settled.receipts.map((receipt) => (receipt.state === 'pending' ? { ...receipt, state: 'failed' } : receipt)),
+      })} Nothing is moved again after a restart.`,
+    });
+  }
+
+  /** Settles every receipt left 'moving' from what the disk shows, without moving anything again. */
+  private reconcileMoving(approval: FilingApproval): void {
+    const grant = this.repository.getGrant(approval.grantId);
+    for (const receipt of approval.receipts) {
+      if (receipt.state !== 'moving') continue;
+      const outcome = grant && !grant.revokedAt
+        ? reconcileMove(grant.rootPath, receipt)
+        : { state: 'uncertain' as const, reason: 'The move was interrupted, and access to the folder has since been revoked.' };
+      this.repository.settleFilingReceipt(approval.id, receipt.sequence, 'moving', outcome.state, this.at(), 'reason' in outcome ? outcome.reason : undefined);
+    }
+  }
+
   // -- projections --
 
   private grantName(grant: FolderGrant): string {
@@ -490,6 +702,32 @@ export class PersonalTaskService {
       activity: this.repository.listActivity(task.id),
       ...(task.failure ? { failure: task.failure } : {}),
       ...(task.result ? { result: task.result } : {}),
+      ...this.filingView(task.id),
+    };
+  }
+
+  private filingView(taskId: string): { filing?: FilingApprovalView } {
+    const approval = this.repository.getFilingApproval(taskId);
+    if (!approval) return {};
+    return {
+      filing: {
+        state: approval.state,
+        planDigest: approval.planDigest,
+        approvedBy: { displayName: approval.approvedBy.principal.displayName, device: approval.approvedBy.device.label },
+        approvedAt: approval.approvedAt,
+        expiresAt: approval.expiresAt,
+        ...(approval.startedAt ? { startedAt: approval.startedAt } : {}),
+        ...(approval.finishedAt ? { finishedAt: approval.finishedAt } : {}),
+        receipts: approval.receipts.map((receipt) => ({
+          sequence: receipt.sequence,
+          source: receipt.source,
+          target: receipt.target,
+          overwrite: receipt.overwrite,
+          state: receipt.state,
+          ...(receipt.reason ? { reason: receipt.reason } : {}),
+          updatedAt: receipt.updatedAt,
+        })),
+      },
     };
   }
 }
