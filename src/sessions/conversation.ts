@@ -193,11 +193,27 @@ function closestStart(candidates: { file: string; startedAt: number }[], session
     .sort((left, right) => left.startedAt - right.startedAt)[0]?.file;
 }
 
+/** Hook identities include the agent name; transcript filenames contain only the provider ID. */
+function transcriptId(session: Session): string | undefined {
+  const identity = session.agentSessionId;
+  const prefix = `${session.agent}:`;
+  const id = identity?.startsWith(prefix) ? identity.slice(prefix.length) : identity;
+  return id && /^[a-zA-Z0-9_-]+$/.test(id) && id !== 'unknown' ? id : undefined;
+}
+
+function isExactTranscript(session: Session, file: string): boolean {
+  const id = transcriptId(session);
+  return !id || (session.agent === 'claude'
+    ? path.basename(file) === `${id}.jsonl`
+    : path.basename(file).endsWith(`-${id}.jsonl`));
+}
+
 async function locateClaude(session: Session, roots: readonly string[]): Promise<string | undefined> {
   const directories = roots.map((root) => path.join(root, claudeProjectDirName(session.cwd)));
-  if (session.agentSessionId) {
+  const id = transcriptId(session);
+  if (id) {
     for (const directory of directories) {
-      const file = path.join(directory, `${session.agentSessionId}.jsonl`);
+      const file = path.join(directory, `${id}.jsonl`);
       if (fs.existsSync(file)) return file;
     }
   }
@@ -226,8 +242,9 @@ async function locateCodex(session: Session, roots: readonly string[]): Promise<
   const sessionStart = Date.parse(session.startedAt);
   const directories = roots.flatMap((root) => localDateDirs(root, sessionStart));
   const files = (await Promise.all(directories.map((directory) => listFiles(directory, '.jsonl')))).flat();
-  if (session.agentSessionId) {
-    const byId = files.find((file) => path.basename(file).endsWith(`-${session.agentSessionId}.jsonl`));
+  const id = transcriptId(session);
+  if (id) {
+    const byId = files.find((file) => path.basename(file).endsWith(`-${id}.jsonl`));
     if (byId) return byId;
   }
   const candidates: { file: string; startedAt: number }[] = [];
@@ -257,17 +274,19 @@ export class ConversationReader {
   constructor(private readonly roots: UsageRoots = defaultUsageRoots()) {}
 
   async read(session: Session): Promise<ConversationView> {
-    let file = this.paths.get(session.id);
+    const key = `${session.id}:${session.startedAt}`;
+    let file = this.paths.get(key);
+    if (file && !isExactTranscript(session, file)) file = undefined;
     if (!file) {
       file = await locateTranscript(session, this.roots);
       if (!file) return { found: false, turns: [] };
-      this.paths.set(session.id, file);
+      this.paths.set(key, file);
     }
     let stat: fs.Stats;
     try {
       stat = await fsp.stat(file);
     } catch {
-      this.paths.delete(session.id);
+      this.paths.delete(key);
       return { found: false, turns: [] };
     }
     const cached = this.parsed.get(file);

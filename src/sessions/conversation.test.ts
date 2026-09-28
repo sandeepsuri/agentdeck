@@ -87,6 +87,7 @@ describe('locateTranscript', () => {
     const roots = { claude: [root], codex: [] };
 
     expect(await locateTranscript(session({ agentSessionId: 'older' }), roots)).toBe(older);
+    expect(await locateTranscript(session({ agentSessionId: 'claude:older' }), roots)).toBe(older);
     expect(await locateTranscript(session(), roots)).toBe(ours);
     expect(await locateTranscript(session({ startedAt: '2026-09-28T00:00:00.000Z' }), roots)).toBeUndefined();
   });
@@ -104,6 +105,7 @@ describe('locateTranscript', () => {
     const roots = { claude: [], codex: [root] };
 
     expect(await locateTranscript(session({ agent: 'codex', agentSessionId: 'thread-9' }), roots)).toBe(other);
+    expect(await locateTranscript(session({ agent: 'codex', agentSessionId: 'codex:thread-9' }), roots)).toBe(other);
     expect(await locateTranscript(session({ agent: 'codex' }), roots)).toBe(ours);
   });
 });
@@ -122,6 +124,21 @@ describe('ConversationReader', () => {
 
     fs.appendFileSync(file, `\n${jsonl({ type: 'assistant', uuid: 'a', timestamp: '2026-09-27T20:00:04Z', message: { content: [{ type: 'text', text: 'hi!' }] } })}`);
     expect((await reader.read(session())).turns.map((turn) => turn.text)).toEqual(['hello', 'hi!']);
+  });
+
+  it('switches from a provisional time match to the hook-identified transcript', async () => {
+    const root = tempDir();
+    const project = path.join(root, claudeProjectDirName('/Users/me/Code/app'));
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'other.jsonl'), jsonl(
+      { type: 'assistant', uuid: 'a', timestamp: '2026-09-27T20:00:01Z', message: { content: [{ type: 'text', text: 'other session' }] } },
+    ));
+    fs.writeFileSync(path.join(project, 'ours.jsonl'), jsonl(
+      { type: 'assistant', uuid: 'b', timestamp: '2026-09-27T20:00:02Z', message: { content: [{ type: 'text', text: 'agent reply' }] } },
+    ));
+    const reader = new ConversationReader({ claude: [root], codex: [] });
+    expect((await reader.read(session())).turns.map((turn) => turn.text)).toEqual(['other session']);
+    expect((await reader.read(session({ agentSessionId: 'claude:ours' }))).turns.map((turn) => turn.text)).toEqual(['agent reply']);
   });
 });
 
