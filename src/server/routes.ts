@@ -18,6 +18,9 @@ import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
 import { ConversationReader, mergeSentConversationTurns } from '../sessions/conversation.js';
 import {
+  answerKeystrokes, answerLabels, answerMessage, type PendingQuestion, type QuestionAnswer, validateQuestionAnswers,
+} from '../sessions/questions.js';
+import {
   createRuntimeReadinessSource,
   publicRuntimeReadinessReport,
   type RuntimeReadinessSource,
@@ -836,6 +839,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // only — tool calls carry this Mac's paths and commands, which neither a
   // collaborator grant nor the shared remote token covers.
   const conversations = ctx.conversations ?? new ConversationReader();
+  // A Claude AskUserQuestion that AgentDeck's hook is holding: the terminal
+  // shows no menu while the hook waits, so the answer resolves the hook.
+  const hookQuestion = (session: Session, question: PendingQuestion) => ctx.store?.listSessionInteractions(session.id)
+    .find((row) => row.status === 'pending' && row.kind === 'question' && row.providerRequestId === question.id);
+  const canAnswer = (session: Session, question: PendingQuestion) =>
+    Boolean(hookQuestion(session, question)) || (session.origin === 'managed' && manager.isLive(session.id));
   app.get('/api/sessions/:id/conversation', async (req, reply) => {
     if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
     const { id } = req.params as { id: string };
@@ -843,7 +852,81 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (!session) return reply.code(404).send({ error: 'no such session' });
     const conversation = await conversations.read(session);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
-    return mergeSentConversationTurns(conversation, session, await readBusTail(repoPath));
+    const merged = mergeSentConversationTurns(conversation, session, await readBusTail(repoPath));
+    return merged.question ? { ...merged, question: { ...merged.question, canAnswer: canAnswer(session, merged.question) } } : merged;
+  });
+
+  // Answers the question the agent has open, from the Conversation view.
+  // The answer is checked against the question as the transcript has it
+  // now, then delivered the way that question is waiting for it: resolving
+  // the hook holding it, typing the menu keys into the managed PTY, or —
+  // for a queued Codex question — sending an ordinary reply.
+  const answering = new Set<string>();
+  app.post('/api/sessions/:id/conversation/answer', async (req, reply) => {
+    const trust = requestTrust(req);
+    if (trust.kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const body = req.body as { questionId?: unknown; answers?: unknown } | null;
+    const question = (await conversations.read(session)).question;
+    if (!question || question.id !== body?.questionId) {
+      return reply.code(409).send({ error: 'This question has already been answered or is no longer open.' });
+    }
+    let answers: QuestionAnswer[];
+    try {
+      answers = validateQuestionAnswers(question, body.answers);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+
+    const hooked = hookQuestion(session, question);
+    if (hooked) {
+      const sender = resolveSenderIdentity(trust);
+      const won = ctx.store?.resolveSessionInteraction(hooked.id, {
+        response: { kind: 'answer', answers: Object.fromEntries(question.questions.map((item, index) => [
+          item.question.slice(0, 4000), answerLabels(item, answers[index]!),
+        ])) },
+        principalId: sender.principalId, displayName: sender.displayName, resolvedAt: new Date().toISOString(),
+      });
+      if (!won) return reply.code(409).send({ error: 'This question has already been answered.' });
+      return { delivered: 'hook' };
+    }
+
+    if (session.origin !== 'managed' || !manager.isLive(id)) {
+      return reply.code(400).send({ error: 'Answer this question in the agent’s own terminal.' });
+    }
+    if (answering.has(id)) return reply.code(409).send({ error: 'An answer is already being typed.' });
+    answering.add(id);
+    try {
+      if (question.delivery === 'message') {
+        const text = answerMessage(question, answers);
+        manager.write(id, text);
+        // both agent TUIs debounce paste-then-submit
+        setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
+        const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+        await appendAgentMessage(repoPath, {
+          ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath, event: 'message', message: text, sessionId: session.id,
+        });
+        return { delivered: 'message' };
+      }
+      let keys: string[];
+      try {
+        keys = answerKeystrokes(session.agent, question, answers);
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+      }
+      // The menus drop keys that arrive in one burst; typed text needs longer to settle.
+      for (const key of keys) {
+        manager.write(id, key);
+        await new Promise((resolve) => setTimeout(resolve, key.length > 1 && !key.startsWith('\x1b') ? 600 : 250));
+      }
+      return { delivered: 'typed' };
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      answering.delete(id);
+    }
   });
 
   app.get('/api/sessions/:id/scrollback', async (req, reply) => {

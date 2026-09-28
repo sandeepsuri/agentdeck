@@ -4,7 +4,9 @@
 // transcript (GET /api/sessions/:id/conversation), so it is exactly what the
 // agent saw and said, with none of the TUI's redraw noise. The composer types
 // into the live session through the same /send path as the terminal
-// composer; approvals and menus still happen in the Terminal tab.
+// composer. A multiple-choice question the agent opens (Claude's
+// AskUserQuestion, Codex's request_user_input) is answered here as a card;
+// permission approvals still happen in the Terminal tab.
 import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ConversationTurn, ConversationView as ConversationBody } from '../../sessions/conversation.js';
 import type { Session } from '../../types.js';
@@ -43,6 +45,99 @@ function ToolGroup({ turns }: { turns: ConversationTurn[] }) {
   );
 }
 
+type OpenQuestion = NonNullable<ConversationBody['question']>;
+interface Draft { selected: number[]; other: string }
+
+/** The agent's open multiple-choice question, answerable here instead of in the Terminal. */
+export function QuestionCard({ sessionId, agentName, question, onAnswered, onOpenTerminal }: {
+  sessionId: string; agentName: string; question: OpenQuestion; onAnswered: () => void; onOpenTerminal: () => void;
+}) {
+  const [drafts, setDrafts] = useState<Draft[]>(() => question.questions.map(() => ({ selected: [], other: '' })));
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const update = (index: number, change: (draft: Draft) => Draft) =>
+    setDrafts((current) => current.map((draft, at) => (at === index ? change(draft) : draft)));
+  const complete = drafts.every((draft) => draft.selected.length > 0 || draft.other.trim());
+  const answerable = question.canAnswer !== false;
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!complete || sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation/answer`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          questionId: question.id,
+          answers: drafts.map((draft) => ({ selected: draft.selected, ...(draft.other.trim() ? { other: draft.other.trim() } : {}) })),
+        }),
+      });
+      if (!response.ok) throw new Error(((await response.json()) as { error?: string }).error ?? 'Could not send the answer.');
+      onAnswered();
+    } catch (sendError) {
+      setError(sendError instanceof Error ? sendError.message : String(sendError));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form aria-label={`${agentName} is asking`} className="conversation-question" onSubmit={(event) => void submit(event)}>
+      <span className="conversation-question-label">{agentName} is asking</span>
+      {question.questions.map((item, index) => {
+        const draft = drafts[index]!;
+        return (
+          <fieldset disabled={!answerable || sending} key={`${index}:${item.question}`}>
+            <legend>
+              {item.header && <span className="conversation-question-header">{item.header}</span>}
+              {item.question}
+              {item.multiSelect && <small> · choose any</small>}
+            </legend>
+            {item.options.map((option, optionIndex) => (
+              <label className="conversation-question-option" key={`${optionIndex}:${option.label}`}>
+                <input
+                  checked={draft.selected.includes(optionIndex)}
+                  name={`${question.id}:${index}`}
+                  onChange={() => update(index, (current) => (item.multiSelect
+                    ? { ...current, selected: current.selected.includes(optionIndex)
+                      ? current.selected.filter((value) => value !== optionIndex) : [...current.selected, optionIndex] }
+                    : { selected: [optionIndex], other: '' }))}
+                  type={item.multiSelect ? 'checkbox' : 'radio'}
+                />
+                <span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
+              </label>
+            ))}
+            <input
+              aria-label={`Other answer to ${item.question}`}
+              className="conversation-question-other"
+              onChange={(event) => {
+                const other = event.target.value;
+                update(index, (current) => ({ selected: item.multiSelect || !other.trim() ? current.selected : [], other }));
+              }}
+              placeholder="Or type your own answer…"
+              type="text"
+              value={draft.other}
+            />
+          </fieldset>
+        );
+      })}
+      {answerable ? (
+        <div className="conversation-question-actions">
+          <button className="button button-primary" disabled={!complete || sending} type="submit">{sending ? 'Sending…' : 'Send answer'}</button>
+          <button className="text-button" onClick={onOpenTerminal} type="button">Answer in Terminal</button>
+        </div>
+      ) : (
+        <p className="conversation-question-note">
+          AgentDeck can’t reach this session’s terminal, so answer it there.
+          <button className="text-button" onClick={onOpenTerminal} type="button">Open Terminal</button>
+        </p>
+      )}
+      {error && <div className="form-error" role="alert">{error}</div>}
+    </form>
+  );
+}
+
 export function ConversationView({ session, onOpenTerminal }: { session: Session; onOpenTerminal: () => void }) {
   const draftKey = `agentdeck:conversation-draft:${session.id}:${session.startedAt}`;
   const [body, setBody] = useState<ConversationBody | null>(null);
@@ -53,6 +148,8 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [following, setFollowing] = useState(true);
+  /** The question just answered here: hidden until the transcript records the answer. */
+  const [answeredId, setAnsweredId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -83,7 +180,7 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element && following) element.scrollTop = element.scrollHeight;
-  }, [turnCount, pending, following]);
+  }, [turnCount, pending, following, body?.question?.id]);
 
   const onScroll = () => {
     const element = scrollRef.current;
@@ -121,6 +218,7 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
   const agentName = session.agent === 'claude' ? 'Claude' : 'Codex';
   const items = groupTurns(body?.turns ?? []);
   const working = session.status === 'working' || session.status === 'starting' || pending !== null;
+  const question = live && body?.question && body.question.id !== answeredId ? body.question : undefined;
 
   return (
     <div className="conversation">
@@ -147,8 +245,12 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
               <div className="conversation-bubble"><p>{pending}</p></div>
             </div>
           )}
-          {live && working && <div aria-live="polite" className="conversation-working"><span /><span /><span /> {agentName} is working</div>}
-          {live && session.status === 'waiting_input' && (
+          {question && (
+            <QuestionCard agentName={agentName} key={question.id} onAnswered={() => { setAnsweredId(question.id); setFollowing(true); void load(); }}
+              onOpenTerminal={onOpenTerminal} question={question} sessionId={session.id} />
+          )}
+          {live && working && !question && <div aria-live="polite" className="conversation-working"><span /><span /><span /> {agentName} is working</div>}
+          {live && session.status === 'waiting_input' && !question && (
             <div className="conversation-waiting" role="status">
               {agentName} is waiting for you — it may be asking for approval or a choice.
               <button className="text-button" onClick={onOpenTerminal} type="button">Open Terminal</button>

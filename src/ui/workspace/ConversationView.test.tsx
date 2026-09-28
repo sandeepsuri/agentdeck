@@ -120,6 +120,52 @@ describe('ConversationView', () => {
     expect(container!.querySelectorAll('.conversation-message.is-user')).toHaveLength(1);
   });
 
+  it('answers the agent’s open question from a card instead of the Terminal', async () => {
+    const posts: unknown[] = [];
+    const question = { id: 'toolu_1', delivery: 'menu', canAnswer: true, questions: [
+      { question: 'Pick a color', header: 'Color', multiSelect: false, options: [{ label: 'Red' }, { label: 'Green', description: 'Leafy' }] },
+      { question: 'Pick toppings', multiSelect: true, options: [{ label: 'Cheese' }, { label: 'Ham' }] },
+    ] };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') { posts.push({ url: String(input), body: JSON.parse(String(init.body)) }); return json({ delivered: 'typed' }); }
+      return json({ found: true, turns: [], question });
+    }));
+    await mount({ session: session({ agent: 'claude', status: 'waiting_input' }) });
+
+    const card = container!.querySelector('form.conversation-question')!;
+    expect(card.textContent).toContain('Claude is asking');
+    expect(container!.textContent).not.toContain('it may be asking for approval');
+    const send = [...card.querySelectorAll('button')].find((button) => button.textContent === 'Send answer')!;
+    expect(send.disabled).toBe(true);
+
+    const options = card.querySelectorAll<HTMLInputElement>('.conversation-question-option input');
+    await act(async () => options[1]!.click());
+    await act(async () => options[2]!.click());
+    await act(async () => options[3]!.click());
+    const other = card.querySelectorAll<HTMLInputElement>('.conversation-question-other')[1]!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(other, 'Olives');
+      other.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(send.disabled).toBe(false);
+    await act(async () => card.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    await flush();
+
+    expect(posts).toEqual([{ url: '/api/sessions/s1/conversation/answer', body: {
+      questionId: 'toolu_1', answers: [{ selected: [1] }, { selected: [0, 1], other: 'Olives' }],
+    } }]);
+    expect(container!.querySelector('form.conversation-question')).toBeNull();
+  });
+
+  it('sends a question it cannot answer to the Terminal', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ found: true, turns: [], question: {
+      id: 'toolu_1', delivery: 'menu', canAnswer: false, questions: [{ question: 'Pick', multiSelect: false, options: [{ label: 'A' }] }],
+    } })));
+    await mount({ session: session() });
+    expect(container!.querySelector('.conversation-question fieldset')!.hasAttribute('disabled')).toBe(true);
+    expect(container!.querySelector('.conversation-question-note')?.textContent).toContain('answer it there');
+  });
+
   it('points to the Terminal when the agent is waiting for an approval, and disables the composer once ended', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ found: true, turns: [] })));
     const onOpenTerminal = vi.fn();

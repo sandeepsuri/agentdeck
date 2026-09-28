@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { defaultConfig } from '../config.js';
 import { ConversationReader, claudeProjectDirName } from '../sessions/conversation.js';
 import type { SessionManager } from '../sessions/manager.js';
+import { Store } from '../store/index.js';
 import type { Session } from '../types.js';
 import { TOKEN_HEADER } from './connection-trust.js';
 import { registerRoutes } from './routes.js';
@@ -56,5 +57,80 @@ describe('GET /api/sessions/:id/conversation', () => {
     });
     expect(response.statusCode).toBe(403);
     await app.close();
+  });
+});
+
+describe('POST /api/sessions/:id/conversation/answer', () => {
+  const question = {
+    type: 'assistant', uuid: 'a1', timestamp: '2026-09-27T20:00:02Z', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'AskUserQuestion',
+      input: { questions: [{ question: 'Pick a color', multiSelect: false, options: [{ label: 'Red' }, { label: 'Green' }, { label: 'Blue' }] }] } }] },
+  };
+
+  function buildWithQuestion(options: { live?: boolean; store?: Store } = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-answer-route-'));
+    dirs.push(root);
+    const project = path.join(root, claudeProjectDirName(session.cwd));
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'x.jsonl'), JSON.stringify(question));
+    const written: string[] = [];
+    const app = Fastify();
+    registerRoutes(app, {
+      manager: {
+        getSession: (id: string) => (id === session.id ? session : undefined),
+        isLive: () => options.live ?? true,
+        write: (_id: string, data: string) => { written.push(data); },
+      } as unknown as SessionManager,
+      config: defaultConfig({}),
+      conversations: new ConversationReader({ claude: [root], codex: [] }),
+      ...(options.store ? { store: options.store } : {}),
+    });
+    return { app, written };
+  }
+
+  it('shows the open question and types the chosen answer into the live session', async () => {
+    const { app, written } = buildWithQuestion();
+    const view = await app.inject({ method: 'GET', url: '/api/sessions/sess-1/conversation' });
+    expect(view.json().question).toMatchObject({ id: 'toolu_1', delivery: 'menu', canAnswer: true, questions: [{ question: 'Pick a color' }] });
+
+    const answered = await app.inject({
+      method: 'POST', url: '/api/sessions/sess-1/conversation/answer', payload: { questionId: 'toolu_1', answers: [{ selected: [1] }] },
+    });
+    expect(answered.statusCode).toBe(200);
+    expect(answered.json()).toEqual({ delivered: 'typed' });
+    expect(written).toEqual(['2']);
+    await app.close();
+  });
+
+  it('refuses a stale question, an invalid answer, and a session AgentDeck cannot type into', async () => {
+    const { app, written } = buildWithQuestion();
+    const stale = await app.inject({ method: 'POST', url: '/api/sessions/sess-1/conversation/answer', payload: { questionId: 'toolu_0', answers: [{ selected: [0] }] } });
+    expect(stale.statusCode).toBe(409);
+    const invalid = await app.inject({ method: 'POST', url: '/api/sessions/sess-1/conversation/answer', payload: { questionId: 'toolu_1', answers: [{ selected: [7] }] } });
+    expect(invalid.statusCode).toBe(400);
+    expect(written).toEqual([]);
+    await app.close();
+
+    const ended = buildWithQuestion({ live: false });
+    expect((await ended.app.inject({ method: 'GET', url: '/api/sessions/sess-1/conversation' })).json().question.canAnswer).toBe(false);
+    const refused = await ended.app.inject({ method: 'POST', url: '/api/sessions/sess-1/conversation/answer', payload: { questionId: 'toolu_1', answers: [{ selected: [0] }] } });
+    expect(refused.statusCode).toBe(400);
+    await ended.app.close();
+  });
+
+  it('resolves the question through AgentDeck’s Claude hook when the hook is holding it', async () => {
+    const store = new Store(':memory:');
+    store.upsertSessionInteraction({
+      id: 'interaction-1', sessionId: session.id, provider: 'claude', providerSessionId: 'provider', providerRequestId: 'toolu_1',
+      requestedAt: '2026-09-27T20:00:02Z', kind: 'question', question: 'Pick a color',
+      choices: ['Red', 'Green', 'Blue'].map((label) => ({ id: label, label, questionId: 'Pick a color' })), allowsFreeText: true,
+    });
+    const { app, written } = buildWithQuestion({ live: false, store });
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/sess-1/conversation' })).json().question.canAnswer).toBe(true);
+    const answered = await app.inject({ method: 'POST', url: '/api/sessions/sess-1/conversation/answer', payload: { questionId: 'toolu_1', answers: [{ selected: [2] }] } });
+    expect(answered.json()).toEqual({ delivered: 'hook' });
+    expect(written).toEqual([]);
+    expect(store.getSessionInteraction('interaction-1')).toMatchObject({ status: 'resolved', response: { kind: 'answer', answers: { 'Pick a color': ['Blue'] } } });
+    await app.close();
+    store.close();
   });
 });
