@@ -83,13 +83,28 @@ describe('HomeView (everyday)', () => {
     expect(ask().getAttribute('aria-describedby')).toBeTruthy();
   });
 
-  it('hands an Ask to Start work with the typed text, and does nothing when it is blank', async () => {
+  it('starts an Ask with the typed text, and does nothing when it is blank', async () => {
     const handlers = await mount();
     expect(button('Continue').disabled).toBe(true);
     await act(async () => { type('  Add a dark mode toggle  '); });
     await act(async () => { button('Continue').click(); });
     expect(handlers.onAsk).toHaveBeenCalledWith('Add a dark mode toggle');
     expect(ask().value).toBe('');
+  });
+
+  it('holds the Ask as Starting… until the conversation has opened', async () => {
+    let finish: () => void = () => undefined;
+    const onAsk = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    await mount({ onAsk });
+    await act(async () => { type('Add rate limiting'); });
+    await act(async () => { button('Continue').click(); });
+    expect(button('Starting…').disabled).toBe(true);
+    expect(ask().disabled).toBe(true);
+    await act(async () => { button('Starting…').click(); });
+    expect(onAsk).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(); });
+    expect(ask().value).toBe('');
+    expect(button('Continue')).toBeTruthy();
   });
 
   it('submits an Ask with Enter but keeps Shift+Enter for a new line', async () => {

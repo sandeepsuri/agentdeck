@@ -14,7 +14,7 @@ import { apiFetch } from '../apiFetch.js';
 import {
   type AgentChoice, quickSessionName, resolveQuickAgent, resolveStructuredRuntimes, type StartWorkMode,
 } from '../workspace/startWork.js';
-import { lines, runtimeSelectableForManagedRun, saveRepositoryVerificationPolicy, submitWorkRun } from './workSubmission.js';
+import { launchQuickSession, lines, runtimeSelectableForManagedRun, saveRepositoryVerificationPolicy, submitWorkRun } from './workSubmission.js';
 
 const READINESS_LABELS: Record<RuntimeReadinessStatus, string> = {
   managed: 'Managed runs ready',
@@ -109,17 +109,11 @@ export function StartWorkModal({ repos, initialRepositoryId = null, initialTask 
 
   const startQuick = async (repo: Repo) => {
     const name = quickSessionName(task);
-    const response = await apiFetch('/api/sessions', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        agent: resolveQuickAgent(agent, runtimeReadiness), cwd: repo.path, permissionMode: 'default',
-        ...(name ? { name } : {}), initialPrompt: task.trim(),
-        ...(branch.trim() ? { branch: branch.trim(), createBranchIfMissing: createBranch } : {}),
-      }),
-    });
-    const body = await response.json() as Session & { error?: string };
-    if (!response.ok) throw new Error(body.error ?? `Starting work failed (${response.status})`);
-    onLaunched(body);
+    onLaunched(await launchQuickSession({
+      agent: resolveQuickAgent(agent, runtimeReadiness), cwd: repo.path, task,
+      ...(name ? { name } : {}),
+      ...(branch.trim() ? { branch: { name: branch.trim(), createIfMissing: createBranch } } : {}),
+    }));
   };
 
   const startStructured = async (repo: Repo) => {

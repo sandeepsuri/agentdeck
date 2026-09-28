@@ -1,8 +1,8 @@
-// Submission helpers shared by Start work (StartWorkModal.tsx), the
-// collaborator request form (RequestWorkModal.tsx, collaboratorRuns.ts) and
-// Profile creation (ProfilesPanel.tsx).
+// Submission helpers shared by Start work (StartWorkModal.tsx), Home's Ask
+// (App.tsx), the collaborator request form (RequestWorkModal.tsx,
+// collaboratorRuns.ts) and Profile creation (ProfilesPanel.tsx).
 import type { RuntimeReadinessReport } from '../../sessions/runtime-readiness-contract.js';
-import type { AgentType } from '../../types.js';
+import type { AgentType, Session } from '../../types.js';
 import type { RepositoryVerificationPolicy, WorkRun, WorkSpec } from '../../work-engine/types.js';
 import { apiFetch } from '../apiFetch.js';
 
@@ -34,6 +34,29 @@ export async function submitWorkRun(spec: WorkSpec, fetcher: RunFetcher = apiFet
   });
   const body = await response.json() as WorkRun & { error?: string };
   if (!response.ok) throw new Error(body.error ?? 'Run submission failed.');
+  return body;
+}
+
+export interface QuickSessionRequest {
+  agent: AgentType;
+  cwd: string;
+  task: string;
+  name?: string;
+  branch?: { name: string; createIfMissing: boolean };
+}
+
+/** Quick work: an ad hoc Session that opens with the task as its first message. */
+export async function launchQuickSession(request: QuickSessionRequest, fetcher: RunFetcher = apiFetch): Promise<Session> {
+  const response = await fetcher('/api/sessions', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      agent: request.agent, cwd: request.cwd, permissionMode: 'default',
+      ...(request.name ? { name: request.name } : {}), initialPrompt: request.task.trim(),
+      ...(request.branch ? { branch: request.branch.name, createBranchIfMissing: request.branch.createIfMissing } : {}),
+    }),
+  });
+  const body = await response.json() as Session & { error?: string };
+  if (!response.ok) throw new Error(body.error ?? `Starting work failed (${response.status})`);
   return body;
 }
 

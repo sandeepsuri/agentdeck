@@ -5,6 +5,7 @@ import type {
 import type {
   AttentionDecisionInput, CollaboratorRunSummary, Profile, PublicationTarget, WorkRun,
 } from '../work-engine/types.js';
+import type { RuntimeReadinessReport } from '../sessions/runtime-readiness-contract.js';
 import { deriveRunCompanionSessions } from '../work-engine/run-companion-session.js';
 import { TOKEN_QUERY_PARAM, type ServerFrame } from '../protocol.js';
 import { apiFetch, type ConnectionInfo, fetchConnection, responseJson, responseJsonArray } from './apiFetch.js';
@@ -17,6 +18,7 @@ import { LaunchModal } from './components/LaunchModal.js';
 import { SettingsWorkspace } from './components/SettingsWorkspace.js';
 import { HomeProviderSetup } from './components/ProviderSetupPanel.js';
 import { StartWorkModal, type StartWorkDraft } from './components/StartWorkModal.js';
+import { launchQuickSession } from './components/workSubmission.js';
 import { deriveNeedsYou, type NeedsYouItem } from './needsYou.js';
 import {
   inspectorPreferenceStorage, persistInspectorCollapsed, persistWorkLayout, readInspectorCollapsed, readWorkLayout, type WorkLayout,
@@ -37,6 +39,7 @@ import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { UsageView } from './workspace/UsageView.js';
 import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { WorkView } from './workspace/WorkView.js';
+import { quickSessionName, resolveAskAgent } from './workspace/startWork.js';
 import { sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
 import { isInspectorRelevant, parseInitialNavigation } from './navigation.js';
 import { finalizeRemoteAuthentication, resolveConnectionState } from './remote-auth.js';
@@ -526,6 +529,25 @@ export function App() {
   // opens the same Run or Session detail inside Work.
   const selectRun = (run: Pick<WorkRun, 'id'>) => { setShowSettings(false); setSelectedId(null); setSelectedRunId(run.id); setView('work'); };
   const openSession = (session: Pick<Session, 'id'>) => { setShowSettings(false); selectSession(session); setView('work'); setTerminalVisited(true); };
+  // Home's Ask starts the conversation straight away in the repository Work is
+  // filtered to (else the first), with whichever agent has the most plan
+  // left. Start work stays the path for choosing; any failure lands there
+  // with the typed task so nothing is lost.
+  const askFromHome = async (task: string) => {
+    const repo = repos.find((item) => item.id === activeRepositoryId) ?? repos[0];
+    if (!repo) return openStartWork(task);
+    const readiness = await apiFetch('/api/runtime-readiness')
+      .then((response) => response.ok ? response.json() as Promise<RuntimeReadinessReport> : null)
+      .catch(() => null);
+    const name = quickSessionName(task);
+    try {
+      const session = await launchQuickSession({ agent: resolveAskAgent(readiness, rateLimits), cwd: repo.path, task, ...(name ? { name } : {}) });
+      upsertSession(session); openSession(session); refreshRepos();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      openStartWork(task);
+    }
+  };
   const closeWorkDetail = () => { setSelectedId(null); setSelectedRunId(null); };
   const openWorkItem = (item: WorkItem) => (item.run ? selectRun(item.run) : item.session ? openSession(item.session) : undefined);
   const selectRepository = (repositoryId: string) => {
@@ -827,7 +849,7 @@ export function App() {
           <div className={layerClass('home')}>
             <HomeView
               needsYou={needsYou}
-              onAsk={openStartWork}
+              onAsk={askFromHome}
               onOpenNeedsYou={openNeedsYou}
               onOpenSettings={() => setShowSettings(true)}
               onOpenWork={() => navigateToView('work')}

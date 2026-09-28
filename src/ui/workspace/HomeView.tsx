@@ -1,10 +1,10 @@
 // Everyday 04 (#79): the everyday Home. Three things, in this order: Ask
-// (hands the typed text to the existing Start work flow, unsent), Needs you
+// (starts a conversation with the typed text straight away), Needs you
 // (the one derived queue, needsYou.ts), and Tasks (real Runs and Sessions,
 // workItems.ts). Personal tasks (#80) live in their own view and are not
 // mixed in here. Each section tells the truth about its source — still loading,
 // unreachable, or genuinely empty. Every action routes through handlers
-// App.tsx already owns (resolveRunAttention, opening work, Start work), so
+// App.tsx already owns (resolveRunAttention, opening work, starting work), so
 // Home adds no write path and changes no authorization. The developer
 // dashboard that used to live here is Developer tools › Overview.
 import { type FormEvent, type KeyboardEvent, type ReactNode, useState } from 'react';
@@ -30,7 +30,8 @@ export interface HomeViewProps {
   /** `work` covers Runs and Sessions — the sources of both Needs you and Tasks. */
   sources: { work: HomeSourceState; repositories: HomeSourceState };
   repositoryCount: number;
-  onAsk: (task: string) => void;
+  /** Starts a conversation with the task; resolves once it has opened (or fallen back to Start work). */
+  onAsk: (task: string) => Promise<void> | void;
   onOpenNeedsYou: (item: NeedsYouItem) => void;
   onOpenWorkItem: (item: WorkItem) => void;
   onOpenWork: () => void;
@@ -119,31 +120,37 @@ function NeedsYouRow({ item, run, onOpen, onResolve }: {
 function AskSection({ repositoryCount, repositoriesState, onAsk, onOpenSettings }: {
   repositoryCount: number;
   repositoriesState: HomeSourceState;
-  onAsk: (task: string) => void;
+  onAsk: HomeViewProps['onAsk'];
   onOpenSettings: () => void;
 }) {
   const [value, setValue] = useState('');
+  const [starting, setStarting] = useState(false);
   // Only a confirmed empty list blocks Ask; while loading or unreachable,
   // Start work itself shows what it can.
   const noRepository = repositoriesState === 'ready' && repositoryCount === 0;
   const task = value.trim();
-  const submit = (event?: FormEvent) => {
+  const submit = async (event?: FormEvent) => {
     event?.preventDefault();
-    if (!task || noRepository) return;
-    onAsk(task);
-    setValue('');
+    if (!task || noRepository || starting) return;
+    setStarting(true);
+    try {
+      await onAsk(task);
+      setValue('');
+    } finally {
+      setStarting(false);
+    }
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) submit(event);
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) void submit(event);
   };
   return (
     <section aria-labelledby="home-ask" className="home-section home-ask">
       <header className="home-section-header"><h2 id="home-ask">Ask</h2></header>
-      <form className="home-ask-form" onSubmit={submit}>
+      <form className="home-ask-form" onSubmit={(event) => { void submit(event); }}>
         <label className="home-ask-label" htmlFor="home-ask-input">What do you want done?</label>
         <textarea
           aria-describedby="home-ask-help"
-          disabled={noRepository}
+          disabled={noRepository || starting}
           id="home-ask-input"
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={onKeyDown}
@@ -157,9 +164,9 @@ function AskSection({ repositoryCount, repositoriesState, onAsk, onOpenSettings 
               ? <>Choose a folder of projects AgentDeck may use before asking for work. <button className="text-button" onClick={onOpenSettings} type="button">Open Settings</button></>
               : repositoriesState === 'error'
                 ? 'Couldn’t load your repositories. You can still continue and choose one in Start work.'
-                : 'Continue opens Start work to choose a repository and agent. Nothing starts until you confirm there.'}
+                : 'Continue starts a conversation right away, using the agent with the most plan left. Use Start work to choose the repository, agent, or mode yourself.'}
           </p>
-          <button className="button button-primary" disabled={!task || noRepository} type="submit">Continue</button>
+          <button className="button button-primary" disabled={!task || noRepository || starting} type="submit">{starting ? 'Starting…' : 'Continue'}</button>
         </div>
       </form>
     </section>
