@@ -30,6 +30,7 @@ import { deriveClaims } from '../coordination/status.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import type { RepositoryVerificationPolicy, WorkEngine } from '../work-engine/types.js';
 import type { CollaboratorService } from '../collaborators/service.js';
+import type { OwnerPairingService } from '../owner-pairing/service.js';
 import os from 'node:os';
 import path from 'node:path';
 import { installClaudeHooks, installCodexHooks, uninstallClaudeHooks, uninstallCodexHooks } from '../hooks/install.js';
@@ -223,6 +224,7 @@ export interface RouteContext {
   workEngine?: WorkEngine;
   /** Ticket 11: feeds requestTrust's deviceLookup, so a collaborator device's request resolves to its Principal and grants. Undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService;
+  ownerPairing?: OwnerPairingService;
   /** Reads each session's agent transcript for the Conversation view. Injectable so tests use fixture roots. */
   conversations?: ConversationReader;
 }
@@ -245,6 +247,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       remoteHosts: ctx.remoteHosts,
       token: ctx.config.tailscaleToken,
       deviceLookup: ctx.collaborators?.resolveDevice,
+      ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing),
     },
   );
 
@@ -1187,13 +1190,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
 
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
-    const recordSend = () => appendAgentMessage(repoPath, {
-      ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath,
-      event: 'message', message: text, sessionId: session.id,
-    });
+    const recordSend = async () => {
+      await appendAgentMessage(repoPath, {
+        ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath,
+        event: 'message', message: text, sessionId: session.id,
+      });
+    };
 
     if (session.origin === 'managed') {
       if (!manager.isLive(id)) return reply.code(400).send({ error: 'session is not running' });
+      // Audit before delivery: a storage failure must not produce an
+      // unattributed owner-phone terminal action.
+      if (trust.ownerDevice) {
+        if (!ctx.ownerPairing) throw new Error('Owner device audit unavailable.');
+        ctx.ownerPairing.audit(trust.ownerDevice.id, 'session-send', session.id);
+      }
       manager.write(id, text);
       // both agent TUIs debounce paste-then-submit
       setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);

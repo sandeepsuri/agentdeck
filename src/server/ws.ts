@@ -19,6 +19,8 @@ import { isAllowedRemoteInput } from './remote-input.js';
 import { LiveReflow, type Unsubscribe } from '../sessions/live-reflow.js';
 import type { WorkEngine } from '../work-engine/types.js';
 import type { CollaboratorService } from '../collaborators/service.js';
+import type { OwnerPairingService } from '../owner-pairing/service.js';
+import { resolveLocalPrincipal } from '../work-engine/principal.js';
 
 const MAX_WS_PAYLOAD_BYTES = 1024 * 1024;
 
@@ -55,6 +57,7 @@ export function attachWs(
   workEngine?: WorkEngine,
   /** Ticket 11: resolves a collaborator device's bearer token for the upgrade's classify() call, and its onRevoke hook terminates any already-open socket for a device the instant it's revoked (AC5) — undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService,
+  ownerPairing?: OwnerPairingService,
 ): WebSocketServer {
   // noServer: true because there are now potentially two underlying
   // http.Servers (loopback + tailnet); each one's 'upgrade' event is wired
@@ -92,7 +95,7 @@ export function attachWs(
       // header.
       const result = classify(
         { host: req.headers.host, origin: req.headers.origin, token },
-        { ...trust, deviceLookup: collaborators?.resolveDevice },
+        { ...trust, deviceLookup: collaborators?.resolveDevice, ownerLookup: ownerPairing?.resolve.bind(ownerPairing) },
       );
       const allowed = result.kind === 'local' || (result.kind === 'remote' && result.capabilities.size > 0);
       if (!allowed) {
@@ -113,6 +116,11 @@ export function attachWs(
   collaborators?.onRevoke((deviceId: string) => {
     for (const client of wss.clients) {
       if (getConnectionTrust(client)?.device?.id === deviceId) client.terminate();
+    }
+  });
+  ownerPairing?.onRevoke((deviceId) => {
+    for (const client of wss.clients) {
+      if (getConnectionTrust(client)?.ownerDevice?.id === deviceId) client.terminate();
     }
   });
 
@@ -306,6 +314,14 @@ export function attachWs(
             // checks above, not an error frame back to the client.
             const hasRawWrite = getConnectionTrust(ws)?.capabilities.has('raw-write') ?? false;
             if (hasRawWrite || isAllowedRemoteInput(frame.data)) {
+              const ownerDevice = getConnectionTrust(ws)?.ownerDevice;
+              if (ownerDevice) {
+                try {
+                  if (!ownerPairing) throw new Error('Owner device audit unavailable.');
+                  ownerPairing.audit(ownerDevice.id, 'session-input', frame.sessionId);
+                }
+                catch { ws.close(1011, 'audit unavailable'); break; }
+              }
               manager.write(frame.sessionId, frame.data);
             }
           }
@@ -349,9 +365,12 @@ export function attachWs(
           // Undefined for local and the legacy shared-token path, exactly
           // like every other actor-accepting call site.
           const device = getConnectionTrust(ws)?.device;
+          const ownerDevice = getConnectionTrust(ws)?.ownerDevice;
           const args: Parameters<typeof workEngine.resolveAttention> = device
             ? [frame.runId, frame.attentionId, decision, toRunActor(device)]
-            : [frame.runId, frame.attentionId, decision];
+            : ownerDevice
+              ? [frame.runId, frame.attentionId, decision, { principal: resolveLocalPrincipal(), device: ownerDevice }]
+              : [frame.runId, frame.attentionId, decision];
           workEngine.resolveAttention(...args).catch(() => undefined);
           break;
         }

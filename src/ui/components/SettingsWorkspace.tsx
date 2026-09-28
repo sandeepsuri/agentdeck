@@ -6,6 +6,7 @@ import { CollaboratorsPanel } from './CollaboratorsPanel.js';
 import { FolderAccessPanel } from './FolderAccessPanel.js';
 import { ProfilesPanel } from './ProfilesPanel.js';
 import { ProviderSetupPanel } from './ProviderSetupPanel.js';
+import { OwnerPhonesPanel } from './OwnerPhonesPanel.js';
 import { useAccessData } from './useAccessData.js';
 
 interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; error?: string }
@@ -23,12 +24,13 @@ interface SettingsBody { defaultModel?: string; openaiKeyConfigured: boolean; er
  * one-time invitation code all survive a tab switch instead of unmounting
  * and losing state.
  */
-type SettingsTab = 'general' | 'providers' | 'profiles' | 'collaborators';
+type SettingsTab = 'general' | 'providers' | 'profiles' | 'collaborators' | 'phones';
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
   { id: 'profiles', label: 'Profiles' },
   { id: 'collaborators', label: 'Collaborators' },
+  { id: 'phones', label: 'Owner phones' },
 ];
 
 /** WAI-ARIA "Tabs" pattern: roving tabindex, Left/Right/Home/End move both selection and focus. Mirrors RunWorkspace's RunDetailTabList. */
@@ -237,6 +239,9 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onIns
 
       <div aria-labelledby="settings-tab-collaborators" className="settings-tab-panel" hidden={tab !== 'collaborators'} id="settings-tabpanel-collaborators" role="tabpanel">
         <CollaboratorsPanel access={access} repos={repos} />
+      </div>
+      <div aria-labelledby="settings-tab-phones" className="settings-tab-panel" hidden={tab !== 'phones'} id="settings-tabpanel-phones" role="tabpanel">
+        {tab === 'phones' && <OwnerPhonesPanel />}
       </div>
     </section>
   );

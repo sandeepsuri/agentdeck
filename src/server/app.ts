@@ -20,6 +20,8 @@ import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
 import { localOwnerActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
 import { registerProviderSetupRoutes } from './provider-setup-routes.js';
 import type { ProviderSetupService } from '../provider-setup/service.js';
+import type { OwnerPairingService } from '../owner-pairing/service.js';
+import { registerOwnerPairingRoutes } from './owner-pairing-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -135,7 +137,10 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
 // AC1: a brand-new collaborator device has no bearer token yet, so this one
 // exchange route must be reachable exactly like GET /api/connection is —
 // see the onRequest hook's `requiresRemoteToken` check below.
-const REMOTE_PRE_AUTH_ROUTES = new Set(['/api/connection', '/api/collaborators/exchange']);
+const REMOTE_PRE_AUTH_ROUTES = new Set([
+  '/api/connection', '/api/collaborators/exchange',
+  '/api/owner-pairing/join', '/api/owner-pairing/phone-confirm', '/api/owner-pairing/collect',
+]);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -166,6 +171,7 @@ export interface AppContext {
   workEngine?: WorkEngine;
   /** Ticket 11: named collaborators and their device credentials — feeds the /api/collaborators/* admin+exchange routes and, via deviceLookup below, every remote request's Principal resolution. Undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService;
+  ownerPairing?: OwnerPairingService;
   /**
    * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
    * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
@@ -196,6 +202,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
         remoteHosts: ctx.remoteHosts,
         token: ctx.config.tailscaleToken,
         deviceLookup: ctx.collaborators?.resolveDevice,
+        ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing),
       },
     );
     const allowedHost = trust.kind !== 'denied';
@@ -272,12 +279,14 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     workEngine: ctx.workEngine,
     remoteHosts: ctx.remoteHosts,
     collaborators: ctx.collaborators,
+    ownerPairing: ctx.ownerPairing,
     saveConfig: ctx.saveConfig,
   });
 
   // Ticket 11: local-admin-only management routes plus the one
   // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
   if (ctx.collaborators) registerCollaboratorRoutes(app, ctx.collaborators);
+  if (ctx.ownerPairing) registerOwnerPairingRoutes(app, ctx.ownerPairing, ctx.remoteHosts, ctx.config.port);
 
   // Ticket 12 AC1: admin-only POST (not on isCollaboratorAllowedRoute), GET
   // filtered to a resolved collaborator device's grantedProfileIds — same
@@ -285,7 +294,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // request, so a collaborator's grants can never disagree between the two.
   if (ctx.store) registerProfileRoutes(app, ctx.store, (req) => classify(
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
   ).device?.grantedProfileIds);
 
   if (ctx.usage) registerUsageRoutes(app, ctx.usage);

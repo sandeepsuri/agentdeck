@@ -25,6 +25,8 @@ import { coordinateManagedWakeLock } from './managed-wake-lock.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { registerWorkRoutes } from './work-routes.js';
 import { CollaboratorService } from '../collaborators/service.js';
+import { OwnerPairingService } from '../owner-pairing/service.js';
+import { resolveLocalPrincipal } from '../work-engine/principal.js';
 import { classify, toRunActor, TOKEN_HEADER } from './connection-trust.js';
 import { resolveSenderIdentity } from './session-conversation.js';
 import { RunPreviewServer } from './run-preview-server.js';
@@ -56,6 +58,7 @@ export async function startServer(): Promise<RunningServer> {
   // the same durable store as everything else — survives a restart exactly
   // like a queued Run does.
   const collaborators = new CollaboratorService(store);
+  const ownerPairing = new OwnerPairingService(store.ownerDevices);
   // Ticket 06: no in-memory Attempt task survives a restart, so any Run
   // still 'running' from before this process started is ended now with a
   // precise unrecoverable reason rather than left stuck — see
@@ -155,7 +158,7 @@ export async function startServer(): Promise<RunningServer> {
   });
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
-    remoteHosts: remoteAccess.hosts, collaborators,
+    remoteHosts: remoteAccess.hosts, collaborators, ownerPairing,
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
     providerSetup,
@@ -168,7 +171,7 @@ export async function startServer(): Promise<RunningServer> {
   // shared-token remote path.
   const requestTrust = (req: FastifyRequest) => classify(
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-    { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice },
+    { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken, deviceLookup: collaborators.resolveDevice, ownerLookup: ownerPairing.resolve.bind(ownerPairing) },
   );
   registerWorkRoutes(app, workEngine, {
     repositoryAllowed: (repositoryId) => {
@@ -178,7 +181,9 @@ export async function startServer(): Promise<RunningServer> {
     resolveGrantedRepositoryIds: (req) => requestTrust(req).device?.grantedRepositoryIds,
     resolveActor: (req) => {
       const device = requestTrust(req).device;
-      return device && toRunActor(device);
+      if (device) return toRunActor(device);
+      const ownerDevice = requestTrust(req).ownerDevice;
+      return ownerDevice ? { principal: resolveLocalPrincipal(), device: ownerDevice } : undefined;
     },
     // B07: reuses the exact identity resolution shared session chat already
     // established (docs/specs/shared-session-chat.md) rather than a second,
@@ -229,7 +234,7 @@ export async function startServer(): Promise<RunningServer> {
         agents: deriveCompanionAgents(sessions, events, attention),
         runAttention: deriveRunAttentionItems(workEngine.list()),
       };
-    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine, collaborators);
+    }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine, collaborators, ownerPairing);
 
     companion = launchNativeCompanion(port);
     discovery.start();

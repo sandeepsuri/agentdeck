@@ -32,6 +32,8 @@ export interface TrustResult {
   capabilities: Set<Capability>;
   /** Set only for a remote connection authenticated via a named collaborator's device credential — undefined for local and for the legacy shared-token path (see classify()'s `deviceLookup` opt). */
   device?: RemoteDevice;
+  /** Individually revocable owner phone, separate from collaborator grants. */
+  ownerDevice?: { id: string; label: string };
 }
 
 /**
@@ -155,6 +157,7 @@ export function classify(
      * path above is completely unchanged when this isn't passed.
      */
     deviceLookup?: (token: string) => RemoteDevice | undefined;
+    ownerLookup?: (token: string) => { id: string; label: string } | undefined;
   },
 ): TrustResult {
   const denied: TrustResult = { kind: 'denied', capabilities: new Set() };
@@ -174,6 +177,8 @@ export function classify(
     }
     const device = input.token ? opts.deviceLookup?.(input.token) : undefined;
     if (device) return { kind: 'remote', capabilities: new Set(REMOTE_CAPABILITIES), device };
+    const ownerDevice = input.token ? opts.ownerLookup?.(input.token) : undefined;
+    if (ownerDevice) return { kind: 'remote', capabilities: new Set(REMOTE_CAPABILITIES), ownerDevice };
     return { kind: 'remote', capabilities: new Set() };
   }
 

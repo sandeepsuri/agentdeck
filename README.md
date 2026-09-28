@@ -94,6 +94,7 @@ Repository discovery works without configuration and scans one directory level f
 - [Coordination](docs/coordination.md) — claims, progress, blockers, dependencies, statuses, and conflict warnings
 - [Architecture](docs/architecture.md) — system components, local persistence, communication, and security boundaries
 - [Development](docs/development.md) — development workflow, validation, troubleshooting, and contributions
+- [Issues #81–#84 test guide](docs/everyday-81-84-test-guide.html) — visual checks for PDF filing, Mac installation, and terminal scrollback
 
 ## Contributing
 

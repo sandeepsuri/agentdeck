@@ -12,6 +12,7 @@ import type { Handle, SessionBackend } from '../sessions/backend.js';
 import { SessionManager } from '../sessions/manager.js';
 import { Store } from '../store/index.js';
 import { CollaboratorService } from '../collaborators/service.js';
+import { OwnerPairingService } from '../owner-pairing/service.js';
 import { DurableWorkEngine } from '../work-engine/engine.js';
 import { createCodexAttemptAdapter } from '../work-engine/runtimes/codex.js';
 import { createFakeCodexAppServer } from '../test-fixtures/codex-attempt.js';
@@ -149,6 +150,54 @@ beforeEach(async () => {
   const addr = app.server.address();
   if (addr === null || typeof addr === 'string') throw new Error('no port');
   port = addr.port;
+});
+
+describe('owner phone WebSocket revocation', () => {
+  it('closes an active owner socket and rejects the revoked credential on reconnect', async () => {
+    const store = new Store(':memory:');
+    const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-owner-ws-'));
+    const manager = new SessionManager(new FakeBackend(), store, { sessionsDir });
+    const ownerPairing = new OwnerPairingService(store.ownerDevices);
+    const challenge = ownerPairing.create();
+    const phone = ownerPairing.join(challenge.id, challenge.secret, 'Owner iPhone');
+    ownerPairing.confirmPhone(challenge.id, phone.nonce, phone.code);
+    ownerPairing.confirmOwner(challenge.id, phone.code);
+    const { credential, deviceId } = ownerPairing.collect(challenge.id, phone.nonce)!;
+    const remoteHost = 'owner.tailnet.ts.net';
+    const app = buildApp({ config: defaultConfig(), manager, store, ownerPairing, remoteHosts: [remoteHost] });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const wss = attachWs([app.server], manager, '/ws', undefined, undefined, { remoteHosts: [remoteHost] }, undefined, undefined, ownerPairing);
+    const address = app.server.address();
+    if (!address || typeof address === 'string') throw new Error('missing address');
+    const url = `ws://127.0.0.1:${address.port}/ws?token=${encodeURIComponent(credential)}`;
+    try {
+      const socket = new WebSocket(url, { headers: { host: remoteHost } });
+      await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+      const session = await manager.launch({ agent: 'claude', cwd: sessionsDir });
+      socket.send(JSON.stringify({ t: 'attach', sessionId: session.id }));
+      socket.send(JSON.stringify({ t: 'input', sessionId: session.id, data: '\u0003' }));
+      await vi.waitFor(() => expect(ownerPairing.listAudit(deviceId).some((entry) => entry.action === 'session-input')).toBe(true));
+      const sent = await app.inject({
+        method: 'POST', url: `/api/sessions/${session.id}/send`,
+        headers: { host: remoteHost, [TOKEN_HEADER]: credential }, payload: { text: 'Check status' },
+      });
+      expect(sent.statusCode).toBe(200);
+      expect(ownerPairing.listAudit(deviceId).map((entry) => entry.action).sort()).toEqual(['session-input', 'session-send']);
+      const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()));
+      expect(ownerPairing.revoke(deviceId)).toBe(true);
+      await closed;
+      const retry = new WebSocket(url, { headers: { host: remoteHost } });
+      const rejected = await new Promise<boolean>((resolve) => { retry.once('error', () => resolve(true)); retry.once('open', () => resolve(false)); });
+      expect(rejected).toBe(true);
+      retry.terminate();
+    } finally {
+      await closeWs(wss);
+      await app.close();
+      await manager.shutdown();
+      store.close();
+      fs.rmSync(sessionsDir, { recursive: true, force: true });
+    }
+  });
 });
 
 afterEach(async () => {

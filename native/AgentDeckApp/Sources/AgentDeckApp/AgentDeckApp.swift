@@ -221,12 +221,44 @@ final class ServiceController: ObservableObject {
 
 private struct BrowserView: NSViewRepresentable {
     let url: URL
+    func makeCoordinator() -> DialogDelegate { DialogDelegate() }
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView()
+        // Without a UI delegate WKWebView silently drops alert() and makes
+        // confirm() return false, so every "Delete…?" in the web UI cancels.
+        view.uiDelegate = context.coordinator
         view.load(URLRequest(url: url))
         return view
     }
     func updateNSView(_ view: WKWebView, context: Context) {}
+}
+
+/// Backs the web UI's window.alert/confirm with native sheets.
+final class DialogDelegate: NSObject, WKUIDelegate {
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        present(alert, in: webView) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        present(alert, in: webView) { completionHandler($0 == .alertFirstButtonReturn) }
+    }
+
+    private func present(_ alert: NSAlert, in webView: WKWebView, done: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window = webView.window {
+            alert.beginSheetModal(for: window, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
+    }
 }
 
 private struct MainView: View {

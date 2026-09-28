@@ -11,7 +11,9 @@ export default defineConfig({
     // NODE_ENV=production in the inherited environment. React's production
     // build intentionally does not support act(), which the jsdom component
     // tests use to flush renders and effects.
-    env: { NODE_ENV: 'test' },
+    // The installed Mac app exports these into child processes. Tests use
+    // CLI-style fixture paths and must not inherit its local-only mode.
+    env: { NODE_ENV: 'test', AGENTDECK_LAUNCHED_BY_APP: '0', AGENTDECK_LOCAL_ONLY: '0' },
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     // Ticket 14: ControlKeys.test.tsx renders a standalone React component
     // and needs `document`/`window`. It opts into jsdom itself via a
