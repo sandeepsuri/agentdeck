@@ -122,22 +122,19 @@
 .inspector-action.is-danger:hover { border-color: var(--status-error); color: var(--status-error); }
 .inspector-action > span { font-size: 11px; }
 
-/* Repository sidebar working state. */
-@keyframes sidebar-ring { 0% { transform: scale(1); opacity: .55; } 80%, 100% { transform: scale(2.6); opacity: 0; } }
+/* Repository sidebar: the working pulse, ring and waiting states live in
+   workspace.css; this adds the outlined active row, the wave beside a
+   working repository's name, and the selected chat's edge. */
 .sidebar-repo-row.is-active { border: 1px solid color-mix(in srgb, var(--border-selection) 55%, transparent); border-radius: var(--radius-sm); background: var(--surface-selected); }
-.sidebar-repo-row.is-active > button:not(.sidebar-repo-toggle), .sidebar-repo-row.is-active > button.is-active { background: transparent; }
-.sidebar-repositories button small.is-working { background: var(--status-working-bg); }
+.sidebar-repo-row.is-active > button:not(.sidebar-repo-toggle) { background: transparent; }
 .sidebar-repo-activity { height: 11px; flex: none; display: inline-flex; align-items: center; gap: 1.5px; color: var(--status-working); }
 .sidebar-repo-activity i { width: 2px; height: 100%; border-radius: 1px; background: currentColor; transform: scaleY(.45); animation: agent-wave 1.6s ease-in-out infinite; }
 .sidebar-repo-activity i:nth-child(2) { animation-delay: -.25s; }
 .sidebar-repo-activity i:nth-child(3) { animation-delay: -.5s; }
 .sidebar-chat.is-selected { box-shadow: inset 2px 0 0 var(--status-starting); }
-.sidebar-chat-dot { position: relative; }
-.sidebar-chat-dot.is-working::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--status-working); animation: sidebar-ring 2.4s ease-out infinite; }
 
 @media (prefers-reduced-motion: reduce) {
   .inspector-session *, .inspector-session *::before, .inspector-session *::after,
-  .sidebar-repo-activity i, .sidebar-chat-dot::after { animation: none !important; }
+  .sidebar-repo-activity i { animation: none !important; }
   .is-live-working .activity-wave i, .sidebar-repo-activity i { transform: scaleY(.8); }
-  .sidebar-chat-dot.is-working::after { display: none; }
 }

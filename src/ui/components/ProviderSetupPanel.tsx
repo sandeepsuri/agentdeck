@@ -37,7 +37,7 @@ const ACTION_LABELS: Record<Exclude<RepairAction, 'install'>, string> = {
   check: 'Check again',
 };
 
-type ActionPath = 'check' | 'install' | 'install-guide' | 'sign-in' | 'sign-in/page' | 'sign-in/code' | 'cancel';
+type ActionPath = 'check' | 'install' | 'install-guide' | 'sign-in' | 'sign-in/page' | 'sign-in/code' | 'cancel' | 'agent-access';
 const ACTION_PATHS: Record<RepairAction, ActionPath> = {
   install: 'install', 'open-install-guide': 'install-guide', 'sign-in': 'sign-in', check: 'check',
 };
@@ -60,7 +60,9 @@ function useProviderSetup() {
     }
   }, []);
 
-  const busy = !view || view.providers.some((entry) => entry.operation?.state === 'running' || !entry.confirmedThisLaunch);
+  const busy = !view || view.providers.some((entry) => (
+    entry.operation?.state === 'running' || !entry.confirmedThisLaunch || entry.agentAccess?.state === 'checking'
+  ));
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     if (unavailable || (!busy && !error)) return undefined;
@@ -131,6 +133,30 @@ function SignInProgress({ entry, onAct }: { entry: ProviderSetupEntry; onAct: (a
   );
 }
 
+/** Whether Claude may help with personal tasks: AgentDeck proves its sandbox itself (agent-access.ts). */
+function AgentAccessStatus({ entry, onAct }: { entry: ProviderSetupEntry; onAct: (action: ActionPath) => Promise<boolean> }) {
+  const access = entry.agentAccess!;
+  if (access.state === 'checking') {
+    return (
+      <div className="provider-progress" role="status">
+        <p><strong>Checking that Claude stays sandboxed on this Mac…</strong> This takes a minute or two and uses a small amount of your Claude allowance. Personal tasks wait for it.</p>
+      </div>
+    );
+  }
+  if (access.state === 'on') {
+    return <p className="provider-facts">Agent help for personal tasks is on. Claude runs sandboxed on this Mac.</p>;
+  }
+  return (
+    <div className="provider-repair">
+      <h4>Agent help for personal tasks is off</h4>
+      {access.reason && <p className="provider-detail">{access.reason}</p>}
+      <div className="provider-actions">
+        <button className="button" onClick={() => void onAct('agent-access')} type="button">Check sandbox again</button>
+      </div>
+    </div>
+  );
+}
+
 function ProviderCard({ entry, onAct }: { entry: ProviderSetupEntry; onAct: (action: ActionPath, body?: unknown) => Promise<boolean> }) {
   const { readiness, operation, repair } = entry;
   const running = operation?.state === 'running';
@@ -196,6 +222,9 @@ function ProviderCard({ entry, onAct }: { entry: ProviderSetupEntry; onAct: (act
             ))}
           </div>
         </div>
+      )}
+      {!running && readiness?.state === 'ready' && entry.confirmedThisLaunch && entry.agentAccess && (
+        <AgentAccessStatus entry={entry} onAct={onAct} />
       )}
       {!running && readiness?.state === 'ready' && (
         <div className="provider-actions">

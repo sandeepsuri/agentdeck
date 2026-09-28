@@ -18,6 +18,15 @@ describe('loadGmailClient', () => {
     fs.writeFileSync(other, JSON.stringify({ installed: { client_id: 'env', client_secret: '' } }));
     expect(loadGmailClient(dir, { AGENTDECK_GMAIL_CLIENT_FILE: other })).toEqual({ clientId: 'env', clientSecret: '' });
   });
+
+  it('falls back to the client the Mac app was packaged with, and the owner file wins over it', () => {
+    const bundled = path.join(dir, 'bundled.json');
+    fs.writeFileSync(bundled, JSON.stringify({ installed: { client_id: 'bundled', client_secret: 'b' } }));
+    const empty = fs.mkdtempSync(path.join(dir, 'data-'));
+    expect(loadGmailClient(empty, {}, bundled)).toEqual({ clientId: 'bundled', clientSecret: 'b' });
+    fs.writeFileSync(path.join(empty, 'gmail-oauth-client.json'), JSON.stringify({ installed: { client_id: 'own', client_secret: 'o' } }));
+    expect(loadGmailClient(empty, {}, bundled)).toEqual({ clientId: 'own', clientSecret: 'o' });
+  });
 });
 
 function consent(tokenBody: Record<string, unknown>, redirect: (url: URL) => Record<string, string>) {

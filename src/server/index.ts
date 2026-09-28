@@ -37,6 +37,7 @@ import { DEFAULT_PRICING } from '../usage/pricing.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
 import { macFolderPicker } from '../personal-tasks/folder-picker.js';
 import { folderAccess } from '../folder-access.js';
+import { AgentAccess, claudeConfinementProver } from '../personal-tasks/agent-access.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 import { EmailTaskService, gmailAccess } from '../personal-tasks/email/service.js';
 import { keychainTokenVault } from '../personal-tasks/email/keychain.js';
@@ -75,7 +76,13 @@ export async function startServer(): Promise<RunningServer> {
   // same task id; a revoked grant fails it instead of reading. Filing
   // proposals (issue #81) use the confined Claude Code provider only when
   // this Mac's recorded confinement evidence passes the gate.
-  const confinedProvider = confinedClaudeProvider({ dataDir: config.dataDir });
+  // AgentAccess records that evidence itself: it runs the live probe while
+  // the gate is off, so no owner has to run scripts/probe-confinement.ts.
+  const agentAccess = new AgentAccess({
+    provider: confinedClaudeProvider({ dataDir: config.dataDir }),
+    prover: claudeConfinementProver({ dataDir: config.dataDir }),
+  });
+  const confinedProvider = agentAccess.provider;
   const personalTasks = new PersonalTaskService({
     repository: store.personal,
     protectedRoots: [config.dataDir],
@@ -99,6 +106,7 @@ export async function startServer(): Promise<RunningServer> {
     repository: store.providerReadiness,
     commands: providerCommands,
     home: os.homedir(),
+    agentAccess,
   });
   const sessionsDir = path.join(config.dataDir, 'sessions');
   // No managed PTY survives a restart, but an ended session's row does

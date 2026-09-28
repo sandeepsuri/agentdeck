@@ -106,9 +106,16 @@ describe('AdminSidebar', () => {
     expect(html).toContain('Website');
     expect(html).toContain('aria-label="2 active, 1 waiting"');
     expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('class="sidebar-repo is-working"');
   });
 
-  it('outlines the active repository and shows the working wave only while agents work without waiting', () => {
+  it('marks a repository whose only active work is waiting on you as waiting, not working', () => {
+    const html = render({ repositoryActivity: new Map([['repo-agentdeck', { active: 1, waiting: 1 }]]) });
+    expect(html).toContain('class="sidebar-repo is-waiting"');
+    expect(html).not.toContain('is-working');
+  });
+
+  it('outlines the active repository and shows the working wave only while an agent is running, not just waiting', () => {
     const host = mount({
       activeRepositoryId: 'repo-agentdeck',
       repositoryActivity: new Map([['repo-agentdeck', { active: 2, waiting: 0 }], ['repo-website', { active: 1, waiting: 1 }]]),
@@ -130,6 +137,7 @@ describe('AdminSidebar', () => {
         chat('c', 'repo-agentdeck', 'completed'),
         chat('old', 'repo-agentdeck', 'archived', 'Archived chat'),
         chat('w', 'repo-website', 'completed', 'Website chat'),
+        { ...chat('f', 'repo-agentdeck', 'completed', 'Failed chat'), tone: 'error' },
       ],
     });
     expect(html).toContain('aria-label="Chats in AgentDeck"');
@@ -138,6 +146,7 @@ describe('AdminSidebar', () => {
     expect(html).toMatch(/aria-current="true" class="sidebar-chat is-selected"[^>]*title="Chat b"/);
     expect(html).toContain('aria-label="Working"');
     expect(html).toContain('aria-label="Needs you"');
+    expect(html).toMatch(/aria-label="Failed" class="sidebar-chat-dot is-error"/);
     // Website has no work in flight, so it starts collapsed but still lists.
     expect(html).toContain('aria-label="Expand Website"');
     expect(html).not.toContain('Website chat');

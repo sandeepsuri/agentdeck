@@ -82,6 +82,8 @@ describe('owner at this Mac', () => {
     const codex = await app.inject({ method: 'POST', url: '/api/provider-setup/codex/install', headers: LOCAL });
     expect(codex.statusCode).toBe(400);
     expect(commands.processes).toHaveLength(0);
+    // Personal tasks use only Claude, and this service has no sandbox check wired in.
+    expect((await app.inject({ method: 'POST', url: '/api/provider-setup/codex/agent-access', headers: LOCAL })).statusCode).toBe(400);
   });
 });
 
@@ -91,7 +93,7 @@ describe('everyone else', () => {
     const { token } = collaborators.exchangeInvitation(code, 'phone');
     const requests = [
       { method: 'GET' as const, url: '/api/provider-setup' },
-      ...['check', 'install', 'install-guide', 'sign-in', 'sign-in/page', 'cancel'].map((action) => ({ method: 'POST' as const, url: `/api/provider-setup/claude/${action}` })),
+      ...['check', 'install', 'install-guide', 'sign-in', 'sign-in/page', 'cancel', 'agent-access'].map((action) => ({ method: 'POST' as const, url: `/api/provider-setup/claude/${action}` })),
       { method: 'POST' as const, url: '/api/provider-setup/claude/sign-in/code', payload: { code: 'abcdef123456' } },
     ];
     for (const credential of [token, SHARED_TOKEN]) {

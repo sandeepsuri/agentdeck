@@ -69,5 +69,7 @@ export function registerProviderSetupRoutes(app: FastifyInstance, deps: Provider
     if (typeof code !== 'string') throw new ProviderSetupError('invalid-input', 'code is required');
     service.submitSignInCode(provider, code);
   }));
+  // The probe runs one short live turn; its progress arrives through GET polling.
+  app.post('/api/provider-setup/:provider/agent-access', (request, reply) => act(request, reply, (provider) => service.checkAgentAccess(provider)));
   app.post('/api/provider-setup/:provider/cancel', (request, reply) => act(request, reply, (provider) => service.cancel(provider)));
 }

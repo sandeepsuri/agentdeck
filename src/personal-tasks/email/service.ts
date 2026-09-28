@@ -100,7 +100,7 @@ const REPAIR: Record<Exclude<EmailAccountState, 'ready'>, string> = {
   'signed-out': 'Reconnect Gmail: the sign-in expired or was removed in your Google account.',
   'missing-scope': 'Reconnect Gmail and leave both permissions ticked: reading mail and managing drafts.',
   unsupported: 'Only personal @gmail.com accounts are supported for now.',
-  'no-client': 'This build has no Gmail connection set up yet. See "Email replies" in the development guide.',
+  'no-client': 'This copy of AgentDeck was built without a Gmail connection. Ask whoever gave it to you for one packaged with Gmail, or see "Email replies" in the development guide.',
   unreachable: 'Gmail could not be reached. Check the internet connection, then check again.',
   'check-failed': 'Check the connection again, or reconnect Gmail.',
 };
