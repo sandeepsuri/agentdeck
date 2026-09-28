@@ -12,6 +12,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentMessage, Session } from '../types.js';
 import { defaultUsageRoots, type UsageRoots } from '../usage/indexer.js';
+import { type PendingQuestion, pendingQuestion } from './questions.js';
 
 export interface ConversationTurn {
   id: string;
@@ -26,6 +27,11 @@ export interface ConversationView {
   /** False until the agent has written a transcript for this session. */
   found: boolean;
   turns: ConversationTurn[];
+  /** A multiple-choice question the agent has open in its terminal, waiting for an answer. */
+  question?: PendingQuestion & {
+    /** Set by the route: false when AgentDeck can't reach the menu (an external session with no hook holding it). */
+    canAnswer?: boolean;
+  };
 }
 
 /** Keep dashboard sends visible while the CLI transcript is delayed or absent. */
@@ -269,7 +275,7 @@ export function locateTranscript(session: Session, roots: UsageRoots = defaultUs
  */
 export class ConversationReader {
   private readonly paths = new Map<string, string>();
-  private readonly parsed = new Map<string, { size: number; mtimeMs: number; turns: ConversationTurn[] }>();
+  private readonly parsed = new Map<string, { size: number; mtimeMs: number; view: ConversationView }>();
 
   constructor(private readonly roots: UsageRoots = defaultUsageRoots()) {}
 
@@ -290,10 +296,12 @@ export class ConversationReader {
       return { found: false, turns: [] };
     }
     const cached = this.parsed.get(file);
-    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return { found: true, turns: cached.turns };
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.view;
     const lines = (await fsp.readFile(file, 'utf8')).split('\n');
     const turns = session.agent === 'claude' ? parseClaudeConversation(lines) : parseCodexConversation(lines);
-    this.parsed.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, turns });
-    return { found: true, turns };
+    const question = pendingQuestion(session.agent, lines);
+    const view: ConversationView = { found: true, turns, ...(question ? { question } : {}) };
+    this.parsed.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, view });
+    return view;
   }
 }
