@@ -1,8 +1,8 @@
-// Issue #88: owner-only routes for connecting Gmail, finding an email, and
-// preparing an editable reply draft. Like /api/personal/*, none of these
-// paths is on app.ts's remote, collaborator, or owner-phone allowlists, and
-// each handler re-checks that the request comes from the owner at this Mac.
-// There is no send route: sending an approved reply is issue #89.
+// Issues #88 and #89: owner-only routes for connecting Gmail, finding an
+// email, preparing an editable reply draft, and approving the one send of a
+// saved version. Like /api/personal/*, none of these paths is on app.ts's
+// remote, collaborator, or owner-phone allowlists, and each handler re-checks
+// that the request comes from the owner at this Mac.
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { EmailTaskError, type EmailTaskService } from '../personal-tasks/email/service.js';
 import type { PersonalActor } from '../personal-tasks/types.js';
@@ -23,6 +23,7 @@ const ERROR_STATUS: Record<EmailTaskError['code'], number> = {
   'no-client': 503,
   unsupported: 422,
   'consent-failed': 409,
+  'send-exists': 409,
 };
 
 function sendError(error: unknown, reply: FastifyReply): FastifyReply {
@@ -87,4 +88,9 @@ export function registerEmailTaskRoutes(app: FastifyInstance, deps: EmailTaskRou
     return service.saveDraft(id(request), { baseVersion, to, cc, subject, body: text }, actor);
   }));
   app.post('/api/personal/email/tasks/:id/draft/check', handle((actor, request) => service.checkDraft(id(request), actor)));
+  // Approves one saved version by its digest and sends it once; repeating the same approval returns the send on record.
+  app.post('/api/personal/email/tasks/:id/send', handle((actor, request) => {
+    const { version, digest } = body(request);
+    return service.approveSend(id(request), { version, digest }, actor);
+  }));
 }

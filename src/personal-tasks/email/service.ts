@@ -14,9 +14,13 @@
 //   provider write, then settled from Gmail's read-back. A lost response is
 //   settled by the version's X-AgentDeck-Intent header after an in-flight
 //   grace, so recovery never creates a second draft.
-//
-// Nothing here sends mail; the adapter has no send. Sending an approved,
-// exact reply once is issue #89.
+// - Send (issue #89): the owner approves one saved version by its digest.
+//   The approval, with that version's exact content and a fresh send intent,
+//   is recorded before the one Gmail send; the send is built from that
+//   recorded content, not from whatever the Gmail draft holds by then. A lost
+//   response is 'ambiguous' and is settled by finding the intent in the
+//   thread's sent mail after the in-flight grace; nothing is sent again until
+//   it is. Only the owner's routes reach this.
 import { randomUUID } from 'node:crypto';
 import type { EmailTaskRepository, NewEmailActivity } from '../../store/email-tasks.js';
 import type { FilingProvider, FilingProviderAccess } from '../confined-provider.js';
@@ -27,19 +31,28 @@ import { authorizeGmail, GmailConsentError, loadGmailClient, revokeGmailToken, t
 import type { TokenVault } from './keychain.js';
 import { draftDigest, referencesFor, replyFor, ReplyContentError, validateReplyContent } from './reply.js';
 import {
-  EMAIL_TASK_POLICY_VERSION, type EmailAccountGrant, type EmailAccountState, type EmailAccountView, type EmailMessageContext, type EmailTask,
-  type EmailTaskView, type ReplyDraftContent, type ReplyDraftState, type ReplyDraftVersion,
+  EMAIL_TASK_POLICY_VERSION, LIVE_SEND_STATES, type EmailAccountGrant, type EmailAccountState, type EmailAccountView, type EmailMessageContext, type EmailTask,
+  type EmailTaskView, type ReplyDraftContent, type ReplyDraftState, type ReplySend,
 } from './types.js';
 
-/** How long a draft write whose outcome was not seen blocks judging it absent; above the adapter's request timeout. */
+/** How long a draft write or send whose outcome was not seen blocks judging it absent; above the adapter's request timeout. */
 export const DRAFT_IN_FLIGHT_GRACE_MS = 30_000;
+/**
+ * How long a send whose outcome was not seen blocks judging it unsent. Well
+ * above the adapter's request timeout, so a send Gmail commits late is found.
+ */
+export const SEND_IN_FLIGHT_GRACE_MS = 2 * 60 * 1000;
+/** An approval must start its send within this window; after a restart, an older one expires unsent. */
+export const SEND_APPROVAL_TTL_MS = 10 * 60 * 1000;
 const MAX_REQUEST = 1_000;
 const CONTEXT_EXCERPT = 1_500;
 const READ_EXCERPT = 8_000;
 const THIS_MAC = 'local';
+const STALE_APPROVAL = 'The draft changed since you reviewed it. Review the latest version, then approve it.';
 
 export type EmailTaskErrorCode =
-  | 'not-found' | 'account-revoked' | 'invalid-input' | 'invalid-state' | 'stale-draft' | 'account-unavailable' | 'no-client' | 'unsupported' | 'consent-failed';
+  | 'not-found' | 'account-revoked' | 'invalid-input' | 'invalid-state' | 'stale-draft' | 'account-unavailable' | 'no-client' | 'unsupported' | 'consent-failed'
+  | 'send-exists';
 
 export class EmailTaskError extends Error {
   constructor(readonly code: EmailTaskErrorCode, message: string) {
@@ -73,6 +86,7 @@ export interface EmailTaskServiceOptions {
   provider?: FilingProvider;
   now?: () => Date;
   draftGraceMs?: number;
+  sendGraceMs?: number;
   /** False only in tests that need a task to stay queued. */
   autoRun?: boolean;
 }
@@ -286,7 +300,10 @@ export class EmailTaskService {
   /**
    * Boot-time recovery. A running attempt is ended as interrupted and the
    * task waits for the owner (no provider turn is spent on its own). A draft
-   * write left unsettled is settled from Gmail once its grace has passed.
+   * write left unsettled is settled from Gmail once its grace has passed. An
+   * approval that never started is sent if still in time, else expires; a
+   * send left in flight becomes ambiguous and is settled from Gmail's sent
+   * mail once its grace has passed.
    */
   recover(): void {
     this.repository.markAccountsUnchecked();
@@ -299,11 +316,30 @@ export class EmailTaskService {
       if (open.length === 0) this.schedule(task.id);
     }
     for (const { taskId, draft } of this.repository.listUnsettledDrafts()) {
-      const wait = Date.parse(draft.updatedAt) + this.grace() - this.now().getTime();
-      const run = () => { this.queue = this.queue.then(() => this.reconcileDraft(taskId, draft.version)).then(() => undefined).catch(() => undefined); };
-      if (wait <= 0) run();
-      else setTimeout(run, wait).unref();
+      this.afterGrace(draft.updatedAt, this.grace(), () => this.reconcileDraft(taskId, draft.version));
     }
+    for (const { taskId, send } of this.repository.listUnsettledSends()) {
+      if (send.state === 'approved') {
+        if (Date.parse(send.expiresAt) > this.now().getTime()) this.queue = this.queue.then(() => this.executeSend(taskId, send.sendId)).catch(() => undefined);
+        else this.expireSend(taskId, send.sendId);
+        continue;
+      }
+      if (send.state === 'sending') {
+        this.repository.settleSend(taskId, send.sendId, ['sending'], 'ambiguous', this.at(), {
+          reason: 'AgentDeck stopped while sending. It will check Gmail before anything is sent again.',
+        }, { at: this.at(), kind: 'send-ambiguous', message: 'AgentDeck stopped while sending the reply; checking Gmail for it.' });
+      }
+      // The grace runs from when the send began: that is when the request that may still land was made.
+      this.afterGrace(send.startedAt ?? send.updatedAt, this.sendGrace(), () => this.reconcileSend(taskId, send.sendId));
+    }
+  }
+
+  /** Queues `job` once `grace` has passed since `since`. */
+  private afterGrace(since: string, grace: number, job: () => Promise<void>): void {
+    const wait = Date.parse(since) + grace - this.now().getTime();
+    const run = () => { this.queue = this.queue.then(job).catch(() => undefined); };
+    if (wait <= 0) run();
+    else setTimeout(run, wait).unref();
   }
 
   whenIdle(): Promise<void> {
@@ -312,6 +348,10 @@ export class EmailTaskService {
 
   private grace(): number {
     return this.options.draftGraceMs ?? DRAFT_IN_FLIGHT_GRACE_MS;
+  }
+
+  private sendGrace(): number {
+    return this.options.sendGraceMs ?? SEND_IN_FLIGHT_GRACE_MS;
   }
 
   private schedule(taskId: string): void {
@@ -491,6 +531,7 @@ export class EmailTaskService {
       if (error instanceof ReplyContentError) throw new EmailTaskError('invalid-input', error.message);
       throw error;
     }
+    this.refuseWhileSending(taskId);
     const drafts = this.repository.listDrafts(taskId);
     const latest = drafts[0];
     if ((latest?.version ?? 0) !== input.baseVersion) {
@@ -524,6 +565,11 @@ export class EmailTaskService {
     for (const draft of this.repository.listDrafts(taskId).filter((entry) => entry.state === 'writing' || entry.state === 'uncertain')) {
       await this.reconcileDraft(taskId, draft.version);
     }
+    for (const send of this.repository.listSends(taskId).filter((entry) => entry.state === 'ambiguous')) {
+      await this.reconcileSend(taskId, send.sendId);
+    }
+    // Once approved, the reply is what was approved; a later Gmail edit is not recorded against it.
+    if (this.liveSend(taskId)) return this.get(taskId)!;
     const drafts = this.repository.listDrafts(taskId);
     const latest = drafts[0];
     if (!latest || latest.state !== 'saved' || !latest.providerDraftId) return this.get(taskId)!;
@@ -547,15 +593,15 @@ export class EmailTaskService {
     return this.get(taskId)!;
   }
 
-  private outgoing(context: EmailMessageContext, draft: ReplyDraftVersion): OutgoingReply {
+  private outgoing(context: EmailMessageContext, message: { content: ReplyDraftContent; intentId: string }): OutgoingReply {
     const references = referencesFor(context);
     return {
-      content: draft.content,
+      content: message.content,
       threadId: context.threadId,
       ...(context.messageIdHeader ? { inReplyTo: context.messageIdHeader } : {}),
       ...(references ? { references } : {}),
-      intentId: draft.intentId,
-      messageId: `<${draft.intentId}@agentdeck.local>`,
+      intentId: message.intentId,
+      messageId: `<${message.intentId}@agentdeck.local>`,
     };
   }
 
@@ -656,6 +702,165 @@ export class EmailTaskService {
     }
   }
 
+  // -- approving and sending --
+
+  /**
+   * The owner approves one saved version, bound to its digest, and AgentDeck
+   * sends exactly that content once. Repeating the same approval while its
+   * send is pending, uncertain, or done returns it without sending again.
+   */
+  async approveSend(taskId: string, input: { version?: unknown; digest?: unknown }, actor: PersonalActor): Promise<EmailTaskView> {
+    const task = this.repository.getTask(taskId);
+    if (!task) throw new EmailTaskError('not-found', 'No such task.');
+    if (!task.confirmed) throw new EmailTaskError('invalid-state', 'Confirm which email you are answering first.');
+    if (typeof input.version !== 'number' || !Number.isInteger(input.version) || typeof input.digest !== 'string' || !/^[0-9a-f]{64}$/.test(input.digest)) {
+      throw new EmailTaskError('invalid-input', 'Approve one saved version of the draft, by its version and digest.');
+    }
+    const live = this.liveSend(taskId);
+    if (live) {
+      if (live.draftVersion !== input.version || live.digest !== input.digest) {
+        throw new EmailTaskError('send-exists', live.state === 'sent' ? 'This reply was already sent.' : 'A send for another version of this reply is still being settled.');
+      }
+      if (live.state === 'ambiguous') await this.reconcileSend(taskId, live.sendId);
+      return this.get(taskId)!;
+    }
+    this.activeAccount(task.accountId);
+    // Settle unsettled saves and record any change made in Gmail, so the owner approves what the draft now holds.
+    await this.checkDraft(taskId, actor);
+    const latest = this.repository.listDrafts(taskId)[0];
+    if (!latest || latest.version !== input.version || latest.state !== 'saved' || latest.digest !== input.digest || draftDigest(latest.content) !== input.digest) {
+      throw new EmailTaskError('stale-draft', STALE_APPROVAL);
+    }
+    if (latest.content.attachments.length > 0) {
+      throw new EmailTaskError('invalid-state', 'This draft has attachments added in Gmail, which AgentDeck cannot send exactly. Send it from Gmail, or remove them there and check again.');
+    }
+    const at = this.at();
+    const sendId = randomUUID();
+    const outcome = this.repository.approveSend(taskId, {
+      sendId, draftVersion: latest.version, digest: latest.digest, content: latest.content, approvedAt: at, approvedBy: actor,
+      expiresAt: new Date(this.now().getTime() + SEND_APPROVAL_TTL_MS).toISOString(),
+    }, {
+      at, kind: 'send-approved',
+      message: `${actor.principal.displayName} approved sending version ${latest.version} (${latest.digest.slice(0, 12)}) to ${[...latest.content.to, ...latest.content.cc].join(', ')} on ${actor.device.label}.`,
+    });
+    if (outcome === 'live-send') return this.approveSend(taskId, input, actor);
+    if (outcome === 'stale') throw new EmailTaskError('stale-draft', STALE_APPROVAL);
+    await this.executeSend(taskId, sendId);
+    return this.get(taskId)!;
+  }
+
+  private liveSend(taskId: string): ReplySend | undefined {
+    return this.repository.listSends(taskId).find((send) => LIVE_SEND_STATES.includes(send.state));
+  }
+
+  private refuseWhileSending(taskId: string): void {
+    const live = this.liveSend(taskId);
+    if (!live) return;
+    throw new EmailTaskError('invalid-state', live.state === 'sent' ? 'This reply was already sent.' : 'The approved reply is being sent. Wait for it to settle before editing.');
+  }
+
+  private expireSend(taskId: string, sendId: string): void {
+    this.repository.settleSend(taskId, sendId, ['approved'], 'expired', this.at(), { reason: 'The approval ran out before sending started. Nothing was sent; approve again.' }, {
+      at: this.at(), kind: 'send-expired', message: 'The approval to send ran out before sending started. Nothing was sent.',
+    });
+  }
+
+  /** The one Gmail send for an approval, recorded as 'sending' first. */
+  private async executeSend(taskId: string, sendId: string): Promise<void> {
+    const task = this.repository.getTask(taskId);
+    const send = this.repository.listSends(taskId).find((entry) => entry.sendId === sendId);
+    if (!task?.confirmed || !send || send.state !== 'approved') return;
+    const notSent = (from: 'approved' | 'sending', reason: string) => this.repository.settleSend(taskId, sendId, [from], 'failed', this.at(), { reason }, {
+      at: this.at(), kind: 'send-failed', message: reason,
+    });
+    const account = this.repository.getAccount(task.accountId);
+    if (!account || account.revokedAt) {
+      notSent('approved', 'Access to this Gmail account was revoked. Nothing was sent.');
+      return;
+    }
+    if (draftDigest(send.content) !== send.digest) {
+      notSent('approved', 'The recorded reply no longer matches what was approved. Nothing was sent.');
+      return;
+    }
+    if (!this.repository.startSend(taskId, sendId, this.at())) {
+      this.expireSend(taskId, sendId);
+      return;
+    }
+    let mailbox: Mailbox;
+    try {
+      mailbox = await this.openMailbox(account);
+    } catch (error) {
+      notSent('sending', `${this.recordAccountFailure(account, error)} Nothing was sent.`);
+      return;
+    }
+    let messageId: string;
+    try {
+      messageId = await mailbox.sendReply(this.outgoing(task.confirmed, { content: send.content, intentId: sendId }));
+    } catch (error) {
+      if (error instanceof MailboxError && error.code === 'unreachable' && error.status === 429) {
+        notSent('sending', 'Gmail is busy. Nothing was sent; approve again in a moment.');
+      } else if (!(error instanceof MailboxError) || error.code === 'unreachable') {
+        this.repository.settleSend(taskId, sendId, ['sending'], 'ambiguous', this.at(), {
+          reason: 'Gmail did not confirm the send. AgentDeck will check Gmail before anything is sent again.',
+        }, { at: this.at(), kind: 'send-ambiguous', message: 'Gmail did not confirm whether the reply was sent. Checking Gmail before anything is sent again.' });
+      } else if (error.code === 'rejected' || error.code === 'not-found') {
+        notSent('sending', `${error.message} Nothing was sent.`);
+      } else {
+        notSent('sending', `${this.recordAccountFailure(account, error)} Nothing was sent.`);
+      }
+      return;
+    }
+    await this.recordSent(taskId, send, mailbox, messageId);
+  }
+
+  private async recordSent(taskId: string, send: ReplySend, mailbox: Mailbox, messageId: string): Promise<void> {
+    const recipients = [...send.content.to, ...send.content.cc].join(', ');
+    if (!this.repository.settleSend(taskId, send.sendId, ['sending', 'ambiguous'], 'sent', this.at(), { providerMessageId: messageId }, {
+      at: this.at(), kind: 'reply-sent', message: `Sent version ${send.draftVersion} to ${recipients}. Gmail confirmed it.`,
+    })) return;
+    // The draft would otherwise sit in Gmail, ready to be sent a second time by hand.
+    const draftId = this.repository.listDrafts(taskId).find((draft) => draft.version === send.draftVersion)?.providerDraftId;
+    if (!draftId) return;
+    try {
+      await mailbox.deleteDraft(draftId);
+    } catch {
+      this.repository.appendActivity(taskId, {
+        at: this.at(), kind: 'draft-not-removed', message: 'The reply was sent, but its draft could not be removed from Gmail. Delete the draft there so it is not sent again.',
+      });
+    }
+  }
+
+  /**
+   * Settles a send whose outcome was not seen. Inside the grace nothing is
+   * judged. Afterwards, a sent message carrying the intent proves it was
+   * sent; none proves it was not. Gmail failures leave it ambiguous.
+   */
+  private async reconcileSend(taskId: string, sendId: string): Promise<void> {
+    const task = this.repository.getTask(taskId);
+    const send = this.repository.listSends(taskId).find((entry) => entry.sendId === sendId);
+    if (!task?.confirmed || !send || send.state !== 'ambiguous') return;
+    if (this.now().getTime() - Date.parse(send.startedAt ?? send.updatedAt) < this.sendGrace()) return;
+    const account = this.repository.getAccount(task.accountId);
+    if (!account || account.revokedAt) {
+      this.repository.settleSend(taskId, sendId, ['ambiguous'], 'ambiguous', this.at(), {
+        reason: 'Access to the account was revoked before this send could be checked. Look in Gmail\'s Sent folder.',
+      });
+      return;
+    }
+    try {
+      const mailbox = await this.openMailbox(account);
+      const found = await mailbox.findSentByIntent(sendId, task.confirmed.threadId, send.startedAt ?? send.approvedAt);
+      if (found) await this.recordSent(taskId, send, mailbox, found);
+      else {
+        this.repository.settleSend(taskId, sendId, ['ambiguous'], 'failed', this.at(), {
+          reason: 'Checked Gmail: this reply was not sent. Approve again to send it.',
+        }, { at: this.at(), kind: 'send-failed', message: 'Checked Gmail: the reply was not sent.' });
+      }
+    } catch (error) {
+      this.recordAccountFailure(account, error);
+    }
+  }
+
   // -- projections --
 
   private accountView(account: EmailAccountGrant): EmailAccountView {
@@ -703,6 +908,18 @@ export class EmailTaskService {
         createdBy: who(draft.createdBy),
         updatedAt: draft.updatedAt,
         ...(draft.reason ? { reason: draft.reason } : {}),
+      })),
+      sends: this.repository.listSends(task.id).map((send) => ({
+        sendId: send.sendId,
+        draftVersion: send.draftVersion,
+        digest: send.digest,
+        content: send.content,
+        state: send.state,
+        approvedAt: send.approvedAt,
+        approvedBy: who(send.approvedBy),
+        expiresAt: send.expiresAt,
+        ...(send.settledAt ? { settledAt: send.settledAt } : {}),
+        ...(send.reason ? { reason: send.reason } : {}),
       })),
     };
   }

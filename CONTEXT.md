@@ -132,6 +132,10 @@ _Avoid_: Email job, inbox run
 The editable reply AgentDeck writes to the owner's Gmail drafts after the match is confirmed. Every save is a durable version recorded before the one provider write and settled from what Gmail reads back, so each version shows exactly the recipients, subject, body, and attachments Gmail holds, and a lost response never produces a second draft. A reply draft is never sent by preparing or editing it.
 _Avoid_: Proposal (for the draft itself), outbox, message
 
+**Reply send**:
+The owner's approval of one saved Reply draft version, bound to its version and digest, and the single Gmail send it allows. AgentDeck records the approval, with exactly the content approved and a fresh send intent, before the send, and builds the message from that record rather than from whatever the Gmail draft holds by then. It is settled as sent, failed (not sent), expired, or ambiguous; an ambiguous send is settled from the thread's sent mail by its intent before anything is sent again. Any later edit needs a new approval, and only the owner at this Mac can approve.
+_Avoid_: Auto-send, outbox, standing approval
+
 **Provider readiness**:
 The result of a harmless check that a provider CLI on this Mac is installed, signed in with the provider's own sign-in, and within its plan allowance: ready, missing CLI, signed out, expired, allowance reached, or check failed, each with repair steps. Only this metadata is kept; the credential stays in the provider's own storage.
 _Avoid_: Runtime readiness (the managed-run capability probe), login, auth

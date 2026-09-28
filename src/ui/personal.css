@@ -129,5 +129,9 @@
 .email-draft-state.is-saved { color: var(--status-completed); }
 .email-draft-state.is-failed { color: var(--status-error); }
 .email-draft-state.is-writing, .email-draft-state.is-uncertain { color: var(--status-running); }
+.email-send { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); }
+.email-send h4 { margin: 0; }
+.email-send.is-sent h4 { color: var(--status-completed); }
+.email-send.is-approved h4, .email-send.is-sending h4, .email-send.is-ambiguous h4 { color: var(--status-running); }
 .email-versions { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 .email-versions small { color: var(--text-muted); }

@@ -2,7 +2,8 @@
 // is one Gmail account the owner connected on this Mac; an email reply task
 // is a Personal task that asks the confined agent to find one message in it
 // and suggest a reply, then keeps every version of the editable reply draft
-// AgentDeck wrote to Gmail. Nothing here sends mail: sending is issue #89.
+// AgentDeck wrote to Gmail. Issue #89 adds the owner's approval of one saved
+// version and the one send it allows.
 import type { PersonalActor, PersonalTaskActivity, PersonalTaskAttempt, PersonalTaskStatus } from '../types.js';
 
 /**
@@ -114,6 +115,37 @@ export interface ReplyDraftVersion {
   readonly reason?: string;
 }
 
+/**
+ * One owner approval of one saved draft version and the single send it
+ * allows. 'approved' and 'sending' are written before the provider call;
+ * 'ambiguous' means the send may or may not have happened and is settled
+ * from Gmail before anything is sent again.
+ */
+export type ReplySendState = 'approved' | 'sending' | 'sent' | 'failed' | 'ambiguous' | 'expired';
+
+/** A live send holds the reply: no new version or second approval while one exists. */
+export const LIVE_SEND_STATES: readonly ReplySendState[] = ['approved', 'sending', 'sent', 'ambiguous'];
+/** Sends still waiting on AgentDeck or Gmail. */
+export const UNSETTLED_SEND_STATES: readonly ReplySendState[] = ['approved', 'sending', 'ambiguous'];
+
+export interface ReplySend {
+  /** Also the X-AgentDeck-Intent of the sent message, so Gmail can prove it was sent. */
+  readonly sendId: string;
+  readonly draftVersion: number;
+  readonly digest: string;
+  /** Exactly what is sent: the approved version's saved content. */
+  readonly content: ReplyDraftContent;
+  readonly state: ReplySendState;
+  readonly approvedAt: string;
+  readonly approvedBy: PersonalActor;
+  readonly expiresAt: string;
+  readonly startedAt?: string;
+  readonly settledAt?: string;
+  readonly providerMessageId?: string;
+  readonly reason?: string;
+  readonly updatedAt: string;
+}
+
 export interface EmailTask {
   readonly id: string;
   readonly accountId: string;
@@ -178,6 +210,21 @@ export interface EmailTaskView {
   confirmed?: EmailMessageContext;
   confirmedAt?: string;
   confirmedBy?: { displayName: string; device: string };
-  /** Newest first. Never sent: sending is a separate, later approval. */
+  /** Newest first. Saving a version never sends it. */
   drafts: ReplyDraftVersionView[];
+  /** Every approval to send, newest first; at most one is live. */
+  sends: ReplySendView[];
+}
+
+export interface ReplySendView {
+  sendId: string;
+  draftVersion: number;
+  digest: string;
+  content: ReplyDraftContent;
+  state: ReplySendState;
+  approvedAt: string;
+  approvedBy: { displayName: string; device: string };
+  expiresAt: string;
+  settledAt?: string;
+  reason?: string;
 }

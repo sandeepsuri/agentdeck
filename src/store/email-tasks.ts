@@ -1,10 +1,11 @@
-// Persistence for connected email accounts, email reply tasks, and reply
-// draft versions (migration 029). Exposed as Store.email so the "no SQL
-// outside src/store" rule holds. A task's status, result, and the attempt
+// Persistence for connected email accounts, email reply tasks, reply draft
+// versions (migration 029), and approvals to send a reply (migration 030).
+// Exposed as Store.email so the "no SQL outside src/store" rule holds. A task's status, result, and the attempt
 // that produced them change in one transaction, as for personal tasks.
 import type { Database } from 'better-sqlite3';
 import type {
   EmailAccountGrant, EmailAccountState, EmailFindResult, EmailMessageContext, EmailTask, ReplyDraftContent, ReplyDraftState, ReplyDraftVersion,
+  ReplySend, ReplySendState,
 } from '../personal-tasks/email/types.js';
 import type {
   PersonalActivityKind, PersonalActor, PersonalAttemptOutcome, PersonalTaskActivity, PersonalTaskAttempt, PersonalTaskStatus,
@@ -24,6 +25,16 @@ interface DraftRow {
   task_id: string; version: number; state: string; origin: string; content: string; digest: string | null; provider_draft_id: string | null;
   intent_id: string; created_at: string; created_by: string; updated_at: string; reason: string | null;
 }
+
+interface SendRow {
+  send_id: string; task_id: string; draft_version: number; digest: string; content: string; state: string; approved_at: string; approved_by: string;
+  expires_at: string; started_at: string | null; settled_at: string | null; provider_message_id: string | null; reason: string | null; updated_at: string;
+}
+
+/** A live send holds the reply: no new version, and no second approval, while one exists. */
+const LIVE_SEND = "state IN ('approved', 'sending', 'sent', 'ambiguous')";
+
+export type ApproveSendOutcome = 'approved' | 'stale' | 'live-send';
 
 export type NewEmailActivity = Omit<PersonalTaskActivity, 'sequence' | 'path'>;
 
@@ -74,6 +85,24 @@ function rowToDraft(r: DraftRow): ReplyDraftVersion {
     createdBy: JSON.parse(r.created_by) as PersonalActor,
     updatedAt: r.updated_at,
     ...(r.reason !== null ? { reason: r.reason } : {}),
+  };
+}
+
+function rowToSend(r: SendRow): ReplySend {
+  return {
+    sendId: r.send_id,
+    draftVersion: r.draft_version,
+    digest: r.digest,
+    content: JSON.parse(r.content) as ReplyDraftContent,
+    state: r.state as ReplySendState,
+    approvedAt: r.approved_at,
+    approvedBy: JSON.parse(r.approved_by) as PersonalActor,
+    expiresAt: r.expires_at,
+    ...(r.started_at !== null ? { startedAt: r.started_at } : {}),
+    ...(r.settled_at !== null ? { settledAt: r.settled_at } : {}),
+    ...(r.provider_message_id !== null ? { providerMessageId: r.provider_message_id } : {}),
+    ...(r.reason !== null ? { reason: r.reason } : {}),
+    updatedAt: r.updated_at,
   };
 }
 
@@ -233,6 +262,7 @@ export class EmailTaskRepository {
       if (latest !== expectedLatest) return undefined;
       const open = this.db.prepare("SELECT 1 FROM email_reply_drafts WHERE task_id = ? AND state IN ('writing', 'uncertain')").get(taskId);
       if (open) return undefined;
+      if (this.db.prepare(`SELECT 1 FROM email_reply_sends WHERE task_id = ? AND ${LIVE_SEND}`).get(taskId)) return undefined;
       const version = latest + 1;
       this.db.prepare(
         `INSERT INTO email_reply_drafts (task_id, version, state, origin, content, digest, provider_draft_id, intent_id, created_at, created_by, updated_at, reason)
@@ -283,6 +313,67 @@ export class EmailTaskRepository {
   listUnsettledDrafts(): Array<{ taskId: string; draft: ReplyDraftVersion }> {
     return (this.db.prepare("SELECT * FROM email_reply_drafts WHERE state IN ('writing', 'uncertain') ORDER BY task_id, version").all() as DraftRow[])
       .map((row) => ({ taskId: row.task_id, draft: rowToDraft(row) }));
+  }
+
+  // -- sends --
+
+  /**
+   * Records the owner's approval before anything is sent. 'stale' when the
+   * version is no longer the latest, not saved, or has another digest;
+   * 'live-send' when the reply already has a send pending, uncertain, or done.
+   */
+  approveSend(
+    taskId: string,
+    send: Pick<ReplySend, 'sendId' | 'draftVersion' | 'digest' | 'content' | 'approvedAt' | 'approvedBy' | 'expiresAt'>,
+    activity: NewEmailActivity,
+  ): ApproveSendOutcome {
+    return this.db.transaction((): ApproveSendOutcome => {
+      if (this.db.prepare(`SELECT 1 FROM email_reply_sends WHERE task_id = ? AND ${LIVE_SEND}`).get(taskId)) return 'live-send';
+      const latest = this.db.prepare('SELECT * FROM email_reply_drafts WHERE task_id = ? ORDER BY version DESC LIMIT 1').get(taskId) as DraftRow | undefined;
+      if (!latest || latest.version !== send.draftVersion || latest.state !== 'saved' || latest.digest !== send.digest) return 'stale';
+      this.db.prepare(
+        `INSERT INTO email_reply_sends (send_id, task_id, draft_version, digest, content, state, approved_at, approved_by, expires_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?)`,
+      ).run(send.sendId, taskId, send.draftVersion, send.digest, JSON.stringify(send.content), send.approvedAt, JSON.stringify(send.approvedBy),
+        send.expiresAt, send.approvedAt);
+      this.insertActivity(taskId, activity);
+      return 'approved';
+    })();
+  }
+
+  /** The one move to 'sending', only while the approval is still in time. False when it already started or expired. */
+  startSend(taskId: string, sendId: string, at: string): boolean {
+    return this.db.prepare(
+      "UPDATE email_reply_sends SET state = 'sending', started_at = ?, updated_at = ? WHERE task_id = ? AND send_id = ? AND state = 'approved' AND expires_at > ?",
+    ).run(at, at, taskId, sendId, at).changes > 0;
+  }
+
+  /** Moves a send on from an expected state; false when it had already moved. */
+  settleSend(
+    taskId: string, sendId: string, from: readonly ReplySendState[], to: ReplySendState, at: string,
+    fields: { providerMessageId?: string; reason?: string },
+    activity?: NewEmailActivity,
+  ): boolean {
+    const settled = to === 'sent' || to === 'failed' || to === 'expired';
+    return this.db.transaction(() => {
+      const changed = this.db.prepare(
+        `UPDATE email_reply_sends SET state = ?, updated_at = ?, settled_at = CASE WHEN ? THEN ? ELSE settled_at END,
+           provider_message_id = COALESCE(?, provider_message_id), reason = ?
+         WHERE task_id = ? AND send_id = ? AND state IN (${from.map(() => '?').join(', ')})`,
+      ).run(to, at, settled ? 1 : 0, at, fields.providerMessageId ?? null, fields.reason ?? null, taskId, sendId, ...from).changes > 0;
+      if (changed && activity) this.insertActivity(taskId, activity);
+      return changed;
+    })();
+  }
+
+  /** Newest first. */
+  listSends(taskId: string): ReplySend[] {
+    return (this.db.prepare('SELECT * FROM email_reply_sends WHERE task_id = ? ORDER BY approved_at DESC, rowid DESC').all(taskId) as SendRow[]).map(rowToSend);
+  }
+
+  listUnsettledSends(): Array<{ taskId: string; send: ReplySend }> {
+    return (this.db.prepare("SELECT * FROM email_reply_sends WHERE state IN ('approved', 'sending', 'ambiguous') ORDER BY approved_at, rowid").all() as SendRow[])
+      .map((row) => ({ taskId: row.task_id, send: rowToSend(row) }));
   }
 
   private insertActivity(taskId: string, activity: NewEmailActivity): void {

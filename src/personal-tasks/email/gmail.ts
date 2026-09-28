@@ -1,7 +1,8 @@
 // Issue #88: the Gmail adapter chosen in decision 0002, limited to what
 // finding a message and preparing a reply need: search and read one
-// account, and create, update, and read back one draft. There is no send
-// here on purpose — sending an approved reply exactly once is issue #89.
+// account, and create, update, and read back one draft. Issue #89 adds the
+// one send of an approved reply, finding that send again in the thread by
+// its intent header, and removing the draft it replaces.
 //
 // Only AgentDeck's own process calls this. The confined agent reaches it
 // solely through the email broker; it holds no token and its sandbox's only
@@ -57,6 +58,16 @@ export interface Mailbox {
   readDraft(draftId: string): Promise<DraftReadBack | null>;
   /** The draft carrying this intent header in the thread, if Gmail holds one. */
   findDraftByIntent(intentId: string, threadId: string): Promise<string | undefined>;
+  /** Sends exactly this reply in its thread; returns Gmail's message id. Only an approved send calls this. */
+  sendReply(reply: OutgoingReply): Promise<string>;
+  /**
+   * The sent message carrying this intent header, if Gmail holds one: in the
+   * reply's thread, or anywhere in mail sent since `since` (Gmail starts a new
+   * thread when the subject was changed).
+   */
+  findSentByIntent(intentId: string, threadId: string, since: string): Promise<string | undefined>;
+  /** Removes a draft; one already gone is not an error. */
+  deleteDraft(draftId: string): Promise<void>;
 }
 
 export interface GmailMailboxOptions {
@@ -170,6 +181,47 @@ export class GmailMailbox implements Mailbox {
       if (!pageToken) break;
     }
     return undefined;
+  }
+
+  async sendReply(reply: OutgoingReply): Promise<string> {
+    const sent = await this.call<{ id: string }>('POST', '/messages/send', this.rawMessage(reply));
+    return sent.id;
+  }
+
+  async findSentByIntent(intentId: string, threadId: string, since: string): Promise<string | undefined> {
+    const metadata = new URLSearchParams([['format', 'metadata'], ['metadataHeaders', INTENT_HEADER]]);
+    // A draft of the same reply can carry an intent too; only mail Gmail sent counts.
+    const isSent = (message: GmailMessage) => message.labelIds?.includes('SENT') && !message.labelIds.includes('DRAFT')
+      && header(message, INTENT_HEADER) === intentId;
+    try {
+      const thread = await this.call<{ messages?: GmailMessage[] }>('GET', `/threads/${encodeURIComponent(threadId)}?${metadata}`);
+      const found = thread.messages?.find(isSent);
+      if (found) return found.id;
+    } catch (error) {
+      if (!(error instanceof MailboxError && error.code === 'not-found')) throw error;
+    }
+    // Gmail search cannot match a custom header, so read each message sent since the send began.
+    const after = Math.floor(Date.parse(since) / 1000) - 5 * 60;
+    let pageToken: string | undefined;
+    for (let page = 0; page < 5; page += 1) {
+      const params = new URLSearchParams({ q: `in:sent after:${after}`, maxResults: '100', ...(pageToken ? { pageToken } : {}) });
+      const list = await this.call<{ messages?: Array<{ id: string }>; nextPageToken?: string }>('GET', `/messages?${params}`);
+      for (const { id } of list.messages ?? []) {
+        const message = await this.call<GmailMessage>('GET', `/messages/${encodeURIComponent(id)}?${metadata}`);
+        if (isSent(message)) return message.id;
+      }
+      pageToken = list.nextPageToken;
+      if (!pageToken) break;
+    }
+    return undefined;
+  }
+
+  async deleteDraft(draftId: string): Promise<void> {
+    try {
+      await this.call('DELETE', `/drafts/${encodeURIComponent(draftId)}`);
+    } catch (error) {
+      if (!(error instanceof MailboxError && error.code === 'not-found')) throw error;
+    }
   }
 
   private rawMessage(reply: OutgoingReply): { raw: string; threadId: string } {

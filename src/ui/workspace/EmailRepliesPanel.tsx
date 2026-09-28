@@ -2,9 +2,13 @@
 // one Gmail account on this Mac, asks in their own words, confirms which
 // found message they mean from headers and text AgentDeck read itself, and
 // edits the reply draft AgentDeck wrote to Gmail. Every save is a durable
-// version showing exactly what Gmail holds. Nothing here sends mail.
+// version showing exactly what Gmail holds. Issue #89: the owner approves one
+// saved version, shown in full, and AgentDeck sends exactly that once.
 import { useCallback, useEffect, useState } from 'react';
-import type { EmailAccountView, EmailMessageContext, EmailTaskView, ReplyDraftVersionView } from '../../personal-tasks/email/types.js';
+import {
+  LIVE_SEND_STATES, UNSETTLED_SEND_STATES,
+  type EmailAccountView, type EmailMessageContext, type EmailTaskView, type ReplyDraftContent, type ReplyDraftVersionView, type ReplySendView,
+} from '../../personal-tasks/email/types.js';
 import { apiFetch } from '../apiFetch.js';
 
 const POLL_MS = 1500;
@@ -33,6 +37,17 @@ const DRAFT_LABEL: Record<ReplyDraftVersionView['state'], string> = {
   failed: 'Not saved',
   uncertain: 'Checking Gmail',
 };
+
+const SEND_LABEL: Record<ReplySendView['state'], string> = {
+  approved: 'Send pending',
+  sending: 'Sending…',
+  sent: 'Sent',
+  failed: 'Not sent',
+  ambiguous: 'Not confirmed — checking Gmail',
+  expired: 'Approval ran out — not sent',
+};
+
+const recipients = (content: ReplyDraftContent) => [...content.to, ...content.cc].join(', ');
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await apiFetch(url, init);
@@ -68,10 +83,75 @@ function MessageCard({ message, suggested }: { message: EmailMessageContext; sug
   );
 }
 
-function DraftEditor({ task, onSave, onCheck }: {
+/**
+ * The owner's decision: the exact saved version, every recipient and
+ * attachment, and one approval bound to its version and digest. Once
+ * approved, the send's own state replaces the button.
+ */
+function SendDecision({ task, shown, edited, onApprove, onCheck }: {
+  task: EmailTaskView;
+  shown: ReplyDraftVersionView | undefined;
+  edited: boolean;
+  onApprove: (approval: { version: number; digest: string }) => Promise<void>;
+  onCheck: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const latest = task.drafts[0];
+  const last = task.sends[0];
+  const live = last && LIVE_SEND_STATES.includes(last.state) ? last : undefined;
+
+  if (live) {
+    return (
+      <section aria-label="Send" className={`email-send is-${live.state}`}>
+        <h4>{SEND_LABEL[live.state]}</h4>
+        <p className="personal-note">
+          Version {live.draftVersion} (<code title={live.digest}>{live.digest.slice(0, 12)}</code>) to {recipients(live.content)}, approved by {live.approvedBy.displayName} on {live.approvedBy.device} · {time(live.approvedAt)}
+          {live.state === 'sent' && live.settledAt ? `. Gmail confirmed it ${time(live.settledAt)}.` : '.'}
+        </p>
+        <dl className="personal-task-meta" aria-label="What was approved">
+          <div><dt>Subject</dt><dd>{live.content.subject}</dd></div>
+        </dl>
+        <pre className="email-body">{live.content.body || '(empty)'}</pre>
+        {live.reason && <p className="email-warning" role="status">{live.reason}</p>}
+        {live.state === 'ambiguous' && <button className="button" onClick={() => void onCheck()} type="button">Check Gmail</button>}
+      </section>
+    );
+  }
+
+  const ready = shown && latest === shown && shown.state === 'saved' && shown.digest;
+  const attachments = shown?.content.attachments.length ?? 0;
+  const blocked = !ready ? 'Save the draft to Gmail first; only a saved version can be approved.'
+    : edited ? 'You have edits that are not saved. Save them first: approval covers only the saved version shown above.'
+      : attachments > 0 ? 'This draft has attachments added in Gmail, which AgentDeck cannot send exactly. Send it from Gmail, or remove them there and check again.'
+        : undefined;
+  const approve = async () => {
+    if (!ready || blocked) return;
+    setBusy(true);
+    try { await onApprove({ version: shown.version, digest: shown.digest! }); } finally { setBusy(false); }
+  };
+
+  return (
+    <section aria-label="Send" className="email-send">
+      {last && <p className="email-warning" role="status">Last approval: {SEND_LABEL[last.state]}.{last.reason ? ` ${last.reason}` : ''}</p>}
+      {shown && ready && (
+        <p className="personal-note">
+          Approving sends version {shown.version} exactly as shown above — to {recipients(shown.content)} — once, from {task.account.address}.
+          Any later edit needs a new approval.
+        </p>
+      )}
+      {blocked && <p className="personal-note">{blocked}</p>}
+      <button className="button button-primary" disabled={busy || Boolean(blocked)} onClick={() => void approve()} type="button">
+        {busy ? 'Sending…' : shown ? `Approve and send version ${shown.version}` : 'Approve and send'}
+      </button>
+    </section>
+  );
+}
+
+function DraftEditor({ task, onSave, onCheck, onApprove }: {
   task: EmailTaskView;
   onSave: (fields: { baseVersion: number; to: string[]; cc: string[]; subject: string; body: string }) => Promise<void>;
   onCheck: () => Promise<void>;
+  onApprove: (approval: { version: number; digest: string }) => Promise<void>;
 }) {
   const latest = task.drafts[0];
   const shown = task.drafts.find((draft) => draft.state === 'saved') ?? latest;
@@ -81,6 +161,11 @@ function DraftEditor({ task, onSave, onCheck }: {
   const [body, setBody] = useState(shown?.content.body ?? '');
   const [busy, setBusy] = useState(false);
   const unsettled = latest && (latest.state === 'writing' || latest.state === 'uncertain');
+  const locked = task.sends.some((send) => LIVE_SEND_STATES.includes(send.state));
+  const edited = Boolean(shown) && (
+    lines(to).join('\n') !== shown!.content.to.join('\n') || lines(cc).join('\n') !== shown!.content.cc.join('\n')
+    || subject !== shown!.content.subject || body !== shown!.content.body
+  );
 
   // Take the newest saved version whenever it changes (a save, or a change made in Gmail).
   useEffect(() => {
@@ -121,7 +206,8 @@ function DraftEditor({ task, onSave, onCheck }: {
       )}
       {latest && latest !== shown && latest.reason && <p className="email-warning" role="status">Version {latest.version}: {DRAFT_LABEL[latest.state]}. {latest.reason}</p>}
       {latest?.state === 'failed' && latest === shown && latest.reason && <p className="email-warning" role="status">{latest.reason}</p>}
-      <form className="email-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <SendDecision edited={edited} onApprove={onApprove} onCheck={onCheck} shown={shown} task={task} />
+      {!locked && <form className="email-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <label>To <small>one address per line</small><textarea onChange={(event) => setTo(event.target.value)} rows={2} value={to} /></label>
         <label>Cc<textarea onChange={(event) => setCc(event.target.value)} rows={1} value={cc} /></label>
         <label>Subject<input onChange={(event) => setSubject(event.target.value)} type="text" value={subject} /></label>
@@ -130,8 +216,8 @@ function DraftEditor({ task, onSave, onCheck }: {
           <button className="button button-primary" disabled={busy || Boolean(unsettled)} type="submit">{busy ? 'Saving…' : latest ? 'Save draft' : 'Write draft to Gmail'}</button>
           <button className="button" disabled={busy} onClick={() => void onCheck()} type="button">Check Gmail</button>
         </div>
-      </form>
-      <p className="personal-note">Saving updates the draft in Gmail and keeps every version here. Nothing is sent; sending needs its own approval.</p>
+      </form>}
+      {!locked && <p className="personal-note">Saving updates the draft in Gmail and keeps every version here. Saving never sends; sending needs your approval of a saved version.</p>}
       {task.drafts.length > 1 && (
         <details>
           <summary>Earlier versions</summary>
@@ -149,12 +235,13 @@ function DraftEditor({ task, onSave, onCheck }: {
   );
 }
 
-function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck }: {
+function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove }: {
   task: EmailTaskView;
   onRetry: () => void;
   onConfirm: (messageId: string) => Promise<void>;
   onSave: (fields: { baseVersion: number; to: string[]; cc: string[]; subject: string; body: string }) => Promise<void>;
   onCheck: () => Promise<void>;
+  onApprove: (approval: { version: number; digest: string }) => Promise<void>;
 }) {
   const candidates = task.result?.candidates ?? [];
   const [chosen, setChosen] = useState<string | undefined>(task.result?.proposedMessageId ?? candidates[0]?.id);
@@ -193,7 +280,7 @@ function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck }: {
             <h4>Answering{task.confirmedBy ? ` · confirmed by ${task.confirmedBy.displayName} on ${task.confirmedBy.device}` : ''}</h4>
             <MessageCard message={task.confirmed} />
           </section>
-          <DraftEditor key={task.id} onCheck={onCheck} onSave={onSave} task={task} />
+          <DraftEditor key={task.id} onApprove={onApprove} onCheck={onCheck} onSave={onSave} task={task} />
         </>
       ) : task.result && (
         candidates.length === 0 ? <p className="personal-empty">No matching email was found. Ask again with other words.</p> : (
@@ -264,7 +351,8 @@ export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
   useEffect(() => { if (active) void refresh(); }, [active, refresh]);
 
   const unsettled = tasks?.some((task) => task.status === 'queued' || task.status === 'running'
-    || task.drafts[0]?.state === 'writing' || task.drafts[0]?.state === 'uncertain') ?? false;
+    || task.drafts[0]?.state === 'writing' || task.drafts[0]?.state === 'uncertain'
+    || task.sends.some((send) => UNSETTLED_SEND_STATES.includes(send.state))) ?? false;
   useEffect(() => {
     if (!active || !unsettled) return undefined;
     const id = setInterval(() => void refresh(), POLL_MS);
@@ -318,7 +406,7 @@ export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
       </header>
       <p className="personal-note">
         Connecting opens Google in your browser; expect a “Google hasn’t verified this app” screen during the pilot, and keep both permissions ticked.
-        An agent searches only the account you connect, through AgentDeck, and never chooses who a reply goes to. Nothing is sent from here.
+        An agent searches only the account you connect, through AgentDeck, and never chooses who a reply goes to. Nothing is sent until you approve the exact reply.
       </p>
       {(error || loadError) && <p className="personal-error" role="alert">{error ?? `Email replies are unavailable: ${loadError}`}</p>}
 
@@ -379,6 +467,7 @@ export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
               onConfirm={(messageId) => perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/confirm`, { messageId })}
               onRetry={() => void perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/retry`)}
               onSave={(fields) => perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/draft`, fields)}
+              onApprove={(approval) => perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/send`, approval)}
               task={selectedTask}
             />
           )}

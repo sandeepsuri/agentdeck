@@ -343,3 +343,176 @@ describe('preparing the reply draft', () => {
     expect(mailbox.drafts.size).toBe(1);
   });
 });
+
+describe('approving and sending the reply once', () => {
+  async function draftedTask() {
+    const { task } = await connectedTask();
+    const drafted = await service.confirm(task.id, { messageId: 'gm-lease' }, OWNER);
+    const latest = drafted.drafts[0]!;
+    return { task: drafted, approval: { version: latest.version, digest: latest.digest! } };
+  }
+
+  it('sends exactly the approved version once, in the thread, and removes the Gmail draft', async () => {
+    const { task, approval } = await draftedTask();
+    const sent = await service.approveSend(task.id, approval, OWNER);
+    expect(sent.sends).toHaveLength(1);
+    expect(sent.sends[0]).toMatchObject({
+      state: 'sent', draftVersion: 1, digest: approval.digest, approvedBy: { displayName: 'owner', device: 'This Mac' },
+      content: { to: ['Pat Landlord <pat@example.test>'], subject: 'Re: Lease renewal', body: 'Hi Pat, yes, I will sign the renewal by Friday.' },
+    });
+    expect(mailbox.sent).toHaveLength(1);
+    expect(mailbox.sent[0]!.reply).toMatchObject({
+      content: task.drafts[0]!.content, threadId: 'th-lease', inReplyTo: '<lease@example.test>', intentId: sent.sends[0]!.sendId,
+    });
+    expect(mailbox.drafts.size).toBe(0);
+    expect(sent.activity.map((entry) => entry.kind)).toEqual(expect.arrayContaining(['send-approved', 'reply-sent']));
+
+    // A double tap, refresh, or retry of the same approval sends nothing more.
+    await service.approveSend(task.id, approval, OWNER);
+    await service.checkDraft(task.id);
+    expect(mailbox.sent).toHaveLength(1);
+    expect(service.get(task.id)!.sends).toHaveLength(1);
+    // The reply is done: no further edits or approvals.
+    await expect(service.saveDraft(task.id, { baseVersion: 1, to: ['pat@example.test'], cc: [], subject: 'x', body: 'y' }, OWNER))
+      .rejects.toMatchObject({ code: 'invalid-state' });
+  });
+
+  it('two approvals at once start one send', async () => {
+    const { task, approval } = await draftedTask();
+    let release!: () => void;
+    mailbox.sendGate = new Promise<void>((resolve) => { release = resolve; });
+    const first = service.approveSend(task.id, approval, OWNER);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await service.approveSend(task.id, approval, OWNER);
+    expect(second.sends[0]!.state).toBe('sending');
+    release();
+    await first;
+    expect(mailbox.sent).toHaveLength(1);
+    expect(service.get(task.id)!.sends.map((send) => send.state)).toEqual(['sent']);
+  });
+
+  it('binds approval to the exact latest version: an older version, another digest, or a Gmail edit needs a new approval', async () => {
+    const { task, approval } = await draftedTask();
+    await expect(service.approveSend(task.id, { ...approval, digest: 'f'.repeat(64) }, OWNER)).rejects.toMatchObject({ code: 'stale-draft' });
+    const edited = await service.saveDraft(task.id, { baseVersion: 1, to: ['Pat Landlord <pat@example.test>'], cc: [], subject: 'Re: Lease renewal', body: 'Thursday.' }, OWNER);
+    await expect(service.approveSend(task.id, approval, OWNER)).rejects.toMatchObject({ code: 'stale-draft' });
+
+    mailbox.editInGmail([...mailbox.drafts.keys()][0]!, { to: ['someone-else@example.test'] });
+    await expect(service.approveSend(task.id, { version: 2, digest: edited.drafts[0]!.digest! }, OWNER)).rejects.toMatchObject({ code: 'stale-draft' });
+    const latest = service.get(task.id)!.drafts[0]!;
+    expect(latest).toMatchObject({ version: 3, origin: 'gmail', content: { to: ['someone-else@example.test'] } });
+    expect(mailbox.sent).toHaveLength(0);
+
+    await service.approveSend(task.id, { version: 3, digest: latest.digest! }, OWNER);
+    expect(mailbox.sent.map((entry) => entry.reply.content.to)).toEqual([['someone-else@example.test']]);
+  });
+
+  it('records a refused send as failed and lets the owner approve again', async () => {
+    const { task, approval } = await draftedTask();
+    mailbox.sendFault = 'refuse-send';
+    const failed = await service.approveSend(task.id, approval, OWNER);
+    expect(failed.sends[0]).toMatchObject({ state: 'failed', reason: expect.stringMatching(/nothing was sent/i) });
+    expect(mailbox.sent).toHaveLength(0);
+    expect(mailbox.drafts.size).toBe(1);
+
+    const again = await service.approveSend(task.id, approval, OWNER);
+    expect(again.sends.map((send) => send.state)).toEqual(['sent', 'failed']);
+    expect(mailbox.sent).toHaveLength(1);
+  });
+
+  it('treats a rate limit as not sent', async () => {
+    const { task, approval } = await draftedTask();
+    mailbox.sendFault = 'rate-limited';
+    expect((await service.approveSend(task.id, approval, OWNER)).sends[0]!.state).toBe('failed');
+  });
+
+  it('settles a lost send response from Gmail before anything is sent again', async () => {
+    const { task, approval } = await draftedTask();
+    mailbox.sendFault = 'lose-response-after-send';
+    const unsure = await service.approveSend(task.id, approval, OWNER);
+    expect(unsure.sends[0]).toMatchObject({ state: 'ambiguous' });
+    expect(unsure.activity.at(-1)).toMatchObject({ kind: 'send-ambiguous' });
+    // Inside the grace, nothing is judged and no second send can start.
+    expect((await service.checkDraft(task.id)).sends[0]!.state).toBe('ambiguous');
+    await expect(service.approveSend(task.id, approval, OWNER)).resolves.toMatchObject({ sends: [{ state: 'ambiguous' }] });
+    expect(mailbox.sent).toHaveLength(1);
+    // A send is judged only well after the request timeout, so a late commit is not missed.
+    clock += 31_000;
+    expect((await service.checkDraft(task.id)).sends[0]!.state).toBe('ambiguous');
+
+    clock += 90_000;
+    const settled = await service.checkDraft(task.id);
+    expect(settled.sends[0]).toMatchObject({ state: 'sent' });
+    expect(mailbox.sent).toHaveLength(1);
+    expect(mailbox.drafts.size).toBe(0);
+  });
+
+  it('settles a send that never reached Gmail as not sent, then a new approval sends once', async () => {
+    const { task, approval } = await draftedTask();
+    mailbox.sendFault = 'fail-before-send';
+    await service.approveSend(task.id, approval, OWNER);
+    clock += 121_000;
+    const settled = await service.checkDraft(task.id);
+    expect(settled.sends[0]).toMatchObject({ state: 'failed', reason: expect.stringMatching(/was not sent/) });
+    const again = await service.approveSend(task.id, approval, OWNER);
+    expect(again.sends[0]!.state).toBe('sent');
+    expect(mailbox.sent).toHaveLength(1);
+  });
+
+  it('after a restart, settles a send left in flight from Gmail and never sends it twice', async () => {
+    const { task, approval } = await draftedTask();
+    // The process stopped after Gmail took the send but before the result was recorded.
+    const at = new Date(clock).toISOString();
+    const content = task.drafts[0]!.content;
+    store.email.approveSend(task.id, {
+      sendId: 'send-crash', draftVersion: approval.version, digest: approval.digest, content, approvedAt: at, approvedBy: OWNER,
+      expiresAt: new Date(clock + 600_000).toISOString(),
+    }, { at, kind: 'send-approved', message: 'approved' });
+    store.email.startSend(task.id, 'send-crash', at);
+    // Gmail started a new thread for it, as it does when the subject was changed.
+    mailbox.sent.push({ id: 'sent-crash', reply: { content, threadId: 'th-new', intentId: 'send-crash', messageId: '<send-crash@agentdeck.local>' } });
+
+    clock += 130_000;
+    await restart();
+    await service.whenIdle();
+    expect(service.get(task.id)!.sends[0]).toMatchObject({ sendId: 'send-crash', state: 'sent' });
+    expect(mailbox.sent).toHaveLength(1);
+  });
+
+  it('after a restart, sends an approval that never started if still in time, and expires one that is not', async () => {
+    const { task, approval } = await draftedTask();
+    const at = new Date(clock).toISOString();
+    const pending = (sendId: string, ttl: number) => store.email.approveSend(task.id, {
+      sendId, draftVersion: approval.version, digest: approval.digest, content: task.drafts[0]!.content, approvedAt: at, approvedBy: OWNER,
+      expiresAt: new Date(clock + ttl).toISOString(),
+    }, { at, kind: 'send-approved', message: 'approved' });
+
+    pending('late', 1_000);
+    clock += 5_000;
+    await restart();
+    await service.whenIdle();
+    expect(service.get(task.id)!.sends[0]).toMatchObject({ sendId: 'late', state: 'expired' });
+    expect(mailbox.sent).toHaveLength(0);
+
+    pending('in-time', 600_000);
+    await restart();
+    await service.whenIdle();
+    expect(service.get(task.id)!.sends[0]).toMatchObject({ sendId: 'in-time', state: 'sent' });
+    expect(mailbox.sent).toHaveLength(1);
+  });
+
+  it('will not send a draft with attachments it cannot reproduce, or from a revoked account', async () => {
+    const { task, account } = await (async () => {
+      const found = await connectedTask();
+      await service.confirm(found.task.id, { messageId: 'gm-lease' }, OWNER);
+      return found;
+    })();
+    mailbox.editInGmail([...mailbox.drafts.keys()][0]!, {}, [{ name: 'lease.pdf', mimeType: 'application/pdf', size: 10 }]);
+    const withFile = (await service.checkDraft(task.id)).drafts[0]!;
+    await expect(service.approveSend(task.id, { version: withFile.version, digest: withFile.digest! }, OWNER)).rejects.toMatchObject({ code: 'invalid-state' });
+
+    await service.revokeAccount(account.id);
+    await expect(service.approveSend(task.id, { version: withFile.version, digest: withFile.digest! }, OWNER)).rejects.toMatchObject({ code: 'account-revoked' });
+    expect(mailbox.sent).toHaveLength(0);
+  });
+});

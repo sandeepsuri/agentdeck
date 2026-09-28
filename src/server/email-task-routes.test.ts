@@ -87,7 +87,7 @@ async function foundTask(): Promise<EmailTaskView> {
 }
 
 describe('email reply routes', () => {
-  it('lets the owner find, confirm, draft, and edit a reply that survives a restart, and never send', async () => {
+  it('lets the owner find, confirm, draft, and edit a reply that survives a restart, without sending', async () => {
     const task = await foundTask();
     expect(task.result?.candidates[0]).toMatchObject({ from: 'Pat Landlord <pat@example.test>', subject: 'Lease renewal' });
 
@@ -117,10 +117,32 @@ describe('email reply routes', () => {
     const reopened = (await app.inject({ method: 'GET', url: `/api/personal/email/tasks/${task.id}`, headers: LOCAL })).json() as EmailTaskView;
     expect(reopened.drafts.map((draft) => [draft.version, draft.content.body])).toEqual([[2, 'Yes, by Thursday.'], [1, 'Yes, by Friday.']]);
     expect(mailbox.drafts.size).toBe(1);
+    expect(mailbox.sent).toHaveLength(0);
+  });
 
-    for (const url of [`/api/personal/email/tasks/${task.id}/send`, `/api/personal/email/tasks/${task.id}/draft/send`]) {
-      expect((await app.inject({ method: 'POST', url, headers: LOCAL })).statusCode).toBe(404);
-    }
+  it('sends the approved version once for the owner at the Mac, and refuses a stale or repeated different approval', async () => {
+    const task = await foundTask();
+    const confirmed = (await app.inject({ method: 'POST', url: `/api/personal/email/tasks/${task.id}/confirm`, headers: LOCAL, payload: { messageId: 'gm-lease' } })).json() as EmailTaskView;
+    const { version, digest } = confirmed.drafts[0]!;
+    const send = (payload: Record<string, unknown>) => app.inject({ method: 'POST', url: `/api/personal/email/tasks/${task.id}/send`, headers: LOCAL, payload });
+
+    const stale = await send({ version, digest: '0'.repeat(64) });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json()).toMatchObject({ code: 'stale-draft' });
+    expect((await send({ version: 'one', digest })).statusCode).toBe(400);
+
+    const sent = await send({ version, digest });
+    expect(sent.statusCode).toBe(200);
+    expect((sent.json() as EmailTaskView).sends[0]).toMatchObject({ state: 'sent', draftVersion: 1, digest });
+    expect((await send({ version, digest })).statusCode).toBe(200);
+    expect(mailbox.sent).toHaveLength(1);
+
+    await shutdown();
+    boot();
+    const reopened = (await app.inject({ method: 'GET', url: `/api/personal/email/tasks/${task.id}`, headers: LOCAL })).json() as EmailTaskView;
+    expect(reopened.sends.map((entry) => entry.state)).toEqual(['sent']);
+    expect((await send({ version, digest })).statusCode).toBe(200);
+    expect(mailbox.sent).toHaveLength(1);
   });
 
   it('refuses a collaborator device, the shared token, and a paired owner phone', async () => {
@@ -138,12 +160,35 @@ describe('email reply routes', () => {
       for (const [method, url] of [
         ['GET', '/api/personal/email/accounts'], ['GET', '/api/personal/email/tasks'], ['GET', `/api/personal/email/tasks/${task.id}`],
         ['POST', '/api/personal/email/accounts/connect'], ['POST', `/api/personal/email/tasks/${task.id}/confirm`], ['POST', `/api/personal/email/tasks/${task.id}/draft`],
+        ['POST', `/api/personal/email/tasks/${task.id}/send`],
       ] as const) {
         const response = await app.inject({ method, url, headers, ...(method === 'POST' ? { payload: { messageId: 'gm-lease' } } : {}) });
         expect(response.statusCode, `${method} ${url}`).toBe(403);
       }
     }
     expect((await app.inject({ method: 'GET', url: `/api/personal/email/tasks/${task.id}`, headers: LOCAL })).json()).not.toHaveProperty('confirmed');
+    expect(mailbox.sent).toHaveLength(0);
+  });
+
+  it('refuses a collaborator, the shared token, and a paired phone the send of a drafted reply', async () => {
+    const task = await foundTask();
+    const confirmed = (await app.inject({ method: 'POST', url: `/api/personal/email/tasks/${task.id}/confirm`, headers: LOCAL, payload: { messageId: 'gm-lease' } })).json() as EmailTaskView;
+    const { version, digest } = confirmed.drafts[0]!;
+    const { code } = collaborators.inviteCollaborator({ displayName: 'Alice' });
+    const { token } = collaborators.exchangeInvitation(code, 'phone');
+    const challenge = ownerPairing.create();
+    const joined = ownerPairing.join(challenge.id, challenge.secret, 'Owner iPhone');
+    ownerPairing.confirmOwner(challenge.id, joined.code);
+    ownerPairing.confirmPhone(challenge.id, joined.nonce, joined.code);
+    const phone = ownerPairing.collect(challenge.id, joined.nonce)!;
+    for (const credential of [token, SHARED_TOKEN, phone.credential]) {
+      const response = await app.inject({
+        method: 'POST', url: `/api/personal/email/tasks/${task.id}/send`, headers: { host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: credential }, payload: { version, digest },
+      });
+      expect(response.statusCode).toBe(403);
+    }
+    expect(mailbox.sent).toHaveLength(0);
+    expect(service.get(task.id)!.sends).toEqual([]);
   });
 
   it('shows the repair state for a build without a Gmail client', async () => {

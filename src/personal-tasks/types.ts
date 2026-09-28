@@ -76,7 +76,14 @@ export type PersonalActivityKind =
   | 'message-confirmed'
   | 'draft-saved'
   | 'draft-not-saved'
-  | 'draft-changed-in-gmail';
+  | 'draft-changed-in-gmail'
+  // Approving and sending the reply once (issue #89).
+  | 'send-approved'
+  | 'reply-sent'
+  | 'send-failed'
+  | 'send-ambiguous'
+  | 'send-expired'
+  | 'draft-not-removed';
 
 export interface PersonalTaskActivity {
   readonly sequence: number;

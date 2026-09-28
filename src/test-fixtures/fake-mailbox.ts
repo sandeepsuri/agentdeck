@@ -1,6 +1,6 @@
-// An in-memory Gmail stand-in for issue #88 tests: one account's messages
-// and drafts, with faults injected around a draft write. It implements the
-// same Mailbox interface as the real adapter, which has no send.
+// An in-memory Gmail stand-in for issue #88 and #89 tests: one account's
+// messages, drafts, and sent replies, with faults injected around a draft
+// write or a send. It implements the same Mailbox interface as the real adapter.
 import { MailboxError, type DraftReadBack, type Mailbox, type MessageSummary, type OutgoingReply } from '../personal-tasks/email/gmail.js';
 import type { GmailAccess } from '../personal-tasks/email/service.js';
 import type { EmailMessageContext } from '../personal-tasks/email/types.js';
@@ -8,6 +8,8 @@ import type { TokenVault } from '../personal-tasks/email/keychain.js';
 import { GMAIL_SCOPES } from '../personal-tasks/email/gmail-oauth.js';
 
 export type DraftFault = 'lose-response-after-commit' | 'fail-before-commit';
+/** 'lose-response-after-send' sends, then fails as unreachable; 'refuse-send' is a definite 400. */
+export type SendFault = 'lose-response-after-send' | 'fail-before-send' | 'refuse-send' | 'rate-limited';
 
 export interface FakeMessage extends EmailMessageContext {
   /** Words a search must contain one of to find it. */
@@ -20,8 +22,13 @@ export class FakeMailbox implements Mailbox {
   readonly drafts = new Map<string, { reply: OutgoingReply; attachments: DraftReadBack['content']['attachments'] }>();
   readonly writes: Array<'create' | 'update'> = [];
   readonly searches: string[] = [];
+  readonly sent: Array<{ id: string; reply: OutgoingReply }> = [];
   /** Applied to the next draft write, then cleared. */
   fault: DraftFault | undefined;
+  /** Applied to the next send, then cleared. */
+  sendFault: SendFault | undefined;
+  /** Held while set, so a test can act while a send is in flight. */
+  sendGate: Promise<void> | undefined;
   /** Every call fails with this until cleared. */
   failure: MailboxError | undefined;
   private nextDraft = 1;
@@ -87,6 +94,31 @@ export class FakeMailbox implements Mailbox {
   async findDraftByIntent(intentId: string, threadId: string): Promise<string | undefined> {
     this.guard();
     return [...this.drafts.entries()].find(([, draft]) => draft.reply.intentId === intentId && draft.reply.threadId === threadId)?.[0];
+  }
+
+  async sendReply(reply: OutgoingReply): Promise<string> {
+    this.guard();
+    const fault = this.sendFault;
+    this.sendFault = undefined;
+    if (this.sendGate) await this.sendGate;
+    if (fault === 'fail-before-send') throw new MailboxError('unreachable', 'Gmail could not be reached.');
+    if (fault === 'rate-limited') throw new MailboxError('unreachable', 'Gmail is busy (429).', 429);
+    if (fault === 'refuse-send') throw new MailboxError('rejected', 'Gmail refused POST /messages/send (400).', 400);
+    const id = `sent-${this.sent.length + 1}`;
+    this.sent.push({ id, reply });
+    if (fault === 'lose-response-after-send') throw new MailboxError('unreachable', 'Gmail could not be reached.');
+    return id;
+  }
+
+  /** Like Gmail, finds the send in any thread: a changed subject starts a new one. */
+  async findSentByIntent(intentId: string): Promise<string | undefined> {
+    this.guard();
+    return this.sent.find((entry) => entry.reply.intentId === intentId)?.id;
+  }
+
+  async deleteDraft(draftId: string): Promise<void> {
+    this.guard();
+    this.drafts.delete(draftId);
   }
 
   /** The owner edits the draft in Gmail itself. */

@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-// Issue #88: connect Gmail, confirm the found email from its context, and
-// edit the reply draft as durable versions — with no way to send.
+// Issues #88 and #89: connect Gmail, confirm the found email from its
+// context, edit the reply draft as durable versions, and approve exactly one
+// saved version to send, seeing each send state.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { EmailAccountView, EmailMessageContext, EmailTaskView } from '../../personal-tasks/email/types.js';
+import type { EmailAccountView, EmailMessageContext, EmailTaskView, ReplySendView } from '../../personal-tasks/email/types.js';
 import { EmailRepliesPanel } from './EmailRepliesPanel.js';
 
 beforeAll(() => { (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
@@ -40,9 +41,17 @@ function task(overrides: Partial<EmailTaskView> = {}): EmailTaskView {
       candidates: [news, lease], proposedMessageId: 'gm-lease', suggestedBody: 'Yes, by Friday.',
     },
     drafts: [],
+    sends: [],
     ...overrides,
   };
 }
+
+const DIGEST = 'ab'.repeat(32);
+const sendOf = (state: ReplySendView['state'], reason?: string): ReplySendView => ({
+  sendId: 's1', draftVersion: 1, digest: DIGEST, state, approvedAt: '2026-09-28T10:03:00.000Z', approvedBy: { displayName: 'owner', device: 'This Mac' },
+  expiresAt: '2026-09-28T10:13:00.000Z', content: { to: ['office@example.test'], cc: [], subject: 'Re: Lease renewal', body: 'Yes, by Friday.', attachments: [] },
+  ...(state === 'sent' ? { settledAt: '2026-09-28T10:03:02.000Z' } : {}), ...(reason ? { reason } : {}),
+});
 
 const confirmedTask = () => task({
   title: 'Reply to “Lease renewal”', confirmed: lease, confirmedBy: { displayName: 'owner', device: 'This Mac' },
@@ -109,7 +118,7 @@ describe('EmailRepliesPanel', () => {
     expect(host.querySelector('[aria-label="Exactly what Gmail holds"]')?.textContent).toContain('office@example.test');
   });
 
-  it('saves an edit on top of the version shown and offers no way to send', async () => {
+  it('saves an edit on top of the version shown, and will not approve unsaved edits', async () => {
     const posts = stub({ accounts: [account], tasks: [confirmedTask()] });
     await render();
     const exact = host.querySelector('[aria-label="Exactly what Gmail holds"]')!;
@@ -122,11 +131,61 @@ describe('EmailRepliesPanel', () => {
       type(ccField!, '');
       type(bodyField!, 'Yes, by Thursday.');
     });
+    expect(button('Approve and send').disabled).toBe(true);
+    expect(host.querySelector('.email-send')?.textContent).toContain('edits that are not saved');
     await click(button('Save draft'));
     expect(posts.at(-1)).toEqual({
       url: '/api/personal/email/tasks/t1/draft',
       body: { baseVersion: 1, to: ['office@example.test', '"Doe, Jane" <jane@example.test>'], cc: [], subject: 'Re: Lease renewal', body: 'Yes, by Thursday.' },
     });
-    expect([...host.querySelectorAll('button')].some((entry) => /send/i.test(entry.textContent ?? ''))).toBe(false);
+    expect(posts.some((post) => post.url.endsWith('/send'))).toBe(false);
+  });
+
+  it('shows every recipient, the subject, body, and attachments, and approves that exact version', async () => {
+    const withCc = confirmedTask();
+    withCc.drafts[0]!.content = { ...withCc.drafts[0]!.content, cc: ['partner@example.test'] };
+    const posts = stub({ accounts: [account], tasks: [withCc] });
+    await render();
+    const exact = host.querySelector('[aria-label="Exactly what Gmail holds"]')!.textContent!;
+    for (const part of ['office@example.test', 'partner@example.test', 'Re: Lease renewal', 'Yes, by Friday.', 'Attachments', 'None']) expect(exact).toContain(part);
+    expect(host.querySelector('.email-send')?.textContent).toContain('to office@example.test, partner@example.test — once, from owner@gmail.com');
+    await click(button('Approve and send version 1'));
+    expect(posts).toEqual([{ url: '/api/personal/email/tasks/t1/send', body: { version: 1, digest: DIGEST } }]);
+  });
+
+  it('will not offer approval for a draft with attachments added in Gmail', async () => {
+    const withFile = confirmedTask();
+    withFile.drafts[0]!.content = { ...withFile.drafts[0]!.content, attachments: [{ name: 'lease.pdf', mimeType: 'application/pdf', size: 10 }] };
+    stub({ accounts: [account], tasks: [withFile] });
+    await render();
+    expect(host.textContent).toContain('lease.pdf (10 B)');
+    expect(button('Approve and send').disabled).toBe(true);
+    expect(host.querySelector('.email-send')?.textContent).toContain('cannot send exactly');
+  });
+
+  it.each([
+    ['sending', 'Sending…'],
+    ['sent', 'Sent'],
+    ['ambiguous', 'Not confirmed — checking Gmail'],
+  ] as const)('shows a %s send in place of the editor and approval', async (state, label) => {
+    stub({ accounts: [account], tasks: [{ ...confirmedTask(), sends: [sendOf(state, state === 'ambiguous' ? 'Gmail did not confirm the send.' : undefined)] }] });
+    await render();
+    const card = host.querySelector('.email-send')!;
+    expect(card.querySelector('h4')?.textContent).toBe(label);
+    expect(card.textContent).toContain('to office@example.test, approved by owner on This Mac');
+    expect(card.querySelector('[aria-label="What was approved"]')?.textContent).toContain('Re: Lease renewal');
+    expect(card.querySelector('.email-body')?.textContent).toBe('Yes, by Friday.');
+    expect(host.querySelector('.email-draft .email-form')).toBeNull();
+    expect([...host.querySelectorAll('button')].some((entry) => entry.textContent?.includes('Approve and send'))).toBe(false);
+    expect(Boolean(card.querySelector('button')?.textContent?.includes('Check Gmail'))).toBe(state === 'ambiguous');
+    if (state === 'ambiguous') expect(card.textContent).toContain('Gmail did not confirm the send.');
+  });
+
+  it('after a failed send, shows why and lets the owner approve again', async () => {
+    const posts = stub({ accounts: [account], tasks: [{ ...confirmedTask(), sends: [sendOf('failed', 'Gmail refused POST /messages/send (400). Nothing was sent.')] }] });
+    await render();
+    expect(host.querySelector('.email-send')?.textContent).toContain('Last approval: Not sent. Gmail refused');
+    await click(button('Approve and send version 1'));
+    expect(posts.at(-1)).toEqual({ url: '/api/personal/email/tasks/t1/send', body: { version: 1, digest: DIGEST } });
   });
 });

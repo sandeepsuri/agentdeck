@@ -60,7 +60,7 @@ describe('GmailMailbox', () => {
     expect(calls.every((call) => call.url.startsWith('https://oauth2.googleapis.com/') || call.url.startsWith('https://gmail.googleapis.com/gmail/v1/users/me/'))).toBe(true);
   });
 
-  it('creates, updates, reads back, and finds a draft by intent without ever sending', async () => {
+  it('creates, updates, reads back, and finds a draft by intent without sending', async () => {
     const drafts = new Map<string, { raw: string; threadId: string }>();
     const { mailbox, calls } = fakeGmail((call) => {
       const body = call.body as { message?: { raw: string; threadId: string } } | undefined;
@@ -90,8 +90,49 @@ describe('GmailMailbox', () => {
     expect(read).toEqual({ content: { ...content, body: 'Yes, by Thursday.' }, intentId: 'i1' });
     expect(await mailbox.findDraftByIntent('i1', 't1')).toBe('r1');
     expect(await mailbox.findDraftByIntent('nope', 't1')).toBeUndefined();
-    expect(calls.some((call) => /\/send\b|\/messages\/send|\/drafts\/send/.test(call.url))).toBe(false);
-    expect(Object.getOwnPropertyNames(GmailMailbox.prototype).filter((name) => /send/i.test(name))).toEqual([]);
+    expect(calls.some((call) => /\/send\b/.test(call.url))).toBe(false);
+  });
+
+  it('sends exactly the given content in the thread, finds it again by intent in Sent mail, and deletes the draft', async () => {
+    const { mailbox, calls } = fakeGmail((call) => {
+      if (call.method === 'POST' && call.url.endsWith('/messages/send')) return json(200, { id: 'sent-1', threadId: 't1', labelIds: ['SENT'] });
+      if (call.method === 'GET' && call.url.includes('/threads/t1?')) {
+        const intent = (value: string) => [{ name: 'X-AgentDeck-Intent', value }];
+        return json(200, { id: 't1', messages: [
+          { id: 'm1', labelIds: ['INBOX'], payload: { headers: [] } },
+          { id: 'd1', labelIds: ['DRAFT'], payload: { headers: intent('s1') } },
+          { id: 'sent-1', labelIds: ['SENT'], payload: { headers: intent('s1') } },
+        ] });
+      }
+      if (call.method === 'GET' && call.url.includes('/messages?')) return json(200, { messages: [{ id: 'elsewhere' }] });
+      if (call.method === 'GET' && call.url.includes('/messages/elsewhere?')) {
+        return json(200, { id: 'elsewhere', labelIds: ['SENT'], payload: { headers: [{ name: 'X-AgentDeck-Intent', value: 's3' }] } });
+      }
+      if (call.method === 'DELETE' && call.url.endsWith('/drafts/r1')) return new Response(null, { status: 204 });
+      return undefined;
+    });
+    const content = validateReplyContent({ to: ['office@example.test'], cc: ['p@example.test'], subject: 'Re: Lease renewal', body: 'Yes, by Friday.' });
+    const id = await mailbox.sendReply({ content, threadId: 't1', inReplyTo: '<abc@example.test>', intentId: 's1', messageId: '<s1@agentdeck.local>' });
+    expect(id).toBe('sent-1');
+    const send = calls.find((call) => call.url.endsWith('/messages/send'))!;
+    const { raw, threadId } = send.body as { raw: string; threadId: string };
+    const mime = Buffer.from(raw, 'base64url').toString('utf8');
+    expect(threadId).toBe('t1');
+    expect(mime).toContain('To: office@example.test\r\nCc: p@example.test\r\nSubject: Re: Lease renewal');
+    expect(mime).toContain('X-AgentDeck-Intent: s1');
+    expect(mime).toContain('In-Reply-To: <abc@example.test>');
+
+    expect(await mailbox.findSentByIntent('s1', 't1', '2026-09-28T10:00:00.000Z')).toBe('sent-1');
+    expect(await mailbox.findSentByIntent('s2', 't1', '2026-09-28T10:00:00.000Z')).toBeUndefined();
+    // Gmail put a reply whose subject was changed in a new thread: it is found among recent sent mail.
+    expect(await mailbox.findSentByIntent('s3', 't1', '2026-09-28T10:00:00.000Z')).toBe('elsewhere');
+    const sentQuery = new URL(calls.find((call) => call.url.includes('/messages?'))!.url).searchParams;
+    expect(sentQuery.get('q')).toBe(`in:sent after:${Date.parse('2026-09-28T10:00:00.000Z') / 1000 - 300}`);
+    const threadQuery = new URL(calls.find((call) => call.url.includes('/threads/t1?'))!.url).searchParams;
+    expect(threadQuery.getAll('metadataHeaders')).toEqual(['X-AgentDeck-Intent']);
+
+    await mailbox.deleteDraft('r1');
+    await mailbox.deleteDraft('gone');
   });
 
   it('reports a draft that no longer exists as missing', async () => {
