@@ -37,7 +37,7 @@ import { MobileWorkspace } from './workspace/MobileWorkspace.js';
 import { ReviewView, type ReviewTarget } from './workspace/ReviewView.js';
 import { RunWorkspace } from './workspace/RunWorkspace.js';
 import { UsageView } from './workspace/UsageView.js';
-import { TerminalWorkspace } from './workspace/TerminalWorkspace.js';
+import { type SessionView, TerminalWorkspace } from './workspace/TerminalWorkspace.js';
 import { WorkView } from './workspace/WorkView.js';
 import { quickSessionName, resolveAskAgent } from './workspace/startWork.js';
 import { sessionLabel, useNow, type WorkspaceView, WORKSPACE_VIEWS } from './workspace/model.js';
@@ -97,6 +97,14 @@ export function App() {
   const [workFilters, setWorkFilters] = useState<WorkFilters>({ status: 'all' });
   const [workLayout, setWorkLayout] = useState<WorkLayout>(() => readWorkLayout(inspectorPreferenceStorage()));
   const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
+  /** The session tab the inspector asked for (View question, View all, …); a new nonce switches once. */
+  const [sessionViewRequest, setSessionViewRequest] = useState<{ view: SessionView; nonce: number } | undefined>(undefined);
+  const openSessionView = useCallback((sessionView: SessionView, options?: { focusComposer?: boolean }) => {
+    setSessionViewRequest((current) => ({ view: sessionView, nonce: (current?.nonce ?? 0) + 1 }));
+    if (options?.focusComposer) {
+      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.session-conversation-panel .conversation-composer textarea')?.focus());
+    }
+  }, []);
   /** The task Start work opens with; null while it is closed. Home's Ask seeds it (#79). */
   const [startWorkTask, setStartWorkTask] = useState<string | null>(null);
   const openStartWork = useCallback((task = '') => setStartWorkTask(task), []);
@@ -903,7 +911,7 @@ export function App() {
             )}
             {terminalVisited && (
               <div className="work-session-detail" hidden={!selected || Boolean(selectedRun)}>
-                <TerminalWorkspace events={events} onBack={closeWorkDetail} onError={setError} onFocusExternal={(session) => void action(session, 'focus')} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
+                <TerminalWorkspace events={events} onBack={closeWorkDetail} onError={setError} onFocusExternal={(session) => void action(session, 'focus')} requestedView={sessionViewRequest} session={selected} sessions={sessions} ws={wsRef.current} wsReady={wsReady} />
               </div>
             )}
           </div>
@@ -941,7 +949,17 @@ export function App() {
             type="button"
           >{inspectorCollapsed ? '‹' : '›'}</button>
           <div hidden={inspectorCollapsed} id="agentdeck-inspector-panel">
-            <InspectorRail onAction={(session, actionName) => void action(session, actionName)} onDelete={(session) => void deleteSession(session)} onError={setError} onRename={(session, name) => void rename(session, name)} selected={selectedRun ? null : selected} />
+            <InspectorRail
+              events={events}
+              onAction={(session, actionName) => void action(session, actionName)}
+              onDelete={(session) => void deleteSession(session)}
+              onError={setError}
+              onOpenView={openSessionView}
+              onRename={(session, name) => void rename(session, name)}
+              onReviewChanges={(repositoryId) => { setReviewTarget({ kind: 'repository', repositoryId }); setView('review'); }}
+              repos={repos}
+              selected={selectedRun ? null : selected}
+            />
           </div>
         </div>
       </div>

@@ -114,12 +114,13 @@ export function AdminSidebar({
             const state = running > 0 ? ' is-working' : activity && activity.waiting > 0 ? ' is-waiting' : '';
             return (
               <div className={`sidebar-repo${state}`} key={repo.id}>
-                <div className="sidebar-repo-row">
+                <div className={`sidebar-repo-row${active ? ' is-active' : ''}`}>
                   <button aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${repo.name}`} className={`sidebar-repo-toggle${open ? ' is-open' : ''}`} onClick={() => toggleRepository(repo.id)} type="button">
                     <span aria-hidden="true">›</span>
                   </button>
                   <button aria-pressed={active} className={active ? 'is-active' : ''} onClick={() => onSelectRepository(repo.id)} title={`Show work in ${repo.name}`} type="button">
                     <span className="sidebar-repo-name">{repo.name}</span>
+                    {running > 0 && <span aria-hidden="true" className="sidebar-repo-activity"><i /><i /><i /></span>}
                     {activity && activity.active > 0 && (
                       <small aria-label={`${activity.active} active${activity.waiting > 0 ? `, ${activity.waiting} waiting` : ''}`} className={activity.waiting > 0 ? 'is-attention' : ''}>
                         <i aria-hidden="true" />{activity.active}

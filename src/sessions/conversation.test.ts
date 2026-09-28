@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, Session } from '../types.js';
 import {
-  claudeProjectDirName, ConversationReader, locateTranscript, mergeSentConversationTurns, parseClaudeConversation, parseCodexConversation,
+  claudeProjectDirName, ConversationReader, latestPlan, locateTranscript, mergeSentConversationTurns, parseClaudeConversation, parseCodexConversation,
 } from './conversation.js';
 
 const tempDirs: string[] = [];
@@ -60,6 +60,35 @@ describe('parseClaudeConversation', () => {
       { role: 'tool', toolName: 'Bash', text: 'npm test' },
       { role: 'assistant', text: 'Tests pass.\n\nFixed.' },
     ]);
+  });
+});
+
+describe('latestPlan', () => {
+  it('returns the last Claude TodoWrite checklist, unclipped', () => {
+    const todoWrite = (todos: unknown[]) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos } }] } });
+    const lines = jsonl(
+      todoWrite([{ content: 'Old', status: 'pending', activeForm: 'Doing old' }]),
+      todoWrite([
+        { content: 'Read probe script', status: 'completed', activeForm: 'Reading probe script' },
+        { content: 'Update checklist', status: 'in_progress', activeForm: 'Updating checklist' },
+        { content: 'Run tests', status: 'pending' },
+        { content: '', status: 'pending' },
+      ]),
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Working.' }] } },
+    ).split('\n');
+    expect(latestPlan('claude', lines)).toEqual([
+      { label: 'Read probe script', activeForm: 'Reading probe script', status: 'completed' },
+      { label: 'Update checklist', activeForm: 'Updating checklist', status: 'in_progress' },
+      { label: 'Run tests', status: 'pending' },
+    ]);
+  });
+
+  it('reads Codex update_plan steps and is absent when no plan was written', () => {
+    const lines = jsonl(
+      { type: 'response_item', payload: { type: 'function_call', name: 'update_plan', arguments: JSON.stringify({ plan: [{ step: 'Explore', status: 'completed' }, { step: 'Edit', status: 'in_progress' }] }) } },
+    ).split('\n');
+    expect(latestPlan('codex', lines)).toEqual([{ label: 'Explore', status: 'completed' }, { label: 'Edit', status: 'in_progress' }]);
+    expect(latestPlan('claude', claudeLines.split('\n'))).toBeUndefined();
   });
 });
 

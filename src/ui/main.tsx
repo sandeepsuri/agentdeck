@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { ThemeProvider } from './theme.js';
 import './theme.css';
 import './workspace.css';
+import './inspector.css';
 import './runs.css';
 import './collaborator.css';
 import './usage.css';

@@ -1,8 +1,16 @@
-import { useEffect, useRef, useState } from 'react';
-import type { Session } from '../../types.js';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
+import type { ConversationView } from '../../sessions/conversation.js';
+import type { AgentMessage, Repo, Session } from '../../types.js';
 import type { Model } from '../../sessions/model-catalog.js';
+import { deriveActivityTimeline } from '../activityTimeline.js';
 import { apiFetch } from '../apiFetch.js';
-import { StatusBadge, isEndedSession, sessionLabel } from './model.js';
+import { listCollaborators } from '../collaborators.js';
+import {
+  currentTool, diffTotals, type DiffTotals, isLive, isWorking, needsInput as deriveNeedsInput, planProgress, recentTools,
+  type ToolKind,
+} from './inspectorModel.js';
+import { ElapsedTime, STATUS_LABELS, isEndedSession, repoDisplayName, repoPathOf, sessionLabel } from './model.js';
+import type { SessionView } from './TerminalWorkspace.js';
 
 interface Props {
   selected: Session | null;
@@ -11,7 +19,20 @@ interface Props {
   onError: (message: string) => void;
   /** Permanently removes an ended session (App.tsx's deleteSession → DELETE /api/sessions/:id). Absent means the action is not offered at all. */
   onDelete?: (session: Session) => void;
+  /** Durable bus events: the Recent activity fallback when the transcript has no tool calls yet. */
+  events?: readonly AgentMessage[];
+  repos?: readonly Repo[];
+  /** Switches the session's center tab (Conversation, Activity, Terminal). */
+  onOpenView?: (view: SessionView, options?: { focusComposer?: boolean }) => void;
+  /** Opens Review on the session's repository. */
+  onReviewChanges?: (repositoryId: string) => void;
 }
+
+const CONVERSATION_POLL_MS = 3000;
+const DIFF_POLL_MS = 5000;
+const RECENT_LIMIT = 4;
+
+const TOOL_GLYPHS: Record<ToolKind, string> = { command: '>_', edit: '✎', read: '▤', search: '⌕', other: '•' };
 
 function Meta({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
   return <div className="inspector-meta"><span>{label}</span><strong className={mono ? 'mono' : ''}>{value}</strong></div>;
@@ -162,68 +183,320 @@ function WrapUp({ session, onError }: { session: Session; onError: (message: str
   );
 }
 
-export function InspectorRail({ selected, onAction, onRename, onError, onDelete }: Props) {
+/** Polls the transcript view and the working-tree diff for the selected session. Live sessions poll; ended ones load once. */
+function useInspectorData(session: Session) {
+  const [conversation, setConversation] = useState<ConversationView | null>(null);
+  const [diff, setDiff] = useState<DiffTotals | null>(null);
+  const live = isLive(session);
+  const repoPath = repoPathOf(session);
+
+  useEffect(() => {
+    let cancelled = false;
+    setConversation(null);
+    const load = () => apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/conversation`)
+      .then(async (response) => {
+        if (!response.ok) return;
+        const body = await response.json() as ConversationView;
+        if (!cancelled && Array.isArray(body.turns)) setConversation(body);
+      })
+      .catch(() => { /* offline — keep what we have */ });
+    void load();
+    if (!live) return () => { cancelled = true; };
+    const timer = setInterval(() => void load(), CONVERSATION_POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [session.id, session.startedAt, live]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDiff(null);
+    const load = () => apiFetch(`/api/repos/diff?${new URLSearchParams({ repo: repoPath, mode: 'uncommitted' })}`)
+      .then(async (response) => {
+        if (!response.ok) return;
+        const body = await response.json() as { files?: { path: string; additions: number; deletions: number }[] };
+        if (!cancelled && Array.isArray(body.files)) setDiff(diffTotals(body.files));
+      })
+      .catch(() => { /* the card just stays hidden */ });
+    void load();
+    if (!live) return () => { cancelled = true; };
+    const timer = setInterval(() => void load(), DIFF_POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [repoPath, live]);
+
+  return { conversation, diff };
+}
+
+/** Collaborators granted the session's repository; the owner is always "You". */
+function useRepositoryCollaborators(repositoryId: string | undefined): number {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setCount(0);
+    if (!repositoryId) return undefined;
+    listCollaborators()
+      .then((collaborators) => {
+        if (!cancelled) setCount(collaborators.filter((collaborator) => collaborator.grantedRepositoryIds.includes(repositoryId)).length);
+      })
+      .catch(() => { /* shows just "You" */ });
+    return () => { cancelled = true; };
+  }, [repositoryId]);
+  return count;
+}
+
+function Wave({ className, bars }: { className: string; bars: number }) {
+  return <span aria-hidden="true" className={className}>{Array.from({ length: bars }, (_, index) => <i key={index} />)}</span>;
+}
+
+function SectionHeading({ label, trailing }: { label: string; trailing?: ReactNode }) {
+  return <div className="inspector-heading"><h3>{label}</h3>{trailing}</div>;
+}
+
+function ViewAll({ onClick }: { onClick: () => void }) {
+  return <button className="inspector-view-all" onClick={onClick} type="button">View all <span aria-hidden="true">→</span></button>;
+}
+
+/** The ⋯ menu: things the panel keeps but no longer leads with. Stays mounted so a Send-to-terminal draft survives closing it. */
+function OverflowMenu({ session, onAction, onError }: Pick<Props, 'onAction' | 'onError'> & { session: Session }) {
+  const ref = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  return (
+    <details className="inspector-menu" onToggle={(event) => setOpen(event.currentTarget.open)} ref={ref}>
+      <summary aria-label="More session options" title="More">⋯</summary>
+      <div className="inspector-menu-panel">
+        {session.origin === 'external' && <button className="rail-action" onClick={() => onAction(session, 'focus')} type="button">Focus terminal <span>⌖</span></button>}
+        {/* Redesign spec §06: process identity is Advanced details, never default. */}
+        <details className="rail-technical-detail">
+          <summary>Advanced details</summary>
+          <Meta label="Directory" value={session.cwd} />
+          <Meta label="Origin" value={session.origin} />
+          <Meta label="PID" value={String(session.pid ?? '—')} />
+          <Meta label="TTY" value={session.tty ?? (session.origin === 'managed' ? 'managed PTY' : 'unknown')} />
+        </details>
+        {/* Sending input is a live-only action: an ended session has no
+            process left to receive it (ticket 04). */}
+        {!isEndedSession(session) && (
+          <>
+            <div className="inspector-menu-label">Send to terminal</div>
+            <MessageSelected key={session.id} onError={onError} session={session} />
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
+const formatStarted = (iso: string) => new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+const formatClock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+export function InspectorRail({ selected, ...props }: Props) {
+  if (!selected) return <aside className="inspector-rail"><div className="rail-empty">Select work to inspect it.</div></aside>;
+  return <SessionInspector key={selected.id} session={selected} {...props} />;
+}
+
+function SessionInspector({
+  session, onAction, onRename, onError, onDelete, events = [], repos = [], onOpenView, onReviewChanges,
+}: Omit<Props, 'selected'> & { session: Session }) {
   const [editingName, setEditingName] = useState(false);
   const [name, setName] = useState('');
+  const [changesOpen, setChangesOpen] = useState(false);
+  const { conversation, diff } = useInspectorData(session);
+  const path = repoPathOf(session);
+  const repository = repos.find((repo) => repo.id === path || repo.path === path);
+  const collaborators = useRepositoryCollaborators(repository?.id);
 
-  if (!selected) return <aside className="inspector-rail"><div className="rail-empty">Select work to inspect it.</div></aside>;
+  const ended = isEndedSession(session);
+  const live = isLive(session);
+  const input = deriveNeedsInput(session, conversation);
+  const working = isWorking(session, input);
+  const turns = conversation?.turns ?? [];
+  const now = live ? currentTool(turns) : null;
+  const progress = planProgress(conversation?.plan);
+  const agentName = session.agent === 'claude' ? 'Claude Code' : 'Codex CLI';
+  const subtitle = (live && progress?.current?.activeForm) || progress?.current?.label || sessionLabel(session);
+  const pill = input ? { tone: 'is-attention', label: 'Needs input' }
+    : working ? { tone: 'is-working', label: 'Working' }
+    : { tone: `status-${session.status}`, label: ended ? 'Ended' : STATUS_LABELS[session.status] };
+
+  const tools = recentTools(turns, RECENT_LIMIT);
+  const recent = tools.length > 0
+    ? tools.map((tool, index) => ({ id: tool.id, at: tool.at, glyph: TOOL_GLYPHS[tool.kind], tone: `tool-${tool.kind}`,
+      label: index === 0 && now?.id === tool.id && working ? tool.present : tool.past, detail: tool.detail }))
+    : deriveActivityTimeline(events, session).slice(-RECENT_LIMIT).reverse().map((entry) => ({
+      id: entry.id, at: entry.at, glyph: '•', tone: `verb-${entry.verb}`, label: entry.label, detail: entry.detail ?? '',
+    }));
+
+  const openView = (view: SessionView, options?: { focusComposer?: boolean }) => onOpenView?.(view, options);
+
   return (
-    <aside className="inspector-rail">
-      <div className="inspector-section-label">Session</div>
-      <Meta label="Agent" mono={false} value={selected.agent === 'claude' ? 'Claude Code' : 'Codex CLI'} />
-      <div className="inspector-meta"><span>State</span><StatusBadge status={selected.status} /></div>
-      <Meta label="Branch" value={selected.branch ?? 'Unknown'} />
-      {isEndedSession(selected) && selected.endedAt && (
-        <Meta label="Ended" mono={false} value={new Date(selected.endedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} />
-      )}
-      {/* Redesign spec §06: process identity is Advanced details, never default. */}
-      <details className="rail-technical-detail">
-        <summary>Advanced details</summary>
-        <Meta label="Directory" value={selected.cwd} />
-        <Meta label="Origin" value={selected.origin} />
-        <Meta label="PID" value={String(selected.pid ?? '—')} />
-        <Meta label="TTY" value={selected.tty ?? (selected.origin === 'managed' ? 'managed PTY' : 'unknown')} />
-      </details>
-      <div className="inspector-section-label inner">Actions</div>
-      {editingName ? (
-        <form className="rename-form" onSubmit={(event) => {
-          event.preventDefault();
-          onRename(selected, name);
-          setEditingName(false);
-        }}><input autoFocus onChange={(event) => setName(event.target.value)} placeholder={sessionLabel(selected)} value={name} /><button type="submit">Save</button></form>
-      ) : <button className="rail-action" onClick={() => { setName(selected.name ?? ''); setEditingName(true); }} type="button">Rename <span>✎</span></button>}
-      {selected.origin === 'external' && <button className="rail-action" onClick={() => onAction(selected, 'focus')} type="button">Focus terminal <span>⌖</span></button>}
-      {/* Restart and Terminate are live-only actions: an ended session
-          has no process to restart in place or stop (ticket 04). */}
-      {selected.origin === 'managed' && !isEndedSession(selected) && <button className="rail-action" onClick={() => onAction(selected, 'restart')} type="button">Restart agent <span>↻</span></button>}
-      {selected.origin === 'managed' && !isEndedSession(selected) && <button className="rail-action is-danger" onClick={() => onAction(selected, 'stop')} type="button">Terminate session <span>■</span></button>}
-      {isEndedSession(selected) ? (
-        <>
+    <aside className={`inspector-rail inspector-session${working ? ' is-live-working' : ''}${input ? ' is-needs-input' : ''}`}>
+      <header className="inspector-header">
+        <span aria-hidden="true" className={`inspector-agent-mark is-${session.agent}`}>{session.agent === 'claude' ? '✳' : '◎'}</span>
+        <div className="inspector-title">
+          <div className="inspector-title-row">
+            <strong>{agentName}</strong>
+            <span className={`inspector-status-pill ${pill.tone}`}><i aria-hidden="true" />{pill.label}</span>
+            {live && <span className="inspector-elapsed" title={`Started ${formatStarted(session.startedAt)}`}><span aria-hidden="true">◷</span> <ElapsedTime startedAt={session.startedAt} /></span>}
+          </div>
+          <p className="inspector-subtitle" title={subtitle}>{subtitle}</p>
+        </div>
+        <OverflowMenu onAction={onAction} onError={onError} session={session} />
+      </header>
+
+      {ended ? (
+        <section className="inspector-section">
           <div className="rail-empty">This session has ended.</div>
-          <div className="inspector-section-label inner">Wrap-up</div>
-          <WrapUp onError={onError} session={selected} />
-          {onDelete && (
-            <button
-              className="rail-action is-danger"
-              onClick={() => {
-                if (window.confirm(`Delete "${sessionLabel(selected)}" permanently? Its transcript and summary will be removed. This cannot be undone.`)) {
-                  onDelete(selected);
-                }
-              }}
-              type="button"
-            >
-              Delete session <span>×</span>
-            </button>
-          )}
-        </>
+          <SectionHeading label="Wrap-up" />
+          <WrapUp onError={onError} session={session} />
+        </section>
       ) : (
         <>
-          {/* Sending input is a live-only action: an ended session has no
-              process left to receive it (ticket 04). */}
-          <div className="inspector-section-label inner">Send to terminal</div>
-          <MessageSelected key={selected.id} onError={onError} session={selected} />
+          <section className="inspector-section">
+            <SectionHeading label="Current activity" trailing={onOpenView && <ViewAll onClick={() => openView('activity')} />} />
+            <div className="inspector-card inspector-now">
+              <span aria-hidden="true" className="inspector-now-glyph">{now ? TOOL_GLYPHS[now.kind] : input ? '?' : '>_'}</span>
+              <div className="inspector-now-copy">
+                <strong>{now ? now.present : input ? 'Waiting for you' : working ? 'Thinking' : 'Idle'}</strong>
+                {now?.detail && <code title={now.detail}>{now.detail}</code>}
+              </div>
+              <Wave bars={6} className="activity-wave" />
+            </div>
+          </section>
+
+          {progress && (
+            <section className="inspector-section">
+              <SectionHeading label="Progress" trailing={<span className="inspector-count">{progress.done}/{progress.total}</span>} />
+              <div aria-label={`${progress.done} of ${progress.total} steps done`} aria-valuemax={progress.total} aria-valuemin={0} aria-valuenow={progress.done} className="inspector-progress" role="progressbar">
+                <i style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+              </div>
+              <ol className="inspector-steps">
+                {progress.steps.map((step, index) => (
+                  <li className={`inspector-step is-${step.status}`} key={`${index}:${step.label}`}>
+                    <span aria-hidden="true" className="inspector-step-mark" />
+                    <span className="inspector-step-label">{step.label}</span>
+                    <span className="sr-only">{step.status === 'completed' ? ' (done)' : step.status === 'in_progress' ? ' (in progress)' : ''}</span>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+
+          {input && (
+            <section aria-label="Needs input" className="inspector-needs-input" role="status">
+              <span aria-hidden="true" className="inspector-needs-icon">✦</span>
+              <div className="inspector-needs-body">
+                <div className="inspector-needs-title"><strong>Needs input</strong><span className="inspector-needs-count">{input.count}</span></div>
+                <p>{input.text}</p>
+                {onOpenView && (
+                  <div className="inspector-needs-actions">
+                    <button className="inspector-needs-primary" onClick={() => openView(input.hasQuestion ? 'conversation' : 'terminal')} type="button">View question</button>
+                    <button className="inspector-needs-secondary" onClick={() => openView(input.hasQuestion ? 'conversation' : 'terminal', { focusComposer: true })} type="button">Reply now</button>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
         </>
       )}
+
+      {diff && diff.files.length > 0 && (
+        <section className="inspector-section">
+          <SectionHeading label="Changes made" />
+          <div className="inspector-card inspector-changes">
+            <button aria-expanded={changesOpen} className="inspector-changes-summary" onClick={() => setChangesOpen((current) => !current)} type="button">
+              <span aria-hidden="true" className="inspector-file-glyph">▢</span>
+              <span className="inspector-changes-label">{diff.files.length} file{diff.files.length === 1 ? '' : 's'} changed</span>
+              <span className="diff-add">+{diff.additions}</span>
+              <span className="diff-del">−{diff.deletions}</span>
+              <span aria-hidden="true" className={`inspector-chevron${changesOpen ? ' is-open' : ''}`}>›</span>
+            </button>
+            {changesOpen && (
+              <div className="inspector-changes-detail">
+                <ul>
+                  {diff.files.map((file) => (
+                    <li key={file.path}>
+                      <code title={file.path}>{file.path}</code>
+                      <span className="diff-add">+{file.additions}</span>
+                      <span className="diff-del">−{file.deletions}</span>
+                    </li>
+                  ))}
+                </ul>
+                {repository && onReviewChanges && (
+                  <button className="inspector-view-all" onClick={() => onReviewChanges(repository.id)} type="button">Review changes <span aria-hidden="true">→</span></button>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {recent.length > 0 && (
+        <section className="inspector-section">
+          <SectionHeading label="Recent activity" trailing={onOpenView && <ViewAll onClick={() => openView('activity')} />} />
+          <ol className="inspector-recent">
+            {recent.map((row) => (
+              <li className={row.tone} key={row.id}>
+                <time dateTime={row.at}>{formatClock(row.at)}</time>
+                <span aria-hidden="true" className="inspector-recent-glyph">{row.glyph}</span>
+                <span className="inspector-recent-copy"><strong>{row.label}</strong>{row.detail && <code title={row.detail}>{row.detail}</code>}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
+      <section className="inspector-section">
+        <SectionHeading label="Session info" />
+        <dl className="inspector-info">
+          <div><dt>Repository</dt><dd title={path}>{repoDisplayName(session, repos)}</dd></div>
+          <div><dt>Branch</dt><dd className="mono" title={session.branch}>{session.branch ?? 'Unknown'}</dd></div>
+          <div><dt>Agent</dt><dd>{agentName}</dd></div>
+          <div><dt>Started</dt><dd>{formatStarted(session.startedAt)}</dd></div>
+          {ended && session.endedAt && <div><dt>Ended</dt><dd>{formatStarted(session.endedAt)}</dd></div>}
+          <div className="is-wide"><dt>Collaborators</dt><dd><span aria-hidden="true" className="inspector-avatar">Y</span>You{collaborators > 0 ? ` + ${collaborators}` : ''}</dd></div>
+        </dl>
+      </section>
+
+      <footer className="inspector-actions">
+        {editingName ? (
+          <form className="rename-form" onSubmit={(event) => {
+            event.preventDefault();
+            onRename(session, name);
+            setEditingName(false);
+          }}>
+            <input autoFocus onChange={(event) => setName(event.target.value)} placeholder={sessionLabel(session)} value={name} />
+            <button type="submit">Save</button>
+            <button onClick={() => setEditingName(false)} type="button">Cancel</button>
+          </form>
+        ) : (
+          <>
+            {/* Restart and Terminate are live-only actions: an ended session
+                has no process to restart in place or stop (ticket 04). */}
+            {session.origin === 'managed' && !ended && <button className="inspector-action" onClick={() => onAction(session, 'restart')} type="button"><span aria-hidden="true">↻</span>Restart agent</button>}
+            <button className="inspector-action" onClick={() => { setName(session.name ?? ''); setEditingName(true); }} type="button"><span aria-hidden="true">✎</span>Rename</button>
+            {session.origin === 'managed' && !ended && <button className="inspector-action is-danger" onClick={() => onAction(session, 'stop')} type="button"><span aria-hidden="true">■</span>Terminate session</button>}
+            {ended && onDelete && (
+              <button
+                className="inspector-action is-danger"
+                onClick={() => {
+                  if (window.confirm(`Delete "${sessionLabel(session)}" permanently? Its transcript and summary will be removed. This cannot be undone.`)) {
+                    onDelete(session);
+                  }
+                }}
+                type="button"
+              >
+                <span aria-hidden="true">×</span>Delete session
+              </button>
+            )}
+          </>
+        )}
+      </footer>
     </aside>
   );
 }

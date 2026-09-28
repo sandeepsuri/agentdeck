@@ -21,7 +21,7 @@ const VERB_LABELS: Partial<Record<ActivityVerb, string>> = {
   reading: 'Reading', testing: 'Testing', retrying: 'Retrying', working: 'Working', editing: 'Editing',
 };
 
-function verbForText(text: string): ActivityVerb {
+export function verbForText(text: string): ActivityVerb {
   if (/\bretry|\bretrying|\bagain\b/i.test(text)) return 'retrying';
   if (/\btest|vitest|jest|pytest|playwright|typecheck|\blint/i.test(text)) return 'testing';
   if (/\bread|inspect|search|explor|look(ing)? (at|into)|review/i.test(text)) return 'reading';
