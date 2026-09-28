@@ -65,12 +65,23 @@ async function inspectRepo(repoPath: string): Promise<Repo> {
   return repo;
 }
 
-export async function scanRepos(projectsDir: string, store?: Store): Promise<Repo[]> {
-  const entries = await fs.promises.readdir(projectsDir, { withFileTypes: true });
-  const candidates = entries
+async function repoCandidates(root: string): Promise<string[]> {
+  // A chosen folder may itself be a repo, or a folder of repos.
+  if (fs.existsSync(path.join(root, '.git'))) return [root];
+  const entries = await fs.promises.readdir(root, { withFileTypes: true });
+  return entries
     .filter((entry) => entry.isDirectory())
-    .map((entry) => path.join(projectsDir, entry.name))
+    .map((entry) => path.join(root, entry.name))
     .filter((candidate) => fs.existsSync(path.join(candidate, '.git')));
+}
+
+/** Throws only when every root is unreadable, so callers can fall back to stored repos. */
+export async function scanRepos(roots: string | readonly string[], store?: Store): Promise<Repo[]> {
+  const rootList = typeof roots === 'string' ? [roots] : roots;
+  const listed = await Promise.allSettled(rootList.map(repoCandidates));
+  const rejected = listed.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (rejected && listed.every((result) => result.status === 'rejected')) throw rejected.reason;
+  const candidates = [...new Set(listed.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])))];
 
   const inspected = await Promise.allSettled(candidates.map(inspectRepo));
   const repos = inspected

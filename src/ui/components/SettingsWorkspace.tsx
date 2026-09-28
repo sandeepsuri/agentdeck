@@ -3,6 +3,7 @@ import type { Model } from '../../sessions/model-catalog.js';
 import type { Repo } from '../../types.js';
 import { apiFetch, responseJson, responseJsonArray } from '../apiFetch.js';
 import { CollaboratorsPanel } from './CollaboratorsPanel.js';
+import { FolderAccessPanel } from './FolderAccessPanel.js';
 import { ProfilesPanel } from './ProfilesPanel.js';
 import { ProviderSetupPanel } from './ProviderSetupPanel.js';
 import { useAccessData } from './useAccessData.js';
@@ -76,8 +77,10 @@ function SettingsTabList({ active, onChange }: { active: SettingsTab; onChange: 
  * openaiKeyConfigured (a boolean), never the key itself, so there is
  * nothing to prefill here even right after saving one.
  */
-export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onInstallHooks }: {
+export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onInstallHooks, onFolderAccessChange }: {
   onBack: () => void;
+  /** Folder access changed — the repo list should be refreshed. */
+  onFolderAccessChange?: () => void;
   repos?: Repo[];
   appearanceControl?: ReactNode;
   /** Redesign spec §03: integrations live in Settings rather than the top bar. */
@@ -152,6 +155,7 @@ export function SettingsWorkspace({ onBack, repos = [], appearanceControl, onIns
       <SettingsTabList active={tab} onChange={setTab} />
 
       <div aria-labelledby="settings-tab-general" className="settings-tab-panel" hidden={tab !== 'general'} id="settings-tabpanel-general" role="tabpanel">
+        <FolderAccessPanel onChange={onFolderAccessChange} />
         {loading && <div className="rail-empty">Loading settings…</div>}
         {!loading && (
           <>

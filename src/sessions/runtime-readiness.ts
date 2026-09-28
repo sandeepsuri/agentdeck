@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveAgentExecutable } from './executable.js';
+import { agentPath, resolveAgentExecutable } from './executable.js';
 import type { AgentType } from '../types.js';
 import {
   MANAGED_RUNTIME_CAPABILITIES,
@@ -335,11 +335,10 @@ export function createRuntimeReadinessSource(
   const environment = options.environment ?? process.env;
   const execute = options.execute ?? executeProbe;
   const executionOptions = (executable: string): RuntimeProbeExecutionOptions => {
-    const pathEntries = [path.dirname(executable), path.dirname(process.execPath), ...(environment.PATH ?? '/usr/bin:/bin').split(path.delimiter)];
     return {
       encoding: 'utf8',
       env: {
-        PATH: [...new Set(pathEntries.filter(Boolean))].join(path.delimiter),
+        PATH: agentPath(executable, environment.PATH),
         LANG: 'C',
         LC_ALL: 'C',
         NO_COLOR: '1',

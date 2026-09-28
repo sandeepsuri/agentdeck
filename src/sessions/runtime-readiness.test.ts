@@ -277,7 +277,7 @@ describe('createRuntimeReadinessSource', () => {
       options: Array.from({ length: 5 }, () => ({
         encoding: 'utf8',
         env: {
-          PATH: ['/private/bin', path.dirname(process.execPath), '/safe/bin'].join(path.delimiter),
+          PATH: ['/private/bin', path.dirname(process.execPath), '/safe/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].join(path.delimiter),
           LANG: 'C',
           LC_ALL: 'C',
           NO_COLOR: '1',

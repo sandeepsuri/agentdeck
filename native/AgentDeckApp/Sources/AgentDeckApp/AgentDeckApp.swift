@@ -49,6 +49,56 @@ struct ServiceLifecycle {
     mutating func stop() { active = false }
 }
 
+/// A Finder-launched app inherits launchd's minimal PATH, which hides the
+/// Homebrew, nvm and ~/.local tools (codex, claude, git, node) a terminal sees.
+enum ServiceEnvironment {
+    static let marker = "__AGENTDECK_PATH__"
+
+    /// PATH printed between markers by the user's login shell; nil when absent.
+    static func parseLoginPath(_ output: String) -> String? {
+        let parts = output.components(separatedBy: marker)
+        guard parts.count >= 3 else { return nil }
+        let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    static func mergedPath(loginPath: String?, inherited: String?) -> String {
+        let entries = (loginPath ?? "").split(separator: ":").map(String.init)
+            + (inherited ?? "").split(separator: ":").map(String.init)
+            + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        var seen = Set<String>()
+        return entries.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
+    }
+
+    static func make(base: [String: String], loginPath: String?) -> [String: String] {
+        var environment = base
+        environment["PATH"] = mergedPath(loginPath: loginPath, inherited: base["PATH"])
+        environment["NODE_ENV"] = "production"
+        environment["AGENTDECK_LOCAL_ONLY"] = "1"
+        // The service's working folder is meaningless here, so it must not
+        // derive which folders to scan from it.
+        environment["AGENTDECK_LAUNCHED_BY_APP"] = "1"
+        return environment
+    }
+
+    /// Ask the login shell for its PATH, bounded so a slow profile can't block startup.
+    static func loginShellPath(shell: String?, timeout: TimeInterval = 3) -> String? {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: shell.flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh")
+        child.arguments = ["-ilc", "printf '%s%s%s' \(marker) \"$PATH\" \(marker)"]
+        let pipe = Pipe()
+        child.standardOutput = pipe
+        child.standardError = FileHandle.nullDevice
+        child.standardInput = FileHandle.nullDevice
+        do { try child.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while child.isRunning && Date() < deadline { usleep(20_000) }
+        if child.isRunning { child.terminate(); return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return parseLoginPath(String(decoding: data, as: UTF8.self))
+    }
+}
+
 @MainActor
 final class ServiceController: ObservableObject {
     @Published private(set) var status: ServiceLifecycle.Status = .starting
@@ -56,6 +106,7 @@ final class ServiceController: ObservableObject {
     private var timer: Timer?
     private var lifecycle = ServiceLifecycle()
     private let logURL: URL
+    private var loginPath: String?
     let serviceURL: URL
 
     init() {
@@ -94,10 +145,10 @@ final class ServiceController: ObservableObject {
         child.executableURL = node
         child.arguments = [entry.path, "serve"]
         child.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-        var environment = ProcessInfo.processInfo.environment
-        environment["NODE_ENV"] = "production"
-        environment["AGENTDECK_LOCAL_ONLY"] = "1"
-        child.environment = environment
+        if loginPath == nil {
+            loginPath = ServiceEnvironment.loginShellPath(shell: ProcessInfo.processInfo.environment["SHELL"])
+        }
+        child.environment = ServiceEnvironment.make(base: ProcessInfo.processInfo.environment, loginPath: loginPath)
         if let output = FileHandle(forWritingAtPath: logURL.path) {
             _ = try? output.seekToEnd()
             child.standardOutput = output

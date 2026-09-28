@@ -52,6 +52,20 @@ describe('loadConfig', () => {
   });
 });
 
+describe('Mac app launch and folder access', () => {
+  it('does not derive a projects folder from the working folder when the Mac app started the service', () => {
+    const file = tmpFile('{}');
+    expect(loadConfig(file, { AGENTDECK_LAUNCHED_BY_APP: '1' })).toMatchObject({ projectsDir: '', launchedByApp: true });
+    expect(loadConfig(file, {}).launchedByApp).toBeUndefined();
+  });
+
+  it('keeps only absolute, deduped allowedRoots and expands ~', () => {
+    const file = tmpFile(JSON.stringify({ allowedRoots: ['~/Projects', '/work', '/work', 'relative', 7, ''] }));
+    expect(loadConfig(file, {}).allowedRoots).toEqual([path.join(os.homedir(), 'Projects'), '/work']);
+    expect(loadConfig(tmpFile('{"allowedRoots":[]}'), {}).allowedRoots).toBeUndefined();
+  });
+});
+
 describe('defaultProjectsDir', () => {
   it('uses the parent when launched inside a git repo, else the cwd itself', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adk-projdir-'));

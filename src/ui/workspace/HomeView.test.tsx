@@ -104,7 +104,7 @@ describe('HomeView (everyday)', () => {
   it('says honestly that Ask cannot start work until a repository exists', async () => {
     const handlers = await mount({ repositoryCount: 0 });
     expect(ask().disabled).toBe(true);
-    expect(section('Ask').textContent).toContain('Add a repository');
+    expect(section('Ask').textContent).toContain('Choose a folder of projects');
     await act(async () => { button('Open Settings').click(); });
     expect(handlers.onOpenSettings).toHaveBeenCalled();
   });

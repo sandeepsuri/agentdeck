@@ -61,6 +61,23 @@ describe('scanRepos', () => {
     expect(store.listRepos()).toEqual(repos);
     store.close();
   });
+
+  it('scans several chosen folders, accepts a folder that is itself a repo, and skips unreadable ones', async () => {
+    const projects = tempDir();
+    const alpha = path.join(projects, 'alpha');
+    initRepo(alpha);
+    const standalone = path.join(tempDir(), 'standalone');
+    initRepo(standalone);
+
+    const repos = await scanRepos([projects, standalone, '/nonexistent/agentdeck-root']);
+
+    expect(repos.map((repo) => repo.path)).toEqual([alpha, standalone]);
+  });
+
+  it('throws when every folder is unreadable and returns nothing for no folders', async () => {
+    await expect(scanRepos(['/nonexistent/agentdeck-a', '/nonexistent/agentdeck-b'])).rejects.toThrow();
+    await expect(scanRepos([])).resolves.toEqual([]);
+  });
 });
 
 describe('checkoutExistingBranch', () => {

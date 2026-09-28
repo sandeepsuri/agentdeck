@@ -45,7 +45,7 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
-import { resolveAgentExecutable } from '../../sessions/executable.js';
+import { agentPath, resolveAgentExecutable } from '../../sessions/executable.js';
 import { filterEnvironment } from '../envelope.js';
 import type { AttemptEvent } from '../types.js';
 import type { AttemptLaunchContext, RuntimeAttemptAdapter } from './adapter.js';
@@ -223,6 +223,7 @@ export function createClaudeAttemptAdapter(
     }
 
     const env = filterEnvironment(context.profile, process.env);
+    if ('PATH' in env) env.PATH = agentPath(executable, env.PATH);
     const priorSession = providerSessions.get(context.runId);
     const sessionId = priorSession ?? newSessionId();
     providerSessions.set(context.runId, sessionId);

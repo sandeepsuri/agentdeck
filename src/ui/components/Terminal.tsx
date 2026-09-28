@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import type { ITheme } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { TERMINAL_COLS, TERMINAL_ROWS, type ServerFrame, type ClientFrame } from '../../protocol.js';
 import { type ResolvedTheme, useTheme } from '../theme.js';
+import { BASE_FONT_SIZE, createWheelAccumulator, fitFontSize, isAtBottom } from './terminalScroll.js';
 
 interface Props {
   ws: WebSocket;
@@ -202,12 +203,14 @@ const XTERM_THEMES: Record<ResolvedTheme, ITheme> = {
  * Live terminal for one managed session. Attaches over the shared WS,
  * replays the ring buffer, and forwards keystrokes. The grid is pinned at
  * TERMINAL_COLS×TERMINAL_ROWS — matching the PTY's fixed size — and never
- * resized by the viewer; the host div centers it, so a pane larger than the
- * grid shows empty margin instead of stretching the terminal to fill it.
+ * resized by the viewer; in a smaller pane the font shrinks so the whole
+ * grid stays visible and xterm's viewport is the only scroller.
  */
 export function Terminal({ ws, sessionId, active }: Props) {
+  const frameRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
   const { resolvedTheme } = useTheme();
 
   useEffect(() => {
@@ -216,7 +219,7 @@ export function Terminal({ ws, sessionId, active }: Props) {
 
     const term = new XTerm({
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
+      fontSize: BASE_FONT_SIZE,
       theme: XTERM_THEMES[resolvedTheme],
       scrollback: 5000,
       cols: TERMINAL_COLS,
@@ -228,14 +231,15 @@ export function Terminal({ ws, sessionId, active }: Props) {
     const send = (frame: ClientFrame) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
     };
+    const syncAtBottom = () => setAtBottom(isAtBottom(term.buffer.active));
 
     const onMessage = (ev: MessageEvent) => {
       const frame = JSON.parse(String(ev.data)) as ServerFrame;
       if (frame.t === 'replay' && frame.sessionId === sessionId) {
         term.reset();
-        term.write(frame.data);
+        term.write(frame.data, syncAtBottom);
       } else if (frame.t === 'output' && frame.sessionId === sessionId) {
-        term.write(frame.data);
+        term.write(frame.data, syncAtBottom);
       }
     };
     ws.addEventListener('message', onMessage);
@@ -245,9 +249,41 @@ export function Terminal({ ws, sessionId, active }: Props) {
     else ws.addEventListener('open', attach, { once: true });
 
     const dataDisposable = term.onData((data) => send({ t: 'input', sessionId, data }));
+    const scrollDisposable = term.onScroll(syncAtBottom);
+
+    // In the normal buffer the wheel scrolls history, never the TUI. In the
+    // alternate screen there is no history, so the app gets the wheel.
+    const wheelLines = createWheelAccumulator();
+    term.attachCustomWheelEventHandler((event) => {
+      if (term.buffer.active.type === 'alternate') return true;
+      event.preventDefault();
+      const rowHeight = host.clientHeight > 0 ? host.clientHeight / TERMINAL_ROWS : BASE_FONT_SIZE * 1.2;
+      const lines = wheelLines(event, rowHeight, TERMINAL_ROWS);
+      if (lines !== 0) term.scrollLines(lines);
+      return false;
+    });
+
+    // Measure the grid once at the base font, then fit it to the pane.
+    const frame = frameRef.current;
+    let gridAtBase: { width: number; height: number } | null = null;
+    const fit = () => {
+      if (!frame || frame.clientWidth === 0 || frame.clientHeight === 0) return;
+      if (!gridAtBase) {
+        const screen = host.querySelector('.xterm-screen');
+        if (!screen || screen.clientWidth === 0) return;
+        gridAtBase = { width: screen.clientWidth, height: screen.clientHeight };
+      }
+      const fontSize = fitFontSize({ width: frame.clientWidth, height: frame.clientHeight }, gridAtBase);
+      if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
+    };
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit);
+    if (frame) observer?.observe(frame);
+    fit();
 
     return () => {
+      observer?.disconnect();
       dataDisposable.dispose();
+      scrollDisposable.dispose();
       ws.removeEventListener('message', onMessage);
       ws.removeEventListener('open', attach);
       send({ t: 'detach', sessionId });
@@ -269,14 +305,17 @@ export function Terminal({ ws, sessionId, active }: Props) {
   }, [active]);
 
   return (
-    <div
-      ref={hostRef}
-      style={{
-        width: '100%',
-        height: '100%',
-        display: 'flex',
-        overflow: 'auto',
-      }}
-    />
+    <div className="managed-terminal" ref={frameRef}>
+      <div className="managed-terminal-host" ref={hostRef} />
+      {!atBottom && (
+        <button
+          className="terminal-jump-latest"
+          onClick={() => { terminalRef.current?.scrollToBottom(); setAtBottom(true); terminalRef.current?.focus(); }}
+          type="button"
+        >
+          ↓ Jump to latest
+        </button>
+      )}
+    </div>
   );
 }

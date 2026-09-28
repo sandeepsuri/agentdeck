@@ -26,6 +26,8 @@ export interface WorkRoutesDeps {
    * module's own tests don't need a real Fastify request/ConnectionTrust.
    */
   resolveGrantedRepositoryIds?: (request: FastifyRequest) => readonly string[] | undefined;
+  /** Settings → Folder access: false refuses a Run on a Repository outside the chosen folders. */
+  repositoryAllowed?: (repositoryId: string) => boolean;
   /**
    * Ticket 12 AC1/AC2/AC7: the RunActor a request is made as — undefined for
    * local and legacy-shared-token connections, which stay unrestricted
@@ -247,6 +249,13 @@ export function registerWorkRoutes(app: FastifyInstance, workEngine: WorkEngine,
   });
 
   app.post('/api/runs', async (request, reply) => {
+    const repositoryId = (request.body as { repository?: { id?: unknown } } | null)?.repository?.id;
+    if (typeof repositoryId === 'string' && deps.repositoryAllowed && !deps.repositoryAllowed(repositoryId)) {
+      return reply.code(403).send({
+        error: 'AgentDeck does not have access to this repository. Add its folder in Settings → Folder access.',
+        code: 'folder-access',
+      });
+    }
     try {
       const run = await workEngine.submit(request.body as WorkSpec, deps.resolveActor?.(request));
       return reply.code(201).send(run);

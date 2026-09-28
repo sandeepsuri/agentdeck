@@ -8,8 +8,20 @@ import { parsePricingOverrides, type PricingTable } from './usage/pricing.js';
 export interface AgentDeckConfig {
   /** Port the app is reachable on (UI + API). */
   port: number;
-  /** Directory scanned for git repos (launch form, repo attribution). */
+  /**
+   * Directory scanned for git repos when no allowedRoots are chosen (legacy
+   * `npm start` behavior). Empty when launched by the Mac app, whose working
+   * folder says nothing about where the user's projects are.
+   */
   projectsDir: string;
+  /**
+   * Folders the user chose for AgentDeck to use (Settings → Folder access).
+   * When set, they replace projectsDir and every repo, session and Run must
+   * sit inside one of them. Canonical absolute paths.
+   */
+  allowedRoots?: string[];
+  /** True when the Mac app started this service (AGENTDECK_LAUNCHED_BY_APP=1). */
+  launchedByApp?: boolean;
   /** External-discovery poll interval. */
   pollIntervalMs: number;
   /** Where app state lives (config.json, agentdeck.db). */
@@ -62,12 +74,14 @@ export function defaultProjectsDir(cwd: string = process.cwd()): string {
   return fs.existsSync(path.join(cwd, '.git')) ? path.dirname(cwd) : cwd;
 }
 
-export function defaultConfig(): AgentDeckConfig {
+export function defaultConfig(env: NodeJS.ProcessEnv = process.env): AgentDeckConfig {
+  const launchedByApp = env.AGENTDECK_LAUNCHED_BY_APP === '1';
   return {
     port: 4040,
-    projectsDir: defaultProjectsDir(),
+    projectsDir: launchedByApp ? '' : defaultProjectsDir(),
     pollIntervalMs: 5000,
     dataDir: defaultDataDir(),
+    ...(launchedByApp ? { launchedByApp } : {}),
   };
 }
 
@@ -82,8 +96,8 @@ export function expandTilde(p: string): string {
  * Missing file or unknown/invalid keys fall back to defaults — a broken
  * config file must never prevent startup.
  */
-export function loadConfig(configPath?: string): AgentDeckConfig {
-  const cfg = defaultConfig();
+export function loadConfig(configPath?: string, env: NodeJS.ProcessEnv = process.env): AgentDeckConfig {
+  const cfg = defaultConfig(env);
   const file = configPath ?? path.join(defaultDataDir(), 'config.json');
   let raw: unknown;
   try {
@@ -98,6 +112,13 @@ export function loadConfig(configPath?: string): AgentDeckConfig {
   }
   if (typeof o.projectsDir === 'string' && o.projectsDir.length > 0) {
     cfg.projectsDir = expandTilde(o.projectsDir);
+  }
+  if (Array.isArray(o.allowedRoots)) {
+    const roots = o.allowedRoots
+      .filter((root): root is string => typeof root === 'string' && root.length > 0)
+      .map(expandTilde)
+      .filter((root) => path.isAbsolute(root));
+    if (roots.length > 0) cfg.allowedRoots = [...new Set(roots)];
   }
   if (typeof o.pollIntervalMs === 'number' && o.pollIntervalMs >= 500) {
     cfg.pollIntervalMs = o.pollIntervalMs;

@@ -3,6 +3,7 @@ import type { AgentMessage, Session } from '../../types.js';
 import { ActivityTimeline } from './ActivityTimeline.js';
 import { HistoryScrollback } from './HistoryScrollback.js';
 import { SessionChat } from './SessionChat.js';
+import { ConversationView } from './ConversationView.js';
 import { Terminal } from '../components/Terminal.js';
 import { ElapsedTime, sessionLabel } from './model.js';
 import { nextMountedTerminalIds, sameIds, terminalViewKeys } from './terminalViews.js';
@@ -20,12 +21,16 @@ interface Props {
   events?: readonly AgentMessage[];
   /** Returns to the Work list. */
   onBack?: () => void;
+  /** The tab a newly selected session opens on. */
+  initialView?: SessionView;
 }
 
-export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect, events = [], onBack }: Props) {
-  const [view, setView] = useState<'chat' | 'terminal' | 'activity'>('chat');
+export type SessionView = 'conversation' | 'chat' | 'terminal' | 'activity';
+
+export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect, events = [], onBack, initialView = 'conversation' }: Props) {
+  const [view, setView] = useState<SessionView>(initialView);
   const [mountedIds, setMountedIds] = useState<string[]>([]);
-  useEffect(() => { setView('chat'); }, [session?.id]);
+  useEffect(() => { setView(initialView); }, [session?.id, initialView]);
 
   const selectableId = view === 'terminal' && session && session.origin === 'managed' && wsReady && ws ? session.id : null;
   useEffect(() => {
@@ -61,10 +66,12 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
             </select>
           </label>
         )}
-        <button className="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')} type="button">Chat</button>
+        <button className="button" aria-pressed={view === 'conversation'} onClick={() => setView('conversation')} type="button">Conversation</button>
+        <button className="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')} type="button">Team chat</button>
         <button className="button" aria-pressed={view === 'activity'} onClick={() => setView('activity')} type="button">Activity</button>
         <button className="button" aria-pressed={view === 'terminal'} onClick={() => setView('terminal')} type="button">Terminal</button>
       </div>
+      {view === 'conversation' && <ConversationView key={session.id} onOpenTerminal={() => setView('terminal')} session={session} />}
       {view === 'chat' && <SessionChat key={session.id} session={session} onError={onError} />}
       {view === 'activity' && <div className="session-activity-panel"><ActivityTimeline events={events} session={session} /></div>}
       <div className="session-terminal-panel" hidden={view !== 'terminal'}>

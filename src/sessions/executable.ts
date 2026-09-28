@@ -65,3 +65,22 @@ export function resolveAgentExecutable(agent: AgentType): string | undefined {
 
   return undefined;
 }
+
+/**
+ * PATH for a spawned agent CLI. A macOS app inherits launchd's minimal PATH,
+ * so a Node launcher script (`#!/usr/bin/env node`, e.g. an nvm-installed
+ * codex) finds no `node`. Put the executable's own directory — where nvm and
+ * Homebrew keep the matching node — and this service's node first.
+ */
+export function agentPath(executable: string, pathValue = process.env.PATH ?? ''): string {
+  const entries = [
+    ...(path.isAbsolute(executable) ? [path.dirname(executable)] : []),
+    path.dirname(process.execPath),
+    ...pathValue.split(path.delimiter),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+  ];
+  return [...new Set(entries.filter(Boolean))].join(path.delimiter);
+}

@@ -30,7 +30,7 @@ async function render(selected = session, mobile = false) {
   root = createRoot(host);
   await act(async () => root.render(mobile
     ? <MobileWorkspace session={selected} sessions={[selected]} ws={null} wsReady={false} onError={vi.fn()} onSelect={vi.fn()} />
-    : <TerminalWorkspace session={selected} sessions={[selected]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} />));
+    : <TerminalWorkspace initialView="chat" session={selected} sessions={[selected]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} />));
 }
 async function submit(text: string) {
   const input = host.querySelector('textarea')!;
@@ -101,7 +101,7 @@ describe('admin shared session chat', () => {
     vi.stubGlobal('fetch', vi.fn(async (url) => json(String(url).includes('/capabilities') ? { send: 'managed' } : String(url).includes('session-1') ? [message('1', 'Private to session one')] : [])));
     await render();
     const other = { ...session, id: 'session-2' };
-    await act(async () => root.render(<TerminalWorkspace session={other} sessions={[session, other]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} />));
+    await act(async () => root.render(<TerminalWorkspace initialView="chat" session={other} sessions={[session, other]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} />));
     expect(host.textContent).not.toContain('Private to session one');
     expect(host.querySelector('textarea')?.value).toBe('');
   });
@@ -112,7 +112,7 @@ describe('admin shared session chat', () => {
     const onSelect = vi.fn();
     host = document.createElement('div'); document.body.append(host);
     root = createRoot(host);
-    await act(async () => root.render(<TerminalWorkspace session={session} sessions={[session, other]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} onSelect={onSelect} />));
+    await act(async () => root.render(<TerminalWorkspace initialView="chat" session={session} sessions={[session, other]} ws={null} wsReady={false} onError={vi.fn()} onFocusExternal={vi.fn()} onSelect={onSelect} />));
     const picker = host.querySelector('[aria-label="Selected Session"]') as HTMLSelectElement;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(picker, other.id);

@@ -8,6 +8,7 @@ import type { AgentDeckConfig } from '../config.js';
 import { expandTilde, saveConfig as saveConfigFile } from '../config.js';
 import { DEFAULT_MODEL_SETTING_KEY, type ModelCatalog } from '../sessions/model-catalog.js';
 import { checkoutBranch, scanRepos, git } from '../git/scan.js';
+import { folderAccess } from '../folder-access.js';
 import { diffFile, diffSummary, resolveRepoFile, type DiffMode } from '../git/diff.js';
 import {
   gitPublishService, MAX_COMMIT_SUBJECT_LENGTH, MAX_PR_TITLE_LENGTH,
@@ -15,6 +16,7 @@ import {
 } from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
+import { ConversationReader } from '../sessions/conversation.js';
 import {
   createRuntimeReadinessSource,
   publicRuntimeReadinessReport,
@@ -221,10 +223,17 @@ export interface RouteContext {
   workEngine?: WorkEngine;
   /** Ticket 11: feeds requestTrust's deviceLookup, so a collaborator device's request resolves to its Principal and grants. Undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService;
+  /** Reads each session's agent transcript for the Conversation view. Injectable so tests use fixture roots. */
+  conversations?: ConversationReader;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { manager } = ctx;
+  const access = folderAccess(ctx.config, () => ctx.store?.listRepos() ?? []);
+  const accessDenied = (target: string) => ({
+    error: `AgentDeck does not have access to ${target}. Add its folder in Settings → Folder access.`,
+    code: 'folder-access',
+  });
   const runtimeReadiness = ctx.runtimeReadiness ?? createRuntimeReadinessSource();
   const requestTrust = (req: FastifyRequest) => classify(
     {
@@ -436,12 +445,15 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   };
   app.get('/api/repos', async (req) => {
     if (!ctx.store) return [];
+    const roots = access.roots();
+    if (roots.length === 0) return [];
     try {
-      const repos = await scanRepos(ctx.config.projectsDir, ctx.store);
+      const repos = await scanRepos(roots, ctx.store);
       await ctx.coordination?.syncRepos(repos);
       return scopeRepos(repos, req);
     } catch {
-      return scopeRepos(ctx.store.listRepos(), req);
+      // Stored rows may predate the folders chosen now.
+      return scopeRepos(ctx.store.listRepos().filter((repo) => access.allows(repo.path)), req);
     }
   });
 
@@ -526,7 +538,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // Only paths already known to the repo store may be diffed — never run git
   // against an arbitrary request-supplied directory.
   const knownRepoPath = (repo: string | undefined): string | undefined => {
-    if (!repo || repo.length > MAX_PATH_LENGTH || !ctx.store) return undefined;
+    if (!repo || repo.length > MAX_PATH_LENGTH || !ctx.store || !access.allows(repo)) return undefined;
     const repos = ctx.store.listRepos();
     if (repos.some((item) => item.id === repo)) return repo;
     return repos.some((item) => item.worktrees?.some((worktree) => worktree.path === repo))
@@ -718,6 +730,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   app.post('/api/sessions', async (req, reply) => {
     const spec = parseLaunchSpec(req.body);
     if (typeof spec === 'string') return reply.code(400).send({ error: spec });
+    if (!access.allows(spec.cwd)) return reply.code(403).send(accessDenied(spec.cwd));
     try {
       if (spec.branch) await checkoutBranch(spec.cwd, spec.branch, spec.createBranchIfMissing === true);
       if (spec.agent === 'claude' && spec.permissionMode) {
@@ -741,7 +754,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         } else if (spec.permissionMode === 'plan') {
           spec.initialPrompt = spec.initialPrompt ? `/plan ${spec.initialPrompt}` : '/plan';
         }
-        spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify(['node', HOOK_PATH])}`];
+        spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify([process.execPath, HOOK_PATH])}`];
       }
       const session = await manager.launch(spec);
       return reply.code(201).send(publicSession(session));
@@ -755,6 +768,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const body = req.body as { repoPath?: unknown; user?: unknown } | null;
     const repoPath = parseRepoPath(body?.repoPath);
     if (!repoPath) return reply.code(400).send({ error: 'repoPath must be an existing Git repository' });
+    if (!access.allows(repoPath)) return reply.code(403).send(accessDenied(repoPath));
     try {
       installClaudeHooks(repoPath, HOOK_PATH);
       if (body?.user === true) installCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'), HOOK_PATH);
@@ -768,6 +782,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const body = req.body as { repoPath?: unknown; user?: unknown } | null;
     const repoPath = parseRepoPath(body?.repoPath);
     if (!repoPath) return reply.code(400).send({ error: 'repoPath must be an existing Git repository' });
+    if (!access.allows(repoPath)) return reply.code(403).send(accessDenied(repoPath));
     try {
       uninstallClaudeHooks(repoPath);
       if (body?.user === true) uninstallCodexHooks(path.join(os.homedir(), '.codex', 'config.toml'));
@@ -814,6 +829,18 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // compacted scrollback.txt is the natural fit. History is managed-only
   // per the spec's non-goals (external sessions have no PTY, so no stored
   // bytes to read).
+  // Conversation view: the agent's own transcript, rendered as chat. Local
+  // only — tool calls carry this Mac's paths and commands, which neither a
+  // collaborator grant nor the shared remote token covers.
+  const conversations = ctx.conversations ?? new ConversationReader();
+  app.get('/api/sessions/:id/conversation', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    return conversations.read(session);
+  });
+
   app.get('/api/sessions/:id/scrollback', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
