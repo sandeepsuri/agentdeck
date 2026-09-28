@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig } from '../config.js';
 import { Store } from '../store/index.js';
 import { OwnerPairingService } from '../owner-pairing/service.js';
@@ -50,5 +50,29 @@ describe('owner phone REST boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/api/connection', headers: { host, [TOKEN_HEADER]: credential } })).json().capabilities).toContain('view');
     expect((await app.inject({ method: 'POST', url: `/api/owner-devices/${deviceId}/revoke` })).statusCode).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/connection', headers: { host, [TOKEN_HEADER]: credential } })).json().capabilities).toEqual([]);
+  });
+
+  it('tells the Mac app its phone access is off and turns it on after replying', async () => {
+    store = new Store(':memory:');
+    let enabled = false;
+    const set = vi.fn((next: boolean) => { enabled = next; });
+    app = buildApp({ config: defaultConfig(), manager: {} as RouteContext['manager'], ownerPairing: new OwnerPairingService(store.ownerDevices), remoteHosts: [], phoneAccess: { enabled: () => enabled, set } });
+    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'off', canToggle: true, phoneAccess: false });
+    const blocked = await app.inject({ method: 'POST', url: '/api/owner-pairing/challenges' });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error).toBe('Turn on phone access to pair a phone.');
+    expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', headers: { host }, payload: { enabled: true } })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: 'yes' } })).statusCode).toBe(400);
+    const turnedOn = await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: true } });
+    expect(turnedOn.json()).toEqual({ restarting: true });
+    expect(set).toHaveBeenCalledWith(true);
+    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json().state).toBe('no-tailscale');
+  });
+
+  it('reports ready without a toggle for a CLI service on Tailscale', async () => {
+    store = new Store(':memory:');
+    app = buildApp({ config: defaultConfig(), manager: {} as RouteContext['manager'], ownerPairing: new OwnerPairingService(store.ownerDevices), remoteHosts: [host] });
+    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'ready', canToggle: false, phoneAccess: true });
+    expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: true } })).statusCode).toBe(409);
   });
 });

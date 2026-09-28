@@ -53,6 +53,11 @@ export interface AgentDeckConfig {
    */
   structuredAttemptsEnabled?: boolean;
   /**
+   * Lets the Mac app's service listen on Tailscale so owner phones can pair
+   * and connect. The app runs local-only unless this is on; the CLI ignores it.
+   */
+  phoneAccess?: boolean;
+  /**
    * Per-model price overrides for the Usage view's estimated API cost, USD
    * per million tokens: { "<model id or prefix>": { input, output,
    * cacheRead?, cacheWrite?, cacheWrite1h? } }. Merged over the bundled
@@ -135,6 +140,7 @@ export function loadConfig(configPath?: string, env: NodeJS.ProcessEnv = process
   if (typeof o.structuredAttemptsEnabled === 'boolean') {
     cfg.structuredAttemptsEnabled = o.structuredAttemptsEnabled;
   }
+  if (typeof o.phoneAccess === 'boolean') cfg.phoneAccess = o.phoneAccess;
   const usagePricing = parsePricingOverrides(o.usagePricing);
   if (usagePricing) cfg.usagePricing = usagePricing;
   return cfg;

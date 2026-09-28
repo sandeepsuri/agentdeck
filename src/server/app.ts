@@ -21,7 +21,7 @@ import { localOwnerActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps
 import { registerProviderSetupRoutes } from './provider-setup-routes.js';
 import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
-import { registerOwnerPairingRoutes } from './owner-pairing-routes.js';
+import { registerOwnerPairingRoutes, type PhoneAccessControl } from './owner-pairing-routes.js';
 import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
@@ -172,6 +172,8 @@ export interface AppContext {
   /** Ticket 11: named collaborators and their device credentials — feeds the /api/collaborators/* admin+exchange routes and, via deviceLookup below, every remote request's Principal resolution. Undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService;
   ownerPairing?: OwnerPairingService;
+  /** Present only when the Mac app launched the service; see config.phoneAccess. */
+  phoneAccess?: PhoneAccessControl;
   /**
    * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
    * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
@@ -286,7 +288,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // Ticket 11: local-admin-only management routes plus the one
   // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
   if (ctx.collaborators) registerCollaboratorRoutes(app, ctx.collaborators);
-  if (ctx.ownerPairing) registerOwnerPairingRoutes(app, ctx.ownerPairing, ctx.remoteHosts, ctx.config.port);
+  if (ctx.ownerPairing) registerOwnerPairingRoutes(app, ctx.ownerPairing, ctx.remoteHosts, ctx.config.port, ctx.phoneAccess);
 
   // Ticket 12 AC1: admin-only POST (not on isCollaboratorAllowedRoute), GET
   // filtered to a resolved collaborator device's grantedProfileIds — same

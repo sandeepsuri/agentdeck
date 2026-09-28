@@ -14,6 +14,13 @@ describe('remote access bootstrap', () => {
     expect(detect).not.toHaveBeenCalled();
     expect(save).not.toHaveBeenCalled();
   });
+
+  it('lets the installed app listen on Tailscale once phone access is on', async () => {
+    process.env.AGENTDECK_LOCAL_ONLY = '1';
+    const config = { ...defaultConfig(), phoneAccess: true, tailscaleToken: 'existing-token' };
+    const result = await configureRemoteAccess(config, { detect: async () => ({ ip: '100.101.102.103', hostname: 'mac.tail.example.ts.net' }) });
+    expect(result.hosts).toEqual(['mac.tail.example.ts.net', '100.101.102.103']);
+  });
   it('keeps both MagicDNS and raw IP as accepted hosts', () => {
     expect(tailscaleHosts({ ip: '100.101.102.103', hostname: 'mac.tail.example.ts.net' }))
       .toEqual(['mac.tail.example.ts.net', '100.101.102.103']);

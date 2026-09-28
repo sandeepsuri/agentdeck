@@ -52,6 +52,13 @@ struct ServiceLifecycle {
 /// A Finder-launched app inherits launchd's minimal PATH, which hides the
 /// Homebrew, nvm and ~/.local tools (codex, claude, git, node) a terminal sees.
 enum ServiceEnvironment {
+    /// The service exits with this after the owner changes phone access; relaunch it instead of failing.
+    static let restartExitCode: Int32 = 75
+
+    static func wantsRestart(reason: Process.TerminationReason, status: Int32) -> Bool {
+        reason == .exit && status == restartExitCode
+    }
+
     static let marker = "__AGENTDECK_PATH__"
 
     /// PATH printed between markers by the user's login shell; nil when absent.
@@ -180,6 +187,10 @@ final class ServiceController: ObservableObject {
     private func checkHealth() {
         guard let process else { return }
         if !process.isRunning {
+            if ServiceEnvironment.wantsRestart(reason: process.terminationReason, status: process.terminationStatus) {
+                start()
+                return
+            }
             fail("The service stopped. Check the log, then try Repair Startup.")
             timer?.invalidate()
             return

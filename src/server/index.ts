@@ -4,7 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { FastifyRequest } from 'fastify';
 import type { WebSocketServer } from 'ws';
-import { loadConfig } from '../config.js';
+import { loadConfig, saveConfig } from '../config.js';
 import { CoordinationService } from '../coordination/service.js';
 import { DiscoveryPoller } from '../discovery/poller.js';
 import { ITerm2Adapter, TerminalAppAdapter, TerminalRegistry, VsCodeAdapter, VsCodeBridge } from '../discovery/terminals/index.js';
@@ -40,6 +40,9 @@ import { folderAccess } from '../folder-access.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 import { ProviderSetupService } from '../provider-setup/service.js';
 import { macProviderCommands } from '../provider-setup/commands.js';
+
+/** Tells the Mac app to relaunch the service rather than report a crash. */
+const SERVICE_RESTART_EXIT_CODE = 75;
 
 export interface RunningServer { address: string; close: () => Promise<void> }
 
@@ -159,6 +162,15 @@ export async function startServer(): Promise<RunningServer> {
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators, ownerPairing,
+    phoneAccess: config.launchedByApp ? {
+      enabled: () => Boolean(config.phoneAccess),
+      set: (enabled) => {
+        saveConfig({ phoneAccess: enabled });
+        // The Mac app relaunches the service on this exit code, and the new
+        // process binds (or skips) the tailnet from the saved choice.
+        void close().then(() => process.exit(SERVICE_RESTART_EXIT_CODE));
+      },
+    } : undefined,
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
     providerSetup,

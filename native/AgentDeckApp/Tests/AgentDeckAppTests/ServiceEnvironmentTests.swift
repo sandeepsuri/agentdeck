@@ -24,4 +24,10 @@ final class ServiceEnvironmentTests: XCTestCase {
         XCTAssertEqual(environment["AGENTDECK_LOCAL_ONLY"], "1")
         XCTAssertEqual(environment["HOME"], "/Users/me")
     }
+
+    func testRelaunchesOnlyOnTheRequestedRestartExit() {
+        XCTAssertTrue(ServiceEnvironment.wantsRestart(reason: .exit, status: 75))
+        XCTAssertFalse(ServiceEnvironment.wantsRestart(reason: .exit, status: 1))
+        XCTAssertFalse(ServiceEnvironment.wantsRestart(reason: .uncaughtSignal, status: 75))
+    }
 }

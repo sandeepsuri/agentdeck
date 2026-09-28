@@ -4,6 +4,7 @@ import { apiFetch, responseJson } from '../apiFetch.js';
 interface OwnerDevice { id: string; label: string; createdAt: string; revokedAt?: string }
 interface AuditEntry { id: string; action: 'session-send' | 'session-input'; targetId: string; createdAt: string }
 interface Challenge { id: string; expiresAt: string; qr: string }
+interface Availability { state: 'ready' | 'off' | 'no-tailscale'; canToggle: boolean; phoneAccess: boolean }
 interface Status { state: 'waiting' | 'compare' | 'confirmed'; code?: string; label?: string; expiresAt: string; ownerConfirmed: boolean; deviceId?: string }
 
 export function OwnerPhonesPanel() {
@@ -13,9 +14,24 @@ export function OwnerPhonesPanel() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [audit, setAudit] = useState<Record<string, AuditEntry[]>>({});
+  const [availability, setAvailability] = useState<Availability | null>(null);
+  const [restarting, setRestarting] = useState(false);
   const refresh = useCallback(async () => setDevices(await responseJson<OwnerDevice[]>(await apiFetch('/api/owner-devices'))), []);
 
   useEffect(() => { void refresh().catch(() => setError('Could not load owner phones.')); }, [refresh]);
+  useEffect(() => {
+    void apiFetch('/api/owner-pairing/availability').then((response) => responseJson<Availability>(response)).then(setAvailability).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (!restarting) return;
+    // The service is relaunching; keep asking until the new one answers.
+    const timer = window.setInterval(() => {
+      void apiFetch('/api/owner-pairing/availability').then((response) => responseJson<Availability>(response)).then((next) => {
+        setAvailability(next); setRestarting(false);
+      }).catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [restarting]);
   useEffect(() => {
     if (!challenge || status?.deviceId) return;
     let active = true;
@@ -32,8 +48,22 @@ export function OwnerPhonesPanel() {
 
   const start = async () => {
     setError(null); setStatus(null); setBusy(true);
-    try { setChallenge(await responseJson<Challenge>(await apiFetch('/api/owner-pairing/challenges', { method: 'POST' }))); }
+    try {
+      const response = await apiFetch('/api/owner-pairing/challenges', { method: 'POST' });
+      if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `request failed: ${response.status}`);
+      setChallenge(await response.json() as Challenge);
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not start pairing.'); }
+    finally { setBusy(false); }
+  };
+  const setPhoneAccess = async (enabled: boolean) => {
+    setError(null); setBusy(true);
+    try {
+      await responseJson(await apiFetch('/api/owner-pairing/phone-access', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled }),
+      }));
+      setChallenge(null); setStatus(null); setRestarting(true);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not change phone access.'); }
     finally { setBusy(false); }
   };
   const confirm = async () => {
@@ -63,7 +93,14 @@ export function OwnerPhonesPanel() {
   return <section>
     <h2>Owner phones</h2>
     <p>Pair your iPhone while it and this Mac are on the same tailnet. Each phone gets its own credential.</p>
-    <button className="button button-primary" disabled={busy} onClick={() => void start()} type="button">Pair a phone</button>
+    {restarting && <p role="status">Restarting AgentDeck…</p>}
+    {!restarting && availability?.state === 'off' && <div className="settings-card">
+      <p>Phone access is off, so AgentDeck only listens on this Mac. Turn it on to let paired phones reach it over Tailscale. AgentDeck restarts to apply this.</p>
+      <button className="button button-primary" disabled={busy} onClick={() => void setPhoneAccess(true)} type="button">Turn on phone access</button>
+    </div>}
+    {!restarting && availability?.state === 'no-tailscale' && <p>Tailscale isn't running on this Mac, or MagicDNS is off. Start Tailscale, then restart AgentDeck.</p>}
+    <button className="button button-primary" disabled={busy || restarting || (availability !== null && availability.state !== 'ready')} onClick={() => void start()} type="button">Pair a phone</button>
+    {!restarting && availability?.canToggle && availability.phoneAccess && <button className="button" disabled={busy} onClick={() => void setPhoneAccess(false)} type="button">Turn off phone access</button>}
     {challenge && status?.state !== 'confirmed' && <div className="settings-card">
       <p>Scan this QR code in AgentDeck Phone. It expires at {new Date(challenge.expiresAt).toLocaleTimeString()}.</p>
       <img alt="Short-lived owner phone pairing QR code" height="256" src={challenge.qr} width="256" />
