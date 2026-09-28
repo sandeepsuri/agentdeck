@@ -2,6 +2,8 @@
 // and repair — driven through fake CLI commands. Nothing here runs a real
 // provider CLI.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { ConfinementProbeReport } from '../confinement/probe.js';
+import { AgentAccess } from '../personal-tasks/agent-access.js';
 import { Store } from '../store/index.js';
 import { FakeCommands, SIGNED_IN, SIGNED_OUT } from '../test-fixtures/provider-commands.js';
 import { ProviderSetupService } from './service.js';
@@ -174,5 +176,59 @@ describe('sign-in', () => {
     service.signIn('claude');
     service.shutdown();
     expect(commands.processes[0]!.killed).toBe(true);
+  });
+});
+
+describe('agent help for personal tasks', () => {
+  function withAgentAccess() {
+    let proven = false;
+    let probes = 0;
+    const agentAccess = new AgentAccess({
+      provider: {
+        resolveAccess: async () => (proven
+          ? { mode: 'agent-confined', runtime: 'claude', executable: '/bin/claude', cliVersion: '2.1.283', credential: 'macos-keychain' }
+          : { mode: 'deterministic-only', reason: 'Confinement has not been proven for claude on this Mac.' }),
+        runTurn: async () => { throw new Error('not used'); },
+      },
+      prover: {
+        available: () => true,
+        prove: async () => {
+          probes += 1;
+          proven = true;
+          return { passed: true, checks: [] } as unknown as ConfinementProbeReport;
+        },
+      },
+    });
+    service = new ProviderSetupService({ repository: store.providerReadiness, commands, now: () => new Date(clock), agentAccess });
+    return { probes: () => probes };
+  }
+
+  it('proves the sandbox once Claude is ready, without the owner running a script', async () => {
+    const { probes } = withAgentAccess();
+    await service.check('claude');
+    await service.whenIdle();
+    expect(probes()).toBe(1);
+    expect(entry('claude').agentAccess).toMatchObject({ state: 'on' });
+    expect(entry('codex').agentAccess).toBeUndefined();
+
+    await service.check('claude');
+    await service.whenIdle();
+    expect(probes()).toBe(1);
+  });
+
+  it('does not probe while Claude is signed out', async () => {
+    const { probes } = withAgentAccess();
+    commands.authStatus = { exitCode: 1, stdout: SIGNED_OUT };
+    await service.check('claude');
+    await service.whenIdle();
+    expect(probes()).toBe(0);
+  });
+
+  it('checks the sandbox again on request, for Claude only', async () => {
+    const { probes } = withAgentAccess();
+    service.checkAgentAccess('claude');
+    await service.whenIdle();
+    expect(probes()).toBe(1);
+    expect(() => service.checkAgentAccess('codex')).toThrow(/Claude Code/);
   });
 });

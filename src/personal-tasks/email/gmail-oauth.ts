@@ -7,7 +7,8 @@
 // Decision 0002 has AgentDeck ship one owned client. Until it is registered,
 // no client is embedded and the owner's own Desktop client file is used
 // (AGENTDECK_GMAIL_CLIENT_FILE, or gmail-oauth-client.json in the data
-// directory); without either, email shows the 'no-client' repair state.
+// directory), else the one the Mac app was packaged with; without any,
+// email shows the 'no-client' repair state.
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -33,15 +34,30 @@ const EMBEDDED_CLIENT: OAuthClient | undefined = undefined;
 
 export const GMAIL_CLIENT_FILE = 'gmail-oauth-client.json';
 
-/** The Desktop client to use, or undefined when this build has none. */
-export function loadGmailClient(dataDir: string, env: NodeJS.ProcessEnv = process.env): OAuthClient | undefined {
-  const file = env.AGENTDECK_GMAIL_CLIENT_FILE ?? path.join(dataDir, GMAIL_CLIENT_FILE);
+/**
+ * scripts/build-mac-app.mjs copies the packager's client file next to this
+ * module, so the people the app is given to never handle one themselves.
+ */
+export const BUNDLED_GMAIL_CLIENT_FILE = path.join(import.meta.dirname, GMAIL_CLIENT_FILE);
+
+function readClientFile(file: string): OAuthClient | undefined {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { installed?: { client_id?: unknown; client_secret?: unknown } };
     const { client_id: clientId, client_secret: clientSecret } = parsed.installed ?? {};
     if (typeof clientId === 'string' && clientId && typeof clientSecret === 'string') return { clientId, clientSecret };
-  } catch { /* fall through to the embedded client */ }
-  return EMBEDDED_CLIENT;
+  } catch { /* try the next source */ }
+  return undefined;
+}
+
+/** The Desktop client to use, or undefined when this build has none. The owner's own file wins over the bundled one. */
+export function loadGmailClient(
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  bundledFile: string = BUNDLED_GMAIL_CLIENT_FILE,
+): OAuthClient | undefined {
+  return readClientFile(env.AGENTDECK_GMAIL_CLIENT_FILE ?? path.join(dataDir, GMAIL_CLIENT_FILE))
+    ?? readClientFile(bundledFile)
+    ?? EMBEDDED_CLIENT;
 }
 
 export function missingScopes(granted: string | readonly string[]): string[] {

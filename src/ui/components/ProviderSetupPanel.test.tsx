@@ -109,6 +109,23 @@ describe('ProviderSetupPanel', () => {
     await render(<ProviderSetupPanel />);
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('installer did not finish');
   });
+
+  it('shows whether Claude may help with personal tasks, and checks the sandbox again on request', async () => {
+    const off = { providers: [entry('claude', 'ready', { agentAccess: { state: 'off', reason: 'AgentDeck could not confirm that Claude Code stays sandboxed.' } }), entry('codex', 'missing-cli')] };
+    const checking = { providers: [entry('claude', 'ready', { agentAccess: { state: 'checking' } }), entry('codex', 'missing-cli')] };
+    const calls = serve(off, { '/api/provider-setup/claude/agent-access': checking });
+    await render(<ProviderSetupPanel />);
+    expect(host.textContent).toContain('Agent help for personal tasks is off');
+    expect(host.textContent).toContain('could not confirm that Claude Code stays sandboxed');
+    await act(async () => { button('Check sandbox again')!.click(); });
+    expect(calls.map((call) => call.url)).toContain('/api/provider-setup/claude/agent-access');
+    expect(host.textContent).toMatch(/Checking that Claude stays sandboxed/);
+    await act(async () => { root.unmount(); });
+
+    serve({ providers: [entry('claude', 'ready', { agentAccess: { state: 'on' } }), entry('codex', 'missing-cli')] });
+    await render(<ProviderSetupPanel />);
+    expect(host.textContent).toContain('Agent help for personal tasks is on');
+  });
 });
 
 describe('HomeProviderSetup', () => {

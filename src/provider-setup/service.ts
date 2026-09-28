@@ -22,6 +22,7 @@ import {
   type RepairGuide,
   type SetupProvider,
 } from './readiness.js';
+import type { AgentAccess, AgentAccessView } from '../personal-tasks/agent-access.js';
 import type { ProviderReadinessRepository, StoredProviderReadiness } from '../store/provider-readiness.js';
 
 /** A long-running provider process (installer or sign-in). */
@@ -73,6 +74,8 @@ export interface ProviderSetupEntry {
   readiness?: ProviderReadinessView;
   operation?: SetupOperationView;
   repair?: RepairGuide;
+  /** Claude only: whether an agent may help with personal tasks on this Mac. */
+  agentAccess?: AgentAccessView;
 }
 
 export interface ProviderSetupView { providers: ProviderSetupEntry[] }
@@ -131,6 +134,8 @@ export interface ProviderSetupServiceOptions {
   commands: ProviderCommands;
   now?: () => Date;
   home?: string;
+  /** Proves Claude Code's confinement once it is ready, so personal tasks can use an agent. */
+  agentAccess?: AgentAccess;
 }
 
 export class ProviderSetupService {
@@ -155,6 +160,7 @@ export class ProviderSetupService {
           name: PROVIDER_NAMES[provider],
           confirmedThisLaunch: this.confirmed.has(provider),
           ...(stored ? { readiness: { ...stored, ...(allowance ? { allowance } : {}) }, repair: repairFor(provider, stored.state) } : {}),
+          ...(provider === 'claude' && this.options.agentAccess ? { agentAccess: this.options.agentAccess.view() } : {}),
           ...(operation ? {
             operation: {
               kind: operation.kind,
@@ -243,7 +249,12 @@ export class ProviderSetupService {
     if (this.stopped) return record;
     this.options.repository.put(record);
     this.allowance.set(provider, assessment.allowance);
+    const newlyReady = assessment.state === 'ready' && (previous?.state !== 'ready' || !this.confirmed.has(provider));
     this.confirmed.add(provider);
+    // Claude is signed in: prove its confinement now rather than when a personal task first needs it.
+    if (provider === 'claude' && newlyReady && this.options.agentAccess) {
+      void this.track(this.options.agentAccess.refresh({ afterSignIn: true })).catch(() => undefined);
+    }
     if (this.operations.get(provider) === operation) this.operations.delete(provider);
     return { ...record, ...(assessment.allowance ? { allowance: assessment.allowance } : {}) };
   }
@@ -312,6 +323,15 @@ export class ProviderSetupService {
     });
   }
 
+  /** Runs the confinement probe again, for example after one failed. */
+  checkAgentAccess(provider: SetupProvider): void {
+    if (provider !== 'claude' || !this.options.agentAccess) {
+      throw new ProviderSetupError('unsupported', `Personal tasks use Claude Code, not ${PROVIDER_NAMES[provider]}.`);
+    }
+    if (this.stopped) throw new ProviderSetupError('invalid-state', 'AgentDeck is shutting down.');
+    void this.track(this.options.agentAccess.checkAgain()).catch(() => undefined);
+  }
+
   async openInstallGuide(provider: SetupProvider): Promise<void> {
     await this.options.commands.openUrl(INSTALL_GUIDES[provider]);
   }
@@ -360,6 +380,7 @@ export class ProviderSetupService {
   /** Stops installers, sign-ins, and checks still running so none outlives AgentDeck. */
   shutdown(): void {
     this.stopped = true;
+    this.options.agentAccess?.shutdown();
     for (const [provider, operation] of this.operations) {
       clearTimeout(operation.timer);
       if (operation.process) {

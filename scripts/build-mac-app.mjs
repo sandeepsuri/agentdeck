@@ -55,6 +55,24 @@ for (const entry of fs.readdirSync(path.join(root, 'dist'))) {
 for (const entry of ['server/index.js', 'ui/index.html', 'native/AgentDeckNotch.app']) {
   if (!fs.existsSync(path.join(service, 'dist', entry))) throw new Error(`Missing build output: dist/${entry}`);
 }
+// Bundle the packager's Gmail Desktop client (decision 0002 until AgentDeck's
+// own is registered), so whoever runs this app can Connect Gmail with no
+// file of their own. src/personal-tasks/email/gmail-oauth.ts reads it from
+// beside itself. Google does not treat a Desktop client's secret as
+// confidential; the refresh tokens it issues stay in each user's Keychain.
+const gmailClientSource = process.env.AGENTDECK_GMAIL_CLIENT_FILE
+  ?? path.join(os.homedir(), '.agentdeck', 'gmail-oauth-client.json');
+let gmailClient;
+try {
+  gmailClient = JSON.parse(fs.readFileSync(gmailClientSource, 'utf8')).installed;
+} catch { /* reported below */ }
+if (typeof gmailClient?.client_id === 'string' && typeof gmailClient?.client_secret === 'string') {
+  const target = path.join(service, 'dist', 'personal-tasks', 'email', 'gmail-oauth-client.json');
+  fs.writeFileSync(target, `${JSON.stringify({ installed: { client_id: gmailClient.client_id, client_secret: gmailClient.client_secret } })}\n`);
+  console.log(`[agentdeck] bundled Gmail client ${gmailClient.client_id.split('-')[0]}… from ${gmailClientSource.replace(os.homedir(), '~')}`);
+} else {
+  console.warn(`[agentdeck] no Desktop Gmail client at ${gmailClientSource.replace(os.homedir(), '~')}; this app will show Gmail as not set up`);
+}
 fs.writeFileSync(path.join(service, 'package.json'), '{"type":"module","private":true}\n');
 fs.copyFileSync(process.execPath, path.join(macOS, 'node'));
 fs.chmodSync(path.join(macOS, 'node'), 0o755);
