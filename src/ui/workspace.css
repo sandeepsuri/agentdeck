@@ -831,3 +831,7 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .folder-access-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); }
 .folder-access-list code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-access-list .button { flex: none; }
+.managed-terminal { position: relative; width: 100%; height: 100%; display: flex; overflow: hidden; }
+.managed-terminal-host { width: 100%; height: 100%; display: flex; overflow: hidden; }
+.terminal-jump-latest { position: absolute; right: 14px; bottom: 12px; padding: 6px 12px; border: 1px solid var(--border-muted); border-radius: 999px; background: var(--surface-panel); color: var(--text-primary); font-size: 12px; box-shadow: 0 4px 14px rgb(0 0 0 / 25%); cursor: pointer; }
+.terminal-jump-latest:hover { border-color: var(--border-selection); }
