@@ -9,11 +9,9 @@
 // destination) triple that is validated before it is recorded. Every call
 // re-checks the grant, so revoking it or moving the folder ends the session.
 // Nothing here moves, creates, or writes a file.
-import { randomBytes } from 'node:crypto';
-import http from 'node:http';
-import type net from 'node:net';
 import { FilingPlanError, inspectDestination, validateDestination, validateFileName, type FilingRequest } from './filing-plan.js';
 import { GrantPathError } from './folder-grant.js';
+import { startMcpBroker } from './mcp-broker.js';
 
 export const FILING_BROKER_SERVER = 'agentdeck';
 export const FILING_BROKER_TOOL_NAMES = ['list_documents', 'read_document', 'list_folders', 'propose_filing'] as const;
@@ -99,12 +97,6 @@ const TOOLS = [
   },
 ];
 
-interface JsonRpcRequest {
-  readonly id?: number | string;
-  readonly method?: string;
-  readonly params?: Record<string, unknown>;
-}
-
 class Refusal extends Error {
   constructor(message: string, readonly path?: string) {
     super(message);
@@ -124,7 +116,6 @@ function nameOf(relative: string): string {
 }
 
 export async function startFilingBroker(options: FilingBrokerOptions): Promise<FilingBroker> {
-  const token = randomBytes(24).toString('hex');
   const documents = new Map(options.documents.map((document) => [document.id, document]));
   const requests = new Map<string, FilingRequest>();
   const maxCalls = options.maxCalls ?? 20 + options.documents.length * 6;
@@ -197,99 +188,29 @@ export async function startFilingBroker(options: FilingBrokerOptions): Promise<F
     }
   }
 
-  function handle(request: JsonRpcRequest): unknown {
-    switch (request.method) {
-      case 'initialize':
-        return {
-          protocolVersion: typeof request.params?.protocolVersion === 'string' ? request.params.protocolVersion : '2025-06-18',
-          capabilities: { tools: {} },
-          serverInfo: { name: 'agentdeck-filing-broker', version: '1' },
-        };
-      case 'tools/list':
-        return { tools: TOOLS };
-      case 'tools/call': {
-        const tool = request.params?.name;
-        const args = request.params?.arguments;
-        const safeArgs = args !== null && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {};
-        try {
-          return callTool(tool, safeArgs);
-        } catch (error) {
-          if (!(error instanceof Refusal)) throw error;
-          options.onEvent({
-            // Only a known tool name is echoed; anything else the agent sent stays out of the record.
-            kind: 'broker-refused', tool: (FILING_BROKER_TOOL_NAMES as readonly unknown[]).includes(tool) ? tool as string : 'unknown', reason: error.message,
-            ...(error.path ? { path: error.path } : {}),
-          });
-          return refusal(error.message);
-        }
-      }
-      case 'ping':
-        return {};
-      default:
-        return undefined;
-    }
-  }
-
-  const server = http.createServer((request, response) => {
-    if (request.headers.authorization !== `Bearer ${token}`) {
-      response.writeHead(401).end();
-      return;
-    }
-    if (request.method !== 'POST') {
-      response.writeHead(405).end();
-      return;
-    }
-    let body = '';
-    let tooLarge = false;
-    request.setEncoding('utf8');
-    request.on('data', (chunk: string) => {
-      body += chunk;
-      if (body.length > 64 * 1024) {
-        tooLarge = true;
-        request.destroy();
-      }
-    });
-    request.on('end', () => {
-      if (tooLarge) return;
-      let message: JsonRpcRequest;
+  const broker = await startMcpBroker({
+    serverName: 'agentdeck-filing-broker',
+    tools: TOOLS,
+    callTool: (tool, args) => {
       try {
-        message = JSON.parse(body) as JsonRpcRequest;
-      } catch {
-        response.writeHead(400).end();
-        return;
+        return callTool(tool, args);
+      } catch (error) {
+        if (!(error instanceof Refusal)) throw error;
+        options.onEvent({
+          // Only a known tool name is echoed; anything else the agent sent stays out of the record.
+          kind: 'broker-refused', tool: (FILING_BROKER_TOOL_NAMES as readonly unknown[]).includes(tool) ? tool as string : 'unknown', reason: error.message,
+          ...(error.path ? { path: error.path } : {}),
+        });
+        return refusal(error.message);
       }
-      // Notifications (no id) are acknowledged without a body.
-      if (message.id === undefined) {
-        response.writeHead(202).end();
-        return;
-      }
-      let reply: unknown;
-      try {
-        const result = handle(message);
-        reply = result === undefined
-          ? { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }
-          : { jsonrpc: '2.0', id: message.id, result };
-      } catch {
-        reply = { jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'Internal error' } };
-      }
-      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply));
-    });
+    },
   });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  const { port } = server.address() as net.AddressInfo;
   return {
-    url: `http://127.0.0.1:${port}/mcp`,
-    port,
-    token,
+    url: broker.url,
+    port: broker.port,
+    token: broker.token,
     requests: () => new Map(requests),
     accessLost: () => lostReason,
-    close: () => new Promise<void>((resolve) => {
-      server.closeAllConnections();
-      server.close(() => resolve());
-    }),
+    close: () => broker.close(),
   };
 }

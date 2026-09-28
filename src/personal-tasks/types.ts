@@ -68,7 +68,15 @@ export type PersonalActivityKind =
   | 'filing-retry-requested'
   | 'filing-undo-requested'
   | 'file-restored'
-  | 'undo-conflict';
+  | 'undo-conflict'
+  // Finding an email and preparing a reply (issue #88).
+  | 'mail-searched'
+  | 'message-read'
+  | 'reply-proposed'
+  | 'message-confirmed'
+  | 'draft-saved'
+  | 'draft-not-saved'
+  | 'draft-changed-in-gmail';
 
 export interface PersonalTaskActivity {
   readonly sequence: number;

@@ -120,6 +120,18 @@ _Avoid_: Filing plan approval, move job
 The owner's approval of one exact Filing proposal, bound to its plan digest, the approving owner, an expiry, and a single initial execution, with an explicit choice for each target it would replace. AgentDeck's own code, never an agent, then moves each file after re-checking the grant, links, and content on disk, and keeps a durable receipt per file: moved, left in place, not moved, or uncertain. Approving again returns the approval on record. A later owner-requested retry uses a durable idempotency key and only receipts recorded as not moved; a settled move is never repeated, even across a restart. Undo restores a recorded move only when the original name is free and the destination still has the recorded file identity.
 _Avoid_: Move job, batch rename, filing run
 
+**Email account grant**:
+One Gmail account the owner connected on this Mac through Google's consent, with permission to read mail and manage drafts only. AgentDeck keeps the address, the granted scopes, and the last check with a repair state; the sign-in itself stays in the owner's login Keychain. Revoking it stops any further search or draft write and forgets the sign-in here and at Google.
+_Avoid_: Mailbox connection, email login, Folder grant
+
+**Email reply task**:
+A Personal task that asks the confined agent to find one message in an Email account grant and suggest a reply. The agent reaches mail only through the broker, sees only messages its own searches returned, and proposes only reply text; AgentDeck chooses recipients and subject from the message. The owner confirms the match from headers and text AgentDeck read itself.
+_Avoid_: Email job, inbox run
+
+**Reply draft**:
+The editable reply AgentDeck writes to the owner's Gmail drafts after the match is confirmed. Every save is a durable version recorded before the one provider write and settled from what Gmail reads back, so each version shows exactly the recipients, subject, body, and attachments Gmail holds, and a lost response never produces a second draft. A reply draft is never sent by preparing or editing it.
+_Avoid_: Proposal (for the draft itself), outbox, message
+
 **Provider readiness**:
 The result of a harmless check that a provider CLI on this Mac is installed, signed in with the provider's own sign-in, and within its plan allowance: ready, missing CLI, signed out, expired, allowance reached, or check failed, each with repair steps. Only this metadata is kept; the credential stays in the provider's own storage.
 _Avoid_: Runtime readiness (the managed-run capability probe), login, auth

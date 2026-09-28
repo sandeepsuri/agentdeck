@@ -18,6 +18,7 @@ import type {
 import { migrate } from './migrate.js';
 import { UsageRepository } from './usage.js';
 import { PersonalTaskRepository } from './personal-tasks.js';
+import { EmailTaskRepository } from './email-tasks.js';
 import { ProviderReadinessRepository } from './provider-readiness.js';
 import { OwnerDeviceRepository } from './owner-devices.js';
 import type {
@@ -387,6 +388,7 @@ export class Store implements CollaboratorStore {
     migrate(this.db, MIGRATIONS_DIR);
     this.usage = new UsageRepository(this.db);
     this.personal = new PersonalTaskRepository(this.db);
+    this.email = new EmailTaskRepository(this.db);
     this.providerReadiness = new ProviderReadinessRepository(this.db);
     this.ownerDevices = new OwnerDeviceRepository(this.db);
   }
@@ -396,6 +398,9 @@ export class Store implements CollaboratorStore {
 
   /** Personal tasks and folder grants (src/personal-tasks). */
   readonly personal: PersonalTaskRepository;
+
+  /** Connected email accounts, email reply tasks, and reply draft versions (src/personal-tasks/email). */
+  readonly email: EmailTaskRepository;
 
   /** The last provider setup readiness check per provider (src/provider-setup). */
   readonly providerReadiness: ProviderReadinessRepository;

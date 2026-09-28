@@ -38,6 +38,8 @@ import { PersonalTaskService } from '../personal-tasks/service.js';
 import { macFolderPicker } from '../personal-tasks/folder-picker.js';
 import { folderAccess } from '../folder-access.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
+import { EmailTaskService, gmailAccess } from '../personal-tasks/email/service.js';
+import { keychainTokenVault } from '../personal-tasks/email/keychain.js';
 import { ProviderSetupService } from '../provider-setup/service.js';
 import { macProviderCommands } from '../provider-setup/commands.js';
 
@@ -73,17 +75,29 @@ export async function startServer(): Promise<RunningServer> {
   // same task id; a revoked grant fails it instead of reading. Filing
   // proposals (issue #81) use the confined Claude Code provider only when
   // this Mac's recorded confinement evidence passes the gate.
+  const confinedProvider = confinedClaudeProvider({ dataDir: config.dataDir });
   const personalTasks = new PersonalTaskService({
     repository: store.personal,
     protectedRoots: [config.dataDir],
-    filingProvider: confinedClaudeProvider({ dataDir: config.dataDir }),
+    filingProvider: confinedProvider,
   });
   personalTasks.recover();
+  // Issue #88: find an email and prepare a reply through the same confined
+  // provider. Gmail sign-ins live in the login Keychain; a draft write left
+  // unsettled by the last shutdown is settled from Gmail, never written twice.
+  const providerCommands = macProviderCommands();
+  const emailTasks = new EmailTaskService({
+    repository: store.email,
+    gmail: gmailAccess({ dataDir: config.dataDir, openUrl: (url) => void providerCommands.openUrl(url).catch(() => undefined) }),
+    vault: keychainTokenVault(),
+    provider: confinedProvider,
+  });
+  emailTasks.recover();
   // Issue #85: provider CLI setup from the Mac app. Only the last readiness
   // check is persisted; it shows as unconfirmed until re-checked this launch.
   const providerSetup = new ProviderSetupService({
     repository: store.providerReadiness,
-    commands: macProviderCommands(),
+    commands: providerCommands,
     home: os.homedir(),
   });
   const sessionsDir = path.join(config.dataDir, 'sessions');
@@ -173,6 +187,7 @@ export async function startServer(): Promise<RunningServer> {
     } : undefined,
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
+    emailTasks: { service: emailTasks },
     providerSetup,
     pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
   });

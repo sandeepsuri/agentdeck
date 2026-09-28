@@ -14,6 +14,7 @@ import {
   type PersonalTaskStatus, type PersonalTaskView,
 } from '../../personal-tasks/types.js';
 import { apiFetch } from '../apiFetch.js';
+import { EmailRepliesPanel } from './EmailRepliesPanel.js';
 
 const POLL_MS = 1500;
 
@@ -506,6 +507,8 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
           </div>
         )}
       </section>
+
+      <EmailRepliesPanel active={active} />
     </section>
   );
 }

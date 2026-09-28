@@ -19,6 +19,7 @@ import { registerProfileRoutes } from './profile-routes.js';
 import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
 import { localOwnerActor, ownerPhoneActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
 import { registerProviderSetupRoutes } from './provider-setup-routes.js';
+import { registerEmailTaskRoutes, type EmailTaskRouteDeps } from './email-task-routes.js';
 import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
 import { registerOwnerPairingRoutes, type PhoneAccessControl } from './owner-pairing-routes.js';
@@ -205,6 +206,8 @@ export interface AppContext {
   usage?: UsageRouteContext;
   /** Issue #80: folder grants and personal tasks — /api/personal/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
   personalTasks?: Omit<PersonalTaskRouteDeps, 'resolveOwner'>;
+  /** Issue #88: Gmail accounts and email reply tasks — /api/personal/email/*. Owner at this Mac only: on no allowlist, and re-checked per route. */
+  emailTasks?: Omit<EmailTaskRouteDeps, 'resolveOwner'>;
   /** Issue #85: provider CLI setup — /api/provider-setup/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
   providerSetup?: ProviderSetupService;
 }
@@ -341,6 +344,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     },
     ...(ctx.ownerPairing ? { audit: ctx.ownerPairing.audit.bind(ctx.ownerPairing) } : {}),
   });
+  if (ctx.emailTasks) registerEmailTaskRoutes(app, { ...ctx.emailTasks, resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined) });
   if (ctx.providerSetup) registerProviderSetupRoutes(app, { service: ctx.providerSetup, isOwner: isLocalOwner });
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
