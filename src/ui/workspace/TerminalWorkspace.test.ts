@@ -21,6 +21,7 @@ const endedSession: Session = {
 describe('TerminalWorkspace', () => {
   it('keeps shared chat available for an ended managed session without direct-send controls', () => {
     const html = renderToStaticMarkup(createElement(TerminalWorkspace, {
+      initialView: 'chat',
       onError: () => undefined,
       onFocusExternal: () => undefined,
       session: endedSession,
@@ -35,5 +36,20 @@ describe('TerminalWorkspace', () => {
     expect(html).not.toContain('Type a response, or queue the next instruction');
     expect(html).not.toContain('>Queue<');
     expect(html).not.toContain('Send ⌘⏎');
+  });
+
+  it('opens a session on its Conversation, with Team chat, Activity and Terminal one click away', () => {
+    const html = renderToStaticMarkup(createElement(TerminalWorkspace, {
+      onError: () => undefined,
+      onFocusExternal: () => undefined,
+      session: endedSession,
+      sessions: [endedSession],
+      ws: null,
+      wsReady: false,
+    }));
+
+    expect(html).toContain('class="conversation"');
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Conversation</);
+    for (const tab of ['Team chat', 'Activity', 'Terminal']) expect(html).toContain(`>${tab}</button>`);
   });
 });

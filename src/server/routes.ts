@@ -16,6 +16,7 @@ import {
 } from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
+import { ConversationReader } from '../sessions/conversation.js';
 import {
   createRuntimeReadinessSource,
   publicRuntimeReadinessReport,
@@ -222,6 +223,8 @@ export interface RouteContext {
   workEngine?: WorkEngine;
   /** Ticket 11: feeds requestTrust's deviceLookup, so a collaborator device's request resolves to its Principal and grants. Undefined only in tests that don't exercise collaborators. */
   collaborators?: CollaboratorService;
+  /** Reads each session's agent transcript for the Conversation view. Injectable so tests use fixture roots. */
+  conversations?: ConversationReader;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -826,6 +829,18 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // compacted scrollback.txt is the natural fit. History is managed-only
   // per the spec's non-goals (external sessions have no PTY, so no stored
   // bytes to read).
+  // Conversation view: the agent's own transcript, rendered as chat. Local
+  // only — tool calls carry this Mac's paths and commands, which neither a
+  // collaborator grant nor the shared remote token covers.
+  const conversations = ctx.conversations ?? new ConversationReader();
+  app.get('/api/sessions/:id/conversation', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    return conversations.read(session);
+  });
+
   app.get('/api/sessions/:id/scrollback', async (req, reply) => {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
