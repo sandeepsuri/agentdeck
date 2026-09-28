@@ -108,6 +108,18 @@ describe('AdminSidebar', () => {
     expect(html).toContain('aria-pressed="true"');
   });
 
+  it('outlines the active repository and shows the working wave only while agents work without waiting', () => {
+    const host = mount({
+      activeRepositoryId: 'repo-agentdeck',
+      repositoryActivity: new Map([['repo-agentdeck', { active: 2, waiting: 0 }], ['repo-website', { active: 1, waiting: 1 }]]),
+    });
+    const [agentdeck, website] = [...host.querySelectorAll('.sidebar-repo-row')];
+    expect(agentdeck!.classList.contains('is-active')).toBe(true);
+    expect(agentdeck!.querySelector('.sidebar-repo-activity')).not.toBeNull();
+    expect(website!.classList.contains('is-active')).toBe(false);
+    expect(website!.querySelector('.sidebar-repo-activity')).toBeNull();
+  });
+
   it('nests non-archived chats under repositories with work in flight, marking status and selection', () => {
     const html = render({
       repositoryActivity: new Map([['repo-agentdeck', { active: 2, waiting: 1 }]]),

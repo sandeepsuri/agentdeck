@@ -23,10 +23,19 @@ export interface ConversationTurn {
   ts: string;
 }
 
+export interface PlanStep {
+  label: string;
+  /** Claude's present-tense phrasing of the step ("Running tests"), shown while it is in progress. */
+  activeForm?: string;
+  status: 'completed' | 'in_progress' | 'pending';
+}
+
 export interface ConversationView {
   /** False until the agent has written a transcript for this session. */
   found: boolean;
   turns: ConversationTurn[];
+  /** The agent's latest checklist (Claude's TodoWrite, Codex's update_plan); absent when it never wrote one. */
+  plan?: PlanStep[];
   /** A multiple-choice question the agent has open in its terminal, waiting for an answer. */
   question?: PendingQuestion & {
     /** Set by the route: false when AgentDeck can't reach the menu (an external session with no hook holding it). */
@@ -168,6 +177,44 @@ export function parseCodexConversation(lines: readonly string[]): ConversationTu
   return turns.slice(-MAX_TURNS);
 }
 
+function planStatus(value: unknown): PlanStep['status'] {
+  return value === 'completed' || value === 'in_progress' ? value : 'pending';
+}
+
+/** The last checklist the agent wrote: Claude's TodoWrite todos or Codex's update_plan steps. */
+export function latestPlan(agent: Session['agent'], lines: readonly string[]): PlanStep[] | undefined {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const record = parse(lines[index]!);
+    if (!record) continue;
+    if (agent === 'claude') {
+      const content = obj(record.message)?.content;
+      if (record.type !== 'assistant' || record.isSidechain === true || !Array.isArray(content)) continue;
+      for (const part of [...content].reverse().map(obj)) {
+        const todos = part?.type === 'tool_use' && part.name === 'TodoWrite' ? obj(part.input)?.todos : undefined;
+        if (!Array.isArray(todos)) continue;
+        return todos.map(obj).flatMap((todo) => {
+          const label = str(todo?.content);
+          if (!label) return [];
+          const activeForm = str(todo!.activeForm);
+          return [{ label, ...(activeForm ? { activeForm } : {}), status: planStatus(todo!.status) }];
+        });
+      }
+    } else {
+      const payload = obj(record.payload);
+      if (record.type !== 'response_item' || payload?.type !== 'function_call' || payload.name !== 'update_plan') continue;
+      let input: unknown;
+      try { input = typeof payload.arguments === 'string' ? JSON.parse(payload.arguments) : undefined; } catch { continue; }
+      const steps = obj(input)?.plan;
+      if (!Array.isArray(steps)) continue;
+      return steps.map(obj).flatMap((step) => {
+        const label = str(step?.step);
+        return label ? [{ label, status: planStatus(step!.status) }] : [];
+      });
+    }
+  }
+  return undefined;
+}
+
 /** Claude Code names a project folder after its cwd with every non-alphanumeric character replaced by '-'. */
 export function claudeProjectDirName(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
@@ -300,7 +347,8 @@ export class ConversationReader {
     const lines = (await fsp.readFile(file, 'utf8')).split('\n');
     const turns = session.agent === 'claude' ? parseClaudeConversation(lines) : parseCodexConversation(lines);
     const question = pendingQuestion(session.agent, lines);
-    const view: ConversationView = { found: true, turns, ...(question ? { question } : {}) };
+    const plan = latestPlan(session.agent, lines);
+    const view: ConversationView = { found: true, turns, ...(plan?.length ? { plan } : {}), ...(question ? { question } : {}) };
     this.parsed.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, view });
     return view;
   }

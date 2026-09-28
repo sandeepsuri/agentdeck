@@ -109,16 +109,18 @@ export function AdminSidebar({
             const chats = chatsByRepository.get(repo.id) ?? [];
             const open = expanded.has(repo.id);
             const hidden = chats.length - CHATS_PER_REPOSITORY;
+            const working = Boolean(activity && activity.active > 0 && activity.waiting === 0);
             return (
               <div className="sidebar-repo" key={repo.id}>
-                <div className="sidebar-repo-row">
+                <div className={`sidebar-repo-row${active ? ' is-active' : ''}`}>
                   <button aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${repo.name}`} className={`sidebar-repo-toggle${open ? ' is-open' : ''}`} onClick={() => toggleRepository(repo.id)} type="button">
                     <span aria-hidden="true">›</span>
                   </button>
                   <button aria-pressed={active} className={active ? 'is-active' : ''} onClick={() => onSelectRepository(repo.id)} title={`Show work in ${repo.name}`} type="button">
                     <span className="sidebar-repo-name">{repo.name}</span>
+                    {working && <span aria-hidden="true" className="sidebar-repo-activity"><i /><i /><i /></span>}
                     {activity && activity.active > 0 && (
-                      <small aria-label={`${activity.active} active${activity.waiting > 0 ? `, ${activity.waiting} waiting` : ''}`} className={activity.waiting > 0 ? 'is-attention' : ''}>
+                      <small aria-label={`${activity.active} active${activity.waiting > 0 ? `, ${activity.waiting} waiting` : ''}`} className={activity.waiting > 0 ? 'is-attention' : 'is-working'}>
                         <i aria-hidden="true" />{activity.active}
                       </small>
                     )}

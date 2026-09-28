@@ -23,14 +23,17 @@ interface Props {
   onBack?: () => void;
   /** The tab a newly selected session opens on. */
   initialView?: SessionView;
+  /** A tab another surface (the inspector) asked for; each new nonce switches to it once. */
+  requestedView?: { view: SessionView; nonce: number };
 }
 
 export type SessionView = 'conversation' | 'chat' | 'terminal' | 'activity';
 
-export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect, events = [], onBack, initialView = 'conversation' }: Props) {
+export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onFocusExternal, onSelect, events = [], onBack, initialView = 'conversation', requestedView }: Props) {
   const [view, setView] = useState<SessionView>(initialView);
   const [mountedIds, setMountedIds] = useState<string[]>([]);
   useEffect(() => { setView(initialView); }, [session?.id, initialView]);
+  useEffect(() => { if (requestedView) setView(requestedView.view); }, [requestedView]);
 
   const selectableId = view === 'terminal' && session && session.origin === 'managed' && wsReady && ws ? session.id : null;
   useEffect(() => {
