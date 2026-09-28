@@ -8,6 +8,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CollaboratorService } from '../collaborators/service.js';
 import { defaultConfig } from '../config.js';
+import { OwnerPairingService } from '../owner-pairing/service.js';
 import { PersonalTaskService } from '../personal-tasks/service.js';
 import type { FilingProvider } from '../personal-tasks/confined-provider.js';
 import { isFilingProposal, type FolderGrantView, type PersonalTaskView } from '../personal-tasks/types.js';
@@ -28,6 +29,7 @@ let folder: string;
 let dbFile: string;
 let store: Store;
 let collaborators: CollaboratorService;
+let ownerPairing: OwnerPairingService;
 let service: PersonalTaskService;
 let app: FastifyInstance;
 let picked: string | undefined;
@@ -41,6 +43,7 @@ function write(file: string, content = PDF): void {
 function boot(): void {
   store = new Store(dbFile);
   collaborators = new CollaboratorService(store);
+  ownerPairing = new OwnerPairingService(store.ownerDevices);
   service = new PersonalTaskService({ repository: store.personal, homeDir: home, ...(filingProvider ? { filingProvider } : {}) });
   service.recover();
   app = buildApp({
@@ -48,6 +51,7 @@ function boot(): void {
     manager: {} as RouteContext['manager'],
     remoteHosts: [REMOTE_HOST],
     collaborators,
+    ownerPairing,
     store,
     personalTasks: { service, pickFolder: async () => picked },
   });
@@ -323,5 +327,85 @@ describe('everyone else', () => {
     await service.whenIdle();
     expect(service.list()).toHaveLength(1);
     expect(service.get(id)!.grant.revoked).toBe(false);
+  });
+});
+
+/** Pairs an owner phone the way the QR flow does and returns its bearer credential. */
+function pairPhone(label = 'Sam’s iPhone'): { credential: string; deviceId: string } {
+  const challenge = ownerPairing.create();
+  const { nonce, code } = ownerPairing.join(challenge.id, challenge.secret, label);
+  ownerPairing.confirmOwner(challenge.id, code);
+  ownerPairing.confirmPhone(challenge.id, nonce, code);
+  return ownerPairing.collect(challenge.id, nonce)!;
+}
+
+describe('a paired owner phone (issue #87)', () => {
+  const phone = (credential: string) => ({ host: `${REMOTE_HOST}:4040`, [TOKEN_HEADER]: credential });
+
+  it('submits and follows a proposal, approves it, and reads the same result after a restart', async () => {
+    await shutdown();
+    filingProvider = scriptedFilingProvider({ script: fileJanuary });
+    boot();
+    const grant = await pickGrant();
+    const { credential, deviceId } = pairPhone();
+    const headers = phone(credential);
+
+    const grants = (await app.inject({ method: 'GET', url: '/api/personal/grants', headers })).json() as FolderGrantView[];
+    expect(grants.map((entry) => entry.id)).toEqual([grant.id]);
+    const listing = await app.inject({ method: 'GET', url: `/api/personal/grants/${grant.id}/pdfs`, headers });
+    expect(listing.statusCode).toBe(200);
+
+    const created = await app.inject({
+      method: 'POST', url: '/api/personal/tasks', headers, payload: { kind: 'pdf-filing-proposal', grantId: grant.id, files: ['january.pdf'] },
+    });
+    expect(created.statusCode).toBe(201);
+    const { id } = created.json() as PersonalTaskView;
+    await service.whenIdle();
+    const proposed = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${id}`, headers })).json() as PersonalTaskView;
+    expect(proposed.submittedBy).toEqual({ displayName: expect.any(String), device: 'Sam’s iPhone' });
+    if (!proposed.result || !isFilingProposal(proposed.result)) throw new Error(`no proposal: ${proposed.failure}`);
+
+    const approved = await app.inject({
+      method: 'POST', url: `/api/personal/tasks/${id}/filing/approve`, headers, payload: { planDigest: proposed.result.planDigest },
+    });
+    expect(approved.statusCode).toBe(200);
+    await service.whenIdle();
+    expect(fs.existsSync(path.join(folder, 'Bills', 'January.pdf'))).toBe(true);
+
+    const done = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${id}`, headers })).json() as PersonalTaskView;
+    expect(done.filing).toMatchObject({ state: 'finished', approvedBy: { device: 'Sam’s iPhone' }, receipts: [{ state: 'moved' }] });
+    expect(JSON.stringify(done)).not.toContain(base);
+    expect(JSON.stringify(done)).not.toContain(deviceId);
+    expect(ownerPairing.listAudit(deviceId).map((entry) => [entry.action, entry.targetId]).sort()).toEqual([
+      ['filing-approve', id], ['personal-task-submit', id],
+    ]);
+
+    await shutdown();
+    boot();
+    const reopened = (await app.inject({ method: 'GET', url: `/api/personal/tasks/${id}`, headers })).json() as PersonalTaskView;
+    expect(reopened).toEqual(done);
+  });
+
+  it('leaves choosing and revoking folders to the Mac', async () => {
+    const grant = await pickGrant();
+    const headers = phone(pairPhone().credential);
+    expect((await app.inject({ method: 'POST', url: '/api/personal/grants/pick', headers })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'POST', url: `/api/personal/grants/${grant.id}/revoke`, headers })).statusCode).toBe(403);
+    expect(service.getGrant(grant.id)?.revokedAt).toBeUndefined();
+  });
+
+  it('gains no other local-only route, and a revoked phone is refused at once', async () => {
+    const grant = await pickGrant();
+    const { credential, deviceId } = pairPhone();
+    const headers = phone(credential);
+    for (const url of ['/api/settings', '/api/owner-devices', '/api/repos', '/api/runs', '/api/usage/summary']) {
+      expect((await app.inject({ method: 'GET', url, headers })).statusCode, url).toBe(403);
+    }
+    expect(ownerPairing.revoke(deviceId)).toBe(true);
+    expect((await app.inject({ method: 'GET', url: '/api/personal/tasks', headers })).statusCode).toBe(403);
+    expect((await app.inject({
+      method: 'POST', url: '/api/personal/tasks', headers, payload: { kind: 'pdf-inventory', grantId: grant.id, files: ['january.pdf'] },
+    })).statusCode).toBe(403);
+    expect(service.list()).toHaveLength(0);
   });
 });

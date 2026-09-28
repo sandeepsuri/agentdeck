@@ -53,21 +53,18 @@ struct PairLink {
 
 private struct JoinResult: Decodable { let nonce: String; let code: String }
 private struct CollectResult: Decodable { let pending: Bool?; let credential: String? }
-private struct Connection: Decodable { let kind: String; let capabilities: [String] }
-private struct Session: Decodable, Identifiable { let id: String; let name: String?; let status: String }
 
 @MainActor private final class PhoneModel: ObservableObject {
-    @Published var saved = PhoneKeychain.load() != nil
-    @Published var connected = false
+    /** Present while this phone holds a credential; it follows the Mac's tasks (issue #87). */
+    @Published var companion: CompanionModel?
     @Published var scanning = false
     @Published var code: String?
-    @Published var sessions: [Session] = []
     @Published var error: String?
     @Published var waiting = false
     private var pair: PairLink?
     private var nonce: String?
 
-    init() { Task { await reconnect() } }
+    init() { reconnect() }
 
     private func request<T: Decodable>(_ base: URL, _ path: String, body: [String: String]? = nil, credential: String? = nil) async throws -> T {
         var req = URLRequest(url: base.appending(path: path))
@@ -85,21 +82,14 @@ private struct Session: Decodable, Identifiable { let id: String; let name: Stri
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    func reconnect() async {
-        guard let phone = PhoneKeychain.load() else { saved = false; connected = false; return }
-        do {
-            let connection: Connection = try await request(phone.base, "api/connection", credential: phone.credential)
-            guard connection.kind == "remote", !connection.capabilities.isEmpty else {
-                PhoneKeychain.remove(); saved = false; connected = false
-                error = "This phone was revoked. Pair it again on the Mac."
-                return
-            }
-            sessions = try await request(phone.base, "api/sessions", credential: phone.credential)
-            saved = true; connected = true; error = nil
-        } catch {
-            connected = false
-            self.error = "Mac unavailable. The saved credential will be retried."
+    func reconnect() {
+        guard let phone = PhoneKeychain.load() else { companion = nil; return }
+        companion = CompanionModel(client: CompanionClient(base: phone.base, credential: phone.credential)) { [weak self] in
+            PhoneKeychain.remove()
+            self?.companion = nil
+            self?.error = "This phone was revoked on the Mac. Pair it again to continue."
         }
+        error = nil
     }
 
     func scan(_ text: String) {
@@ -128,7 +118,7 @@ private struct Session: Decodable, Identifiable { let id: String; let name: Stri
                 if let credential = result.credential {
                     try PhoneKeychain.save(SavedPhone(base: pair.base, credential: credential))
                     self.pair = nil; self.nonce = nil; self.code = nil; waiting = false
-                    await reconnect()
+                    reconnect()
                     return
                 }
                 try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -137,7 +127,7 @@ private struct Session: Decodable, Identifiable { let id: String; let name: Stri
         } catch { waiting = false; self.error = error.localizedDescription }
     }
 
-    func forget() { PhoneKeychain.remove(); saved = false; connected = false; sessions = [] }
+    func forget() { companion?.stop(); PhoneKeychain.remove(); companion = nil }
 }
 
 private struct QRScanner: UIViewControllerRepresentable {
@@ -178,30 +168,32 @@ private struct QRScanner: UIViewControllerRepresentable {
     @StateObject private var model = PhoneModel()
     var body: some Scene {
         WindowGroup {
-            NavigationStack {
-                VStack(spacing: 16) {
-                    if model.connected {
-                        Text("Connected to your Mac").font(.headline)
-                        Button("Refresh") { Task { await model.reconnect() } }
-                        List(model.sessions) { session in
-                            VStack(alignment: .leading) { Text(session.name ?? session.id); Text(session.status).font(.caption) }
+            if let companion = model.companion {
+                CompanionView(model: companion, onForget: model.forget)
+            } else {
+                NavigationStack {
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            if let code = model.code {
+                                Text("Compare this code with the Mac").font(.headline)
+                                Text(code).font(.largeTitle.monospacedDigit())
+                                    .accessibilityLabel(code.map(String.init).joined(separator: " "))
+                                Button("Same code on both devices — confirm here") { Task { await model.confirm() } }
+                                    .buttonStyle(.borderedProminent).disabled(model.waiting)
+                                if model.waiting { ProgressView("Waiting for Mac confirmation…") }
+                            } else {
+                                Text("Pair this phone").font(.headline)
+                                Text("On your Mac, open AgentDeck › Settings › Owner phones › Pair a phone, then scan the code it shows.")
+                                    .multilineTextAlignment(.center)
+                                Button("Scan pairing QR on Mac") { model.scanning = true }.buttonStyle(.borderedProminent)
+                            }
+                            if let error = model.error { Text(error).foregroundStyle(.red).multilineTextAlignment(.center) }
                         }
-                        Button("Forget this phone") { model.forget() }
-                    } else if let code = model.code {
-                        Text("Compare this code with the Mac").font(.headline)
-                        Text(code).font(.largeTitle.monospacedDigit())
-                        Button("Same code on both devices — confirm here") { Task { await model.confirm() } }.disabled(model.waiting)
-                        if model.waiting { ProgressView("Waiting for Mac confirmation…") }
-                    } else {
-                        Text(model.saved ? "Mac unavailable" : "Pair this phone").font(.headline)
-                        if model.saved { Button("Reconnect") { Task { await model.reconnect() } } }
-                        Button("Scan pairing QR on Mac") { model.scanning = true }
+                        .padding()
                     }
-                    if let error = model.error { Text(error).foregroundStyle(.red) }
+                    .navigationTitle("AgentDeck Phone")
+                    .sheet(isPresented: $model.scanning) { QRScanner(onCode: model.scan).ignoresSafeArea() }
                 }
-                .padding()
-                .navigationTitle("AgentDeck Phone")
-                .sheet(isPresented: $model.scanning) { QRScanner(onCode: model.scan).ignoresSafeArea() }
                 .onOpenURL { model.scan($0.absoluteString) }
             }
         }

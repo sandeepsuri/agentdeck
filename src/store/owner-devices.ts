@@ -10,7 +10,9 @@ export interface OwnerDevice {
 export interface OwnerDeviceAudit {
   id: string;
   deviceId: string;
-  action: 'session-send' | 'session-input';
+  action: 'session-send' | 'session-input'
+    // Issue #87: personal-task requests and decisions made from the phone.
+    | 'personal-task-submit' | 'personal-task-retry' | 'filing-approve' | 'filing-retry' | 'filing-undo';
   targetId: string;
   createdAt: string;
 }

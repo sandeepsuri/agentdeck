@@ -53,4 +53,21 @@ describe('OwnerPhonesPanel phone access', () => {
     await act(async () => { button('Pair a phone')!.click(); });
     expect(container!.querySelector('[role="alert"]')?.textContent).toBe('A Tailscale MagicDNS name is required to pair a phone.');
   });
+
+  it('names what a phone asked for in its activity, including personal-task decisions', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/owner-devices') return json([{ id: 'phone-1', label: 'Phone', createdAt: '2026-09-28T10:00:00.000Z' }]);
+      if (url === '/api/owner-pairing/availability') return json({ state: 'ready', canToggle: false, phoneAccess: true });
+      if (url === '/api/owner-devices/phone-1/audit') return json([
+        { id: 'a2', deviceId: 'phone-1', action: 'filing-approve', targetId: 'task-1', createdAt: '2026-09-28T10:02:00.000Z' },
+        { id: 'a1', deviceId: 'phone-1', action: 'personal-task-submit', targetId: 'task-1', createdAt: '2026-09-28T10:01:00.000Z' },
+      ]);
+      return json({ error: 'unexpected' }, 500);
+    }));
+    await render();
+    await act(async () => { button('View activity')!.click(); });
+    const rows = [...container!.querySelectorAll('li')].map((row) => row.textContent);
+    expect(rows[0]).toContain('Approved filing plan for task task-1');
+    expect(rows[1]).toContain('Asked for personal task task-1');
+  });
 });

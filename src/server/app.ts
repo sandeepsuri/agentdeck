@@ -17,7 +17,7 @@ import { registerRoutes, type RouteContext } from './routes.js';
 import { registerCollaboratorRoutes } from './collaborator-routes.js';
 import { registerProfileRoutes } from './profile-routes.js';
 import { registerUsageRoutes, type UsageRouteContext } from './usage-routes.js';
-import { localOwnerActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
+import { localOwnerActor, ownerPhoneActor, registerPersonalTaskRoutes, type PersonalTaskRouteDeps } from './personal-task-routes.js';
 import { registerProviderSetupRoutes } from './provider-setup-routes.js';
 import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
@@ -130,6 +130,26 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
     if (pathname === '/api/runs') return true; // submit — policy-checked inside DurableWorkEngine.submit()
     if (/^\/api\/runs\/[^/]+\/(prepare|start|cancel)$/.test(pathname)) return true;
     if (/^\/api\/runs\/[^/]+\/attention\/[^/]+\/(approve|deny|input)$/.test(pathname)) return true;
+  }
+  return false;
+}
+
+/**
+ * Issue #87: a paired owner phone (never a collaborator device or the shared
+ * token) may also follow and decide the owner's personal tasks: read grants,
+ * their PDFs, and tasks; submit a task; approve, retry, or undo filing.
+ * Choosing or revoking a folder stays on the Mac. Each handler re-checks the
+ * owner (personal-task-routes.ts's resolveOwner).
+ */
+function isOwnerDeviceAllowedRoute(method: string, pathname: string): boolean {
+  if (isRemoteAllowedRoute(method, pathname)) return true;
+  if (method === 'GET') {
+    return pathname === '/api/personal/grants' || pathname === '/api/personal/tasks'
+      || /^\/api\/personal\/grants\/[^/]+\/pdfs$/.test(pathname) || /^\/api\/personal\/tasks\/[^/]+$/.test(pathname);
+  }
+  if (method === 'POST') {
+    return pathname === '/api/personal/tasks'
+      || /^\/api\/personal\/tasks\/[^/]+\/(retry|filing\/(approve|retry|undo))$/.test(pathname);
   }
   return false;
 }
@@ -253,7 +273,9 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     // device that isn't hitting one of those paths is refused, full stop.
     const remoteAllowed = trust.device
       ? isCollaboratorAllowedRoute(req.method, pathname)
-      : isRemoteAllowedRoute(req.method, pathname);
+      : trust.ownerDevice
+        ? isOwnerDeviceAllowedRoute(req.method, pathname)
+        : isRemoteAllowedRoute(req.method, pathname);
     if (requiresRemoteToken && trust.kind === 'remote' && !remoteAllowed) {
       return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
     }
@@ -301,15 +323,23 @@ export function buildApp(ctx: AppContext): FastifyInstance {
 
   if (ctx.usage) registerUsageRoutes(app, ctx.usage);
 
-  // Issue #80: the owner is whoever sits at this Mac. Neither a collaborator
-  // device nor the legacy shared tailnet token resolves to the owner here.
-  const isLocalOwner = (req: FastifyRequest) => classify(
+  // Issue #80: the owner is whoever sits at this Mac. Issue #87 adds a paired
+  // owner phone, acting as the same owner Principal from its own device.
+  // Neither a collaborator device nor the legacy shared tailnet token
+  // resolves to the owner here.
+  const requestTrust = (req: FastifyRequest) => classify(
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice },
-  ).kind === 'local';
+    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
+  );
+  const isLocalOwner = (req: FastifyRequest) => requestTrust(req).kind === 'local';
   if (ctx.personalTasks) registerPersonalTaskRoutes(app, {
     ...ctx.personalTasks,
-    resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined),
+    resolveOwner: (req) => {
+      const trust = requestTrust(req);
+      if (trust.kind === 'local') return localOwnerActor();
+      return trust.ownerDevice ? ownerPhoneActor(trust.ownerDevice) : undefined;
+    },
+    ...(ctx.ownerPairing ? { audit: ctx.ownerPairing.audit.bind(ctx.ownerPairing) } : {}),
   });
   if (ctx.providerSetup) registerProviderSetupRoutes(app, { service: ctx.providerSetup, isOwner: isLocalOwner });
 

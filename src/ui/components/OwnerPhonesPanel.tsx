@@ -2,7 +2,17 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiFetch, responseJson } from '../apiFetch.js';
 
 interface OwnerDevice { id: string; label: string; createdAt: string; revokedAt?: string }
-interface AuditEntry { id: string; action: 'session-send' | 'session-input'; targetId: string; createdAt: string }
+interface AuditEntry { id: string; action: keyof typeof AUDIT_LABEL; targetId: string; createdAt: string }
+
+const AUDIT_LABEL = {
+  'session-send': 'Send requested for session',
+  'session-input': 'Control key requested for session',
+  'personal-task-submit': 'Asked for personal task',
+  'personal-task-retry': 'Retried personal task',
+  'filing-approve': 'Approved filing plan for task',
+  'filing-retry': 'Retried unmoved files for task',
+  'filing-undo': 'Undid recorded moves for task',
+} as const;
 interface Challenge { id: string; expiresAt: string; qr: string }
 interface Availability { state: 'ready' | 'off' | 'no-tailscale'; canToggle: boolean; phoneAccess: boolean }
 interface Status { state: 'waiting' | 'compare' | 'confirmed'; code?: string; label?: string; expiresAt: string; ownerConfirmed: boolean; deviceId?: string }
@@ -117,7 +127,7 @@ export function OwnerPhonesPanel() {
       {device.revokedAt ? <span> · Revoked</span> : <button className="button" onClick={() => void revoke(device)} type="button">Revoke</button>}
       <button className="button" onClick={() => void showAudit(device)} type="button">View activity</button>
       {audit[device.id] && <ul>{(audit[device.id] ?? []).map((entry) => <li key={entry.id}>
-        {entry.action === 'session-send' ? 'Send requested for' : 'Control key requested for'} session {entry.targetId} · {new Date(entry.createdAt).toLocaleString()}
+        {AUDIT_LABEL[entry.action] ?? entry.action} {entry.targetId} · {new Date(entry.createdAt).toLocaleString()}
       </li>)}</ul>}
     </div>)}
     <p>Lost a phone? Revoke it here, then pair a replacement.</p>

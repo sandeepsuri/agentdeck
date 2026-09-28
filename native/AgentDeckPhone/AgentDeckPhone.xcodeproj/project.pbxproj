@@ -1,38 +1,319 @@
 // !$*UTF8*$!
 {
- archiveVersion = 1;
- classes = {};
- objectVersion = 56;
- objects = {
-  A00000000000000000000001 = {isa = PBXBuildFile; fileRef = A00000000000000000000002; };
-  A00000000000000000000018 = {isa = PBXBuildFile; fileRef = A00000000000000000000019; };
-  A00000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDeckPhoneApp.swift; sourceTree = "<group>"; };
-  A00000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.application; path = AgentDeckPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
-  A00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-  A00000000000000000000019 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingTests.swift; sourceTree = "<group>"; };
-  A00000000000000000000020 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = AgentDeckPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-  A00000000000000000000005 = {isa = PBXGroup; children = (A00000000000000000000006, A00000000000000000000021, A00000000000000000000007,); sourceTree = "<group>"; };
-  A00000000000000000000006 = {isa = PBXGroup; children = (A00000000000000000000002, A00000000000000000000004,); path = AgentDeckPhone; sourceTree = "<group>"; };
-  A00000000000000000000021 = {isa = PBXGroup; children = (A00000000000000000000019,); path = AgentDeckPhoneTests; sourceTree = "<group>"; };
-  A00000000000000000000007 = {isa = PBXGroup; children = (A00000000000000000000003, A00000000000000000000020,); name = Products; sourceTree = "<group>"; };
-  A00000000000000000000008 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000009; buildPhases = (A00000000000000000000010, A00000000000000000000011,); buildRules = (); dependencies = (); name = AgentDeckPhone; productName = AgentDeckPhone; productReference = A00000000000000000000003; productType = "com.apple.product-type.application"; };
-  A00000000000000000000009 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000012, A00000000000000000000013,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-  A00000000000000000000010 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000001,); runOnlyForDeploymentPostprocessing = 0; };
-  A00000000000000000000011 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-  A00000000000000000000022 = {isa = PBXNativeTarget; buildConfigurationList = A00000000000000000000023; buildPhases = (A00000000000000000000024, A00000000000000000000025,); buildRules = (); dependencies = (A00000000000000000000026,); name = AgentDeckPhoneTests; productName = AgentDeckPhoneTests; productReference = A00000000000000000000020; productType = "com.apple.product-type.bundle.unit-test"; };
-  A00000000000000000000023 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000028, A00000000000000000000029,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-  A00000000000000000000024 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A00000000000000000000018,); runOnlyForDeploymentPostprocessing = 0; };
-  A00000000000000000000025 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-  A00000000000000000000026 = {isa = PBXTargetDependency; target = A00000000000000000000008; targetProxy = A00000000000000000000027; };
-  A00000000000000000000027 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000014; proxyType = 1; remoteGlobalIDString = A00000000000000000000008; remoteInfo = AgentDeckPhone; };
-  A00000000000000000000014 = {isa = PBXProject; attributes = { LastUpgradeCheck = 1500; TargetAttributes = { A00000000000000000000008 = { CreatedOnToolsVersion = 15.0; }; A00000000000000000000022 = { CreatedOnToolsVersion = 15.0; TestTargetID = A00000000000000000000008; }; }; }; buildConfigurationList = A00000000000000000000015; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base,); mainGroup = A00000000000000000000005; productRefGroup = A00000000000000000000007; projectDirPath = ""; projectRoot = ""; targets = (A00000000000000000000008, A00000000000000000000022,); };
-  A00000000000000000000012 = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgentDeckPhone/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Debug; };
-  A00000000000000000000013 = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgentDeckPhone/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; MARKETING_VERSION = 0.1.0; PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
-  A00000000000000000000015 = {isa = XCConfigurationList; buildConfigurations = (A00000000000000000000016, A00000000000000000000017,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-  A00000000000000000000016 = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 5.0; }; name = Debug; };
-  A00000000000000000000017 = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 5.0; }; name = Release; };
-  A00000000000000000000028 = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentDeckPhone.app/AgentDeckPhone"; }; name = Debug; };
-  A00000000000000000000029 = {isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGNING_ALLOWED = NO; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 16.0; PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentDeckPhone.app/AgentDeckPhone"; }; name = Release; };
- };
- rootObject = A00000000000000000000014;
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A00000000000000000000001 /* AgentDeckPhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* AgentDeckPhoneApp.swift */; };
+		A00000000000000000000030 /* CompanionAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000031 /* CompanionAPI.swift */; };
+		A00000000000000000000032 /* CompanionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000033 /* CompanionModel.swift */; };
+		A00000000000000000000034 /* CompanionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000035 /* CompanionViews.swift */; };
+		A00000000000000000000036 /* CompanionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000037 /* CompanionTests.swift */; };
+		A00000000000000000000018 /* PairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* PairingTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A00000000000000000000027 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000014 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A00000000000000000000008;
+			remoteInfo = AgentDeckPhone;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A00000000000000000000002 /* AgentDeckPhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDeckPhoneApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000003 /* AgentDeckPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = AgentDeckPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000031 /* CompanionAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionAPI.swift; sourceTree = "<group>"; };
+		A00000000000000000000033 /* CompanionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionModel.swift; sourceTree = "<group>"; };
+		A00000000000000000000035 /* CompanionViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionViews.swift; sourceTree = "<group>"; };
+		A00000000000000000000037 /* CompanionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000019 /* PairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000020 /* AgentDeckPhoneTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = AgentDeckPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A00000000000000000000011 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A00000000000000000000025 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000005 = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000006 /* AgentDeckPhone */,
+				A00000000000000000000021 /* AgentDeckPhoneTests */,
+				A00000000000000000000007 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A00000000000000000000006 /* AgentDeckPhone */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000002 /* AgentDeckPhoneApp.swift */,
+				A00000000000000000000031 /* CompanionAPI.swift */,
+				A00000000000000000000033 /* CompanionModel.swift */,
+				A00000000000000000000035 /* CompanionViews.swift */,
+				A00000000000000000000004 /* Info.plist */,
+			);
+			path = AgentDeckPhone;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000007 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000003 /* AgentDeckPhone.app */,
+				A00000000000000000000020 /* AgentDeckPhoneTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A00000000000000000000021 /* AgentDeckPhoneTests */ = {
+			isa = PBXGroup;
+			children = (
+				A00000000000000000000019 /* PairingTests.swift */,
+				A00000000000000000000037 /* CompanionTests.swift */,
+			);
+			path = AgentDeckPhoneTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A00000000000000000000008 /* AgentDeckPhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000009 /* Build configuration list for PBXNativeTarget "AgentDeckPhone" */;
+			buildPhases = (
+				A00000000000000000000010 /* Sources */,
+				A00000000000000000000011 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AgentDeckPhone;
+			productName = AgentDeckPhone;
+			productReference = A00000000000000000000003 /* AgentDeckPhone.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A00000000000000000000022 /* AgentDeckPhoneTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A00000000000000000000023 /* Build configuration list for PBXNativeTarget "AgentDeckPhoneTests" */;
+			buildPhases = (
+				A00000000000000000000024 /* Sources */,
+				A00000000000000000000025 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A00000000000000000000026 /* PBXTargetDependency */,
+			);
+			name = AgentDeckPhoneTests;
+			productName = AgentDeckPhoneTests;
+			productReference = A00000000000000000000020 /* AgentDeckPhoneTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A00000000000000000000014 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					A00000000000000000000008 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					A00000000000000000000022 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = A00000000000000000000008;
+					};
+				};
+			};
+			buildConfigurationList = A00000000000000000000015 /* Build configuration list for PBXProject "AgentDeckPhone" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A00000000000000000000005;
+			productRefGroup = A00000000000000000000007 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A00000000000000000000008 /* AgentDeckPhone */,
+				A00000000000000000000022 /* AgentDeckPhoneTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A00000000000000000000010 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000001 /* AgentDeckPhoneApp.swift in Sources */,
+				A00000000000000000000030 /* CompanionAPI.swift in Sources */,
+				A00000000000000000000032 /* CompanionModel.swift in Sources */,
+				A00000000000000000000034 /* CompanionViews.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A00000000000000000000024 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000018 /* PairingTests.swift in Sources */,
+				A00000000000000000000036 /* CompanionTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A00000000000000000000026 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A00000000000000000000008 /* AgentDeckPhone */;
+			targetProxy = A00000000000000000000027 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A00000000000000000000012 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentDeckPhone/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A00000000000000000000013 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentDeckPhone/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A00000000000000000000016 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A00000000000000000000017 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A00000000000000000000028 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentDeckPhone.app/AgentDeckPhone";
+			};
+			name = Debug;
+		};
+		A00000000000000000000029 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.agentdeck.phone.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AgentDeckPhone.app/AgentDeckPhone";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A00000000000000000000009 /* Build configuration list for PBXNativeTarget "AgentDeckPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000012 /* Debug */,
+				A00000000000000000000013 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000000000000000000015 /* Build configuration list for PBXProject "AgentDeckPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000016 /* Debug */,
+				A00000000000000000000017 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A00000000000000000000023 /* Build configuration list for PBXNativeTarget "AgentDeckPhoneTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A00000000000000000000028 /* Debug */,
+				A00000000000000000000029 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A00000000000000000000014 /* Project object */;
 }
