@@ -598,13 +598,27 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .sidebar-start-work { width: 100%; min-height: 36px; margin: 0 0 16px; justify-content: flex-start; padding-inline: 12px; }
 .sidebar-start-work strong { font-weight: 600; }
 .admin-navigation button small.is-attention, .sidebar-repositories button small.is-attention { background: var(--status-waiting-bg); color: var(--status-waiting); font-weight: 600; }
-.sidebar-repositories { min-height: 0; margin-top: 22px; overflow-y: auto; }
-.sidebar-repositories button { width: 100%; min-height: 32px; display: flex; align-items: center; gap: 8px; margin: 1px 0; padding: 6px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font-size: 12.5px; text-align: left; cursor: pointer; }
-.sidebar-repositories button:hover { background: var(--surface-hover); color: var(--text-primary); }
-.sidebar-repositories button.is-active { background: var(--surface-selected); color: var(--text-primary); font-weight: 600; }
+.sidebar-repositories { flex: 1 1 auto; min-height: 0; margin-top: 22px; overflow-y: auto; }
+.sidebar-repo-row { display: flex; align-items: center; gap: 2px; }
+.sidebar-repo-row > button:not(.sidebar-repo-toggle) { flex: 1; min-width: 0; min-height: 32px; display: flex; align-items: center; gap: 8px; margin: 1px 0; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font-size: 12.5px; text-align: left; cursor: pointer; }
+.sidebar-repo-row > button:not(.sidebar-repo-toggle):hover { background: var(--surface-hover); color: var(--text-primary); }
+.sidebar-repo-row > button.is-active { background: var(--surface-selected); color: var(--text-primary); font-weight: 600; }
 .sidebar-repo-name { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .sidebar-repositories button small { display: inline-flex; align-items: center; gap: 5px; padding: 1px 6px; border-radius: 999px; color: var(--status-working); font-size: 10.5px; }
 .sidebar-repositories button small i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.sidebar-repo-toggle { width: 20px; height: 24px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
+.sidebar-repo-toggle:hover { background: var(--surface-hover); color: var(--text-primary); }
+.sidebar-repo-toggle span { display: block; font-size: 14px; line-height: 1; transition: transform 120ms ease; }
+.sidebar-repo-toggle.is-open span { transform: rotate(90deg); }
+.sidebar-chats { margin: 1px 0 6px 10px; padding: 0 0 0 8px; border-left: 1px solid var(--border-muted); list-style: none; }
+.sidebar-chat { width: 100%; min-height: 28px; display: flex; align-items: center; gap: 8px; margin: 1px 0; padding: 5px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); font-size: 12px; text-align: left; cursor: pointer; }
+.sidebar-chat:hover { background: var(--surface-hover); color: var(--text-primary); }
+.sidebar-chat.is-selected { background: var(--surface-selected); color: var(--text-primary); }
+.sidebar-chat-title { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sidebar-chat-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--text-muted); opacity: .35; }
+.sidebar-chat-dot.is-working { background: var(--status-working); opacity: 1; }
+.sidebar-chat-dot.is-waiting { background: var(--status-waiting); opacity: 1; }
+.sidebar-chat-more { color: var(--text-muted); font-size: 11.5px; }
 .topbar-context strong { font-size: 14px; }
 
 .home-view, .work-view { width: 100%; max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EXPANDED_REPOSITORIES_STORAGE_KEY,
   INSPECTOR_COLLAPSED_STORAGE_KEY,
   WORK_LAYOUT_STORAGE_KEY,
+  persistExpandedRepositories,
   persistInspectorCollapsed,
   persistWorkLayout,
+  readExpandedRepositories,
   readInspectorCollapsed,
   readWorkLayout,
 } from './preferences.js';
@@ -67,5 +70,33 @@ describe('work layout preference', () => {
     const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
     expect(readWorkLayout(broken)).toBe('list');
     expect(() => persistWorkLayout(broken, 'grid')).not.toThrow();
+  });
+});
+
+describe('expanded sidebar repositories preference', () => {
+  function repoStorage(initial: string | null = null) {
+    let value = initial;
+    return {
+      getItem: (key: string) => key === EXPANDED_REPOSITORIES_STORAGE_KEY ? value : null,
+      setItem: (key: string, next: string) => { if (key === EXPANDED_REPOSITORIES_STORAGE_KEY) value = next; },
+      value: () => value,
+    };
+  }
+
+  it('is null until chosen and ignores malformed values', () => {
+    expect(readExpandedRepositories(undefined)).toBeNull();
+    expect(readExpandedRepositories(repoStorage())).toBeNull();
+    expect(readExpandedRepositories(repoStorage('not json'))).toBeNull();
+    expect(readExpandedRepositories(repoStorage('[1,2]'))).toBeNull();
+    expect(readExpandedRepositories(repoStorage('[]'))).toEqual([]);
+  });
+
+  it('round-trips the expanded ids and tolerates blocked storage', () => {
+    const storage = repoStorage();
+    persistExpandedRepositories(storage, ['repo-a', 'repo-b']);
+    expect(readExpandedRepositories(storage)).toEqual(['repo-a', 'repo-b']);
+    const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+    expect(readExpandedRepositories(broken)).toBeNull();
+    expect(() => persistExpandedRepositories(broken, ['repo-a'])).not.toThrow();
   });
 });

@@ -823,6 +823,7 @@ export function App() {
           activeRepositoryId={activeRepositoryId}
           activeView={view}
           needsYouCount={needsYou.length}
+          onOpenWorkItem={openWorkItem}
           onSelectRepository={selectRepository}
           onSettings={() => setShowSettings(true)}
           onStartWork={() => openStartWork()}
@@ -830,7 +831,9 @@ export function App() {
           repos={repos}
           repositoryActivity={repositoryActivity}
           reviewCount={reviewCount}
+          selectedWorkItemId={showSettings || view !== 'work' ? null : selectedRunId ? `run:${selectedRunId}` : selectedId ? `session:${selectedId}` : null}
           settingsActive={showSettings}
+          workItems={workItems}
         />
         <div className="admin-shell-content">
       <header className="app-topbar">

@@ -52,3 +52,27 @@ export function persistWorkLayout(storage: PreferenceStorage | undefined, layout
     // Persistence is optional; the current page can still use the chosen layout.
   }
 }
+
+/** Which sidebar repositories are expanded to show their chats; null until the user has chosen. */
+export const EXPANDED_REPOSITORIES_STORAGE_KEY = 'agentdeck.sidebar.expandedRepositories';
+
+export function readExpandedRepositories(storage: PreferenceStorage | undefined): string[] | null {
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(EXPANDED_REPOSITORIES_STORAGE_KEY);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((id) => typeof id === 'string') ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistExpandedRepositories(storage: PreferenceStorage | undefined, repositoryIds: readonly string[]): void {
+  if (!storage) return;
+  try {
+    storage.setItem(EXPANDED_REPOSITORIES_STORAGE_KEY, JSON.stringify(repositoryIds));
+  } catch {
+    // Persistence is optional; the current page can still use the chosen state.
+  }
+}
