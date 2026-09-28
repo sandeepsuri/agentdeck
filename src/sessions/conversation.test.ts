@@ -2,9 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Session } from '../types.js';
+import type { AgentMessage, Session } from '../types.js';
 import {
-  claudeProjectDirName, ConversationReader, locateTranscript, parseClaudeConversation, parseCodexConversation,
+  claudeProjectDirName, ConversationReader, locateTranscript, mergeSentConversationTurns, parseClaudeConversation, parseCodexConversation,
 } from './conversation.js';
 
 const tempDirs: string[] = [];
@@ -122,5 +122,23 @@ describe('ConversationReader', () => {
 
     fs.appendFileSync(file, `\n${jsonl({ type: 'assistant', uuid: 'a', timestamp: '2026-09-27T20:00:04Z', message: { content: [{ type: 'text', text: 'hi!' }] } })}`);
     expect((await reader.read(session())).turns.map((turn) => turn.text)).toEqual(['hello', 'hi!']);
+  });
+});
+
+describe('mergeSentConversationTurns', () => {
+  it('shows a recorded send until the transcript contains it, without duplicating repeated messages', () => {
+    const current = session();
+    const sent: AgentMessage[] = [1, 2].map((second) => ({
+      ts: `2026-09-27T20:00:0${second}.000Z`, agent: `dashboard:${current.id}`, repo: current.cwd,
+      event: 'message' as const, message: 'retry', sessionId: current.id,
+    }));
+    const transcript = { found: true, turns: [{
+      id: 'u1', role: 'user' as const, text: 'retry', ts: '2026-09-27T20:00:01.500Z',
+    }] };
+    expect(mergeSentConversationTurns(transcript, current, sent).turns.map((turn) => turn.text)).toEqual(['retry', 'retry']);
+    expect(mergeSentConversationTurns({ found: false, turns: [] }, current, sent).turns).toHaveLength(2);
+    expect(mergeSentConversationTurns(transcript, current, [
+      { ...sent[0]!, sessionId: 'another-session' },
+    ]).turns).toHaveLength(1);
   });
 });

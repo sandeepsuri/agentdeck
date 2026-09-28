@@ -16,7 +16,7 @@ import {
 } from '../git/publish.js';
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
-import { ConversationReader } from '../sessions/conversation.js';
+import { ConversationReader, mergeSentConversationTurns } from '../sessions/conversation.js';
 import {
   createRuntimeReadinessSource,
   publicRuntimeReadinessReport,
@@ -838,7 +838,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
     if (!session) return reply.code(404).send({ error: 'no such session' });
-    return conversations.read(session);
+    const conversation = await conversations.read(session);
+    const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
+    return mergeSentConversationTurns(conversation, session, await readBusTail(repoPath));
   });
 
   app.get('/api/sessions/:id/scrollback', async (req, reply) => {

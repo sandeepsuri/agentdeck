@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ConversationTurn } from '../../sessions/conversation.js';
 import type { Session } from '../../types.js';
 import { ConversationView, groupTurns } from './ConversationView.js';
+import { TerminalWorkspace } from './TerminalWorkspace.js';
 
 beforeAll(() => { (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true; });
 
@@ -17,6 +18,7 @@ afterEach(() => {
   root = null;
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  window.sessionStorage.clear();
 });
 
 const turn = (id: string, role: ConversationTurn['role'], text: string, toolName?: string): ConversationTurn =>
@@ -43,6 +45,37 @@ describe('groupTurns', () => {
 });
 
 describe('ConversationView', () => {
+  it('keeps a draft and a pending send when switching Work session tabs', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === 'POST' ? json({ delivered: 'typed' }) : json({ found: false, turns: [] })));
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    const selected = session();
+    await act(async () => root!.render(<TerminalWorkspace session={selected} sessions={[selected]} ws={null}
+      wsReady={false} onError={() => {}} onFocusExternal={() => {}} />));
+    const textarea = container.querySelector('textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'draft text');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const tab = (label: string) => [...container!.querySelectorAll('.session-view-tabs button')]
+      .find((button) => button.textContent === label) as HTMLButtonElement;
+    await act(async () => tab('Activity').click());
+    await act(async () => tab('Conversation').click());
+    expect(container.querySelector('textarea')!.value).toBe('draft text');
+    await act(async () => root!.render(<div>Another Work page</div>));
+    await act(async () => root!.render(<TerminalWorkspace session={selected} sessions={[selected]} ws={null}
+      wsReady={false} onError={() => {}} onFocusExternal={() => {}} />));
+    expect(container.querySelector('textarea')!.value).toBe('draft text');
+    await act(async () => container!.querySelector('.conversation-composer')!
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    await flush();
+    await act(async () => tab('Terminal').click());
+    await act(async () => tab('Conversation').click());
+    expect(container.querySelector('.conversation-message.is-pending')?.textContent).toBe('draft text');
+  });
+
   it('shows your messages, the agent reply as rendered markdown, and its tool calls folded', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ found: true, turns: [
       turn('1', 'user', 'Add dark mode'), turn('2', 'tool', 'rg theme', 'shell'), turn('3', 'assistant', 'Done — see `theme.css`.'),

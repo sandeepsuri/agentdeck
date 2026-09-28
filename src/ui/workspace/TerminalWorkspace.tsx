@@ -71,7 +71,9 @@ export function TerminalWorkspace({ session, sessions, ws, wsReady, onError, onF
         <button className="button" aria-pressed={view === 'activity'} onClick={() => setView('activity')} type="button">Activity</button>
         <button className="button" aria-pressed={view === 'terminal'} onClick={() => setView('terminal')} type="button">Terminal</button>
       </div>
-      {view === 'conversation' && <ConversationView key={session.id} onOpenTerminal={() => setView('terminal')} session={session} />}
+      <div className="session-conversation-panel" hidden={view !== 'conversation'}>
+        <ConversationView key={`${session.id}:${session.startedAt}`} onOpenTerminal={() => setView('terminal')} session={session} />
+      </div>
       {view === 'chat' && <SessionChat key={session.id} session={session} onError={onError} />}
       {view === 'activity' && <div className="session-activity-panel"><ActivityTimeline events={events} session={session} /></div>}
       <div className="session-terminal-panel" hidden={view !== 'terminal'}>

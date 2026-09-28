@@ -581,6 +581,8 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .session-interaction input[type="text"] { flex: 1; min-width: 0; }
 .session-terminal-panel { display: flex; flex: 1; min-height: 0; }
 .session-terminal-panel[hidden] { display: none; }
+.session-conversation-panel { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.session-conversation-panel[hidden] { display: none; }
 
 /* Ticket 49: visible keyboard selection and truthful status filters for the new work lists. */
 .palette-results > button.is-selected { background: var(--surface-selected); color: var(--text-primary); }

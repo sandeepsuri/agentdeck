@@ -44,13 +44,23 @@ function ToolGroup({ turns }: { turns: ConversationTurn[] }) {
 }
 
 export function ConversationView({ session, onOpenTerminal }: { session: Session; onOpenTerminal: () => void }) {
+  const draftKey = `agentdeck:conversation-draft:${session.id}:${session.startedAt}`;
   const [body, setBody] = useState<ConversationBody | null>(null);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => {
+    try { return window.sessionStorage.getItem(draftKey) ?? ''; } catch { return ''; }
+  });
   const [pending, setPending] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [following, setFollowing] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      if (draft) window.sessionStorage.setItem(draftKey, draft);
+      else window.sessionStorage.removeItem(draftKey);
+    } catch { /* storage unavailable — keep the draft in memory */ }
+  }, [draft, draftKey]);
 
   const load = useCallback(async () => {
     try {
@@ -117,7 +127,7 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
       <div className="conversation-scroll" onScroll={onScroll} ref={scrollRef}>
         <div className="conversation-column">
           {!body && <p className="conversation-empty">Loading conversation…</p>}
-          {body && !body.found && (
+          {body && !body.found && items.length === 0 && (
             <p className="conversation-empty">
               {agentName} hasn’t written anything for this session yet. Messages appear here as soon as it starts its first reply.
             </p>

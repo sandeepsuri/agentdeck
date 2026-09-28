@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import type { Session } from '../types.js';
+import type { AgentMessage, Session } from '../types.js';
 import { defaultUsageRoots, type UsageRoots } from '../usage/indexer.js';
 
 export interface ConversationTurn {
@@ -26,6 +26,30 @@ export interface ConversationView {
   /** False until the agent has written a transcript for this session. */
   found: boolean;
   turns: ConversationTurn[];
+}
+
+/** Keep dashboard sends visible while the CLI transcript is delayed or absent. */
+export function mergeSentConversationTurns(
+  conversation: ConversationView, session: Session, messages: readonly AgentMessage[],
+): ConversationView {
+  const transcriptUsers = conversation.turns.filter((turn) => turn.role === 'user');
+  const matched = new Set<string>();
+  const sent = messages.flatMap((message, index): ConversationTurn[] => {
+    if (message.agent !== `dashboard:${session.id}` || message.event !== 'message'
+      || message.sessionId !== session.id || !message.message?.trim()
+      || Date.parse(message.ts) < Date.parse(session.startedAt)) return [];
+    const text = message.message.trim();
+    const match = transcriptUsers.find((turn) => !matched.has(turn.id) && turn.text.trim() === text
+      && Date.parse(turn.ts) >= Date.parse(message.ts) - 2_000);
+    if (match) {
+      matched.add(match.id);
+      return [];
+    }
+    return [{ id: `dashboard-${message.ts}-${index}`, role: 'user', text, ts: message.ts }];
+  });
+  if (!sent.length) return conversation;
+  return { ...conversation, turns: [...conversation.turns, ...sent]
+    .sort((left, right) => left.ts.localeCompare(right.ts)).slice(-MAX_TURNS) };
 }
 
 type Json = Record<string, unknown>;
