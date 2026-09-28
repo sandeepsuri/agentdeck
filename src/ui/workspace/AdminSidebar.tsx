@@ -41,6 +41,7 @@ const CHAT_STATUS: Partial<Record<WorkItem['bucket'], { tone: string; label: str
   working: { tone: 'is-working', label: 'Working' },
   needs_you: { tone: 'is-waiting', label: 'Needs you' },
 };
+const FAILED_STATUS = { tone: 'is-error', label: 'Failed' };
 
 const GROUPS = [
   { id: 'everyday', label: null },
@@ -109,8 +110,10 @@ export function AdminSidebar({
             const chats = chatsByRepository.get(repo.id) ?? [];
             const open = expanded.has(repo.id);
             const hidden = chats.length - CHATS_PER_REPOSITORY;
+            const running = activity ? activity.active - activity.waiting : 0;
+            const state = running > 0 ? ' is-working' : activity && activity.waiting > 0 ? ' is-waiting' : '';
             return (
-              <div className="sidebar-repo" key={repo.id}>
+              <div className={`sidebar-repo${state}`} key={repo.id}>
                 <div className="sidebar-repo-row">
                   <button aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${repo.name}`} className={`sidebar-repo-toggle${open ? ' is-open' : ''}`} onClick={() => toggleRepository(repo.id)} type="button">
                     <span aria-hidden="true">›</span>
@@ -128,7 +131,7 @@ export function AdminSidebar({
                   <ul aria-label={`Chats in ${repo.name}`} className="sidebar-chats">
                     {chats.slice(0, CHATS_PER_REPOSITORY).map((item) => {
                       const selected = item.id === selectedWorkItemId;
-                      const status = CHAT_STATUS[item.bucket];
+                      const status = CHAT_STATUS[item.bucket] ?? (item.tone === 'error' ? FAILED_STATUS : undefined);
                       return (
                         <li key={item.id}>
                           <button aria-current={selected ? 'true' : undefined} className={`sidebar-chat${selected ? ' is-selected' : ''}`} onClick={() => onOpenWorkItem(item)} title={item.title} type="button">
