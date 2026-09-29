@@ -41,6 +41,9 @@ import { AgentAccess, claudeConfinementProver } from '../personal-tasks/agent-ac
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 import { EmailTaskService, gmailAccess } from '../personal-tasks/email/service.js';
 import { keychainTokenVault } from '../personal-tasks/email/keychain.js';
+import { RELAY_KEYCHAIN_SERVICE } from '../relay/identity.js';
+import { RelayService } from '../relay/service.js';
+import { relayDispatcher } from './relay-dispatch.js';
 import { ProviderSetupService } from '../provider-setup/service.js';
 import { macProviderCommands } from '../provider-setup/commands.js';
 
@@ -83,10 +86,23 @@ export async function startServer(): Promise<RunningServer> {
     prover: claudeConfinementProver({ dataDir: config.dataDir }),
   });
   const confinedProvider = agentAccess.provider;
+  // Issue #90: the Mac dials out to the owner's relay so paired phones reach
+  // it away from home; nothing listens for the relay. Revoking a phone ends
+  // its relay connections at once, and a task that comes to need the owner
+  // sends phones a push that says only that.
+  const relay = new RelayService({
+    vault: keychainTokenVault(undefined, RELAY_KEYCHAIN_SERVICE),
+    ...(config.relayUrl ? { url: config.relayUrl } : {}),
+    save: (url) => { saveConfig({ relayUrl: url }); config.relayUrl = url; },
+    lookupPhone: (publicKey) => ownerPairing.byPublicKey(publicKey),
+    log: (message) => console.log(message),
+  });
+  ownerPairing.onRevoke((deviceId) => relay.dropDevice(deviceId));
   const personalTasks = new PersonalTaskService({
     repository: store.personal,
     protectedRoots: [config.dataDir],
     filingProvider: confinedProvider,
+    onNeedsOwner: () => relay.push(ownerPairing.pushTargets()),
   });
   personalTasks.recover();
   // Issue #88: find an email and prepare a reply through the same confined
@@ -198,7 +214,9 @@ export async function startServer(): Promise<RunningServer> {
     emailTasks: { service: emailTasks },
     providerSetup,
     pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
+    relay,
   });
+  relay.attach(relayDispatcher(app, ownerPairing));
   const access = folderAccess(config, () => store.listRepos());
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator
@@ -239,6 +257,7 @@ export async function startServer(): Promise<RunningServer> {
     discovery.stop(); coordination.stop();
     usageIndexer.stop(); modelNews.stop();
     companion?.close();
+    relay.stop();
     providerSetup.shutdown();
     releaseWakeLock();
     await manager.shutdown();
@@ -272,6 +291,7 @@ export async function startServer(): Promise<RunningServer> {
     }, { remoteHosts: remoteAccess.hosts, token: config.tailscaleToken }, workEngine, collaborators, ownerPairing);
 
     companion = launchNativeCompanion(port);
+    void relay.start();
     discovery.start();
     usageIndexer.start();
     modelNews.start();

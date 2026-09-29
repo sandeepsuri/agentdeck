@@ -22,8 +22,8 @@ import { registerProviderSetupRoutes } from './provider-setup-routes.js';
 import { registerEmailTaskRoutes, type EmailTaskRouteDeps } from './email-task-routes.js';
 import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
-import { registerOwnerPairingRoutes, type PhoneAccessControl } from './owner-pairing-routes.js';
-import { classify, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
+import { registerOwnerPairingRoutes, type PhoneAccessControl, type RelayControl } from './owner-pairing-routes.js';
+import { classify, RELAY_HOST, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
 // canonical implementations now live in connection-trust.ts so classify()
@@ -144,6 +144,14 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
  */
 function isOwnerDeviceAllowedRoute(method: string, pathname: string): boolean {
   if (isRemoteAllowedRoute(method, pathname)) return true;
+  if (isOwnerPersonalRoute(method, pathname)) return true;
+  // Issue #90: a phone enrolls its channel key (direct connection only; the
+  // relay dispatcher never forwards this) and registers its push token.
+  return method === 'POST' && (pathname === '/api/owner-pairing/relay-key' || pathname === '/api/owner-pairing/push-token');
+}
+
+/** The personal-task routes an owner phone may use, directly or (issue #90) through the relay. */
+export function isOwnerPersonalRoute(method: string, pathname: string): boolean {
   if (method === 'GET') {
     return pathname === '/api/personal/grants' || pathname === '/api/personal/tasks'
       || /^\/api\/personal\/grants\/[^/]+\/pdfs$/.test(pathname) || /^\/api\/personal\/tasks\/[^/]+$/.test(pathname);
@@ -195,6 +203,8 @@ export interface AppContext {
   ownerPairing?: OwnerPairingService;
   /** Present only when the Mac app launched the service; see config.phoneAccess. */
   phoneAccess?: PhoneAccessControl;
+  /** Issue #90: the outbound relay link, for Settings › Owner phones and pairing away from home. */
+  relay?: RelayControl;
   /**
    * The tailnet hostname and IP detected at startup (see server/tailscale.ts),
    * or an empty/undefined set when no Tailscale interface was found. Feeds classify()
@@ -213,6 +223,9 @@ export interface AppContext {
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
+  // Issue #90: requests relayed from a phone carry RELAY_HOST, so they are
+  // classified as remote and meet the same token and allowlist checks.
+  const remoteHosts = ctx.relay ? [...(ctx.remoteHosts ?? []), RELAY_HOST] : ctx.remoteHosts;
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
 
   app.addHook('onRequest', async (req, reply) => {
@@ -224,7 +237,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     const trust = classify(
       { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
       {
-        remoteHosts: ctx.remoteHosts,
+        remoteHosts,
         token: ctx.config.tailscaleToken,
         deviceLookup: ctx.collaborators?.resolveDevice,
         ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing),
@@ -304,7 +317,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     publish: ctx.publish,
     modelCatalog: ctx.modelCatalog,
     workEngine: ctx.workEngine,
-    remoteHosts: ctx.remoteHosts,
+    remoteHosts,
     collaborators: ctx.collaborators,
     ownerPairing: ctx.ownerPairing,
     saveConfig: ctx.saveConfig,
@@ -313,7 +326,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // Ticket 11: local-admin-only management routes plus the one
   // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
   if (ctx.collaborators) registerCollaboratorRoutes(app, ctx.collaborators);
-  if (ctx.ownerPairing) registerOwnerPairingRoutes(app, ctx.ownerPairing, ctx.remoteHosts, ctx.config.port, ctx.phoneAccess);
+  if (ctx.ownerPairing) registerOwnerPairingRoutes(app, ctx.ownerPairing, remoteHosts, ctx.config.port, ctx.phoneAccess, ctx.relay);
 
   // Ticket 12 AC1: admin-only POST (not on isCollaboratorAllowedRoute), GET
   // filtered to a resolved collaborator device's grantedProfileIds — same
@@ -321,7 +334,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // request, so a collaborator's grants can never disagree between the two.
   if (ctx.store) registerProfileRoutes(app, ctx.store, (req) => classify(
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
+    { remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
   ).device?.grantedProfileIds);
 
   if (ctx.usage) registerUsageRoutes(app, ctx.usage);
@@ -332,7 +345,7 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   // resolves to the owner here.
   const requestTrust = (req: FastifyRequest) => classify(
     { host: req.headers.host, origin: req.headers.origin, token: req.headers[TOKEN_HEADER] as string | undefined },
-    { remoteHosts: ctx.remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
+    { remoteHosts, token: ctx.config.tailscaleToken, deviceLookup: ctx.collaborators?.resolveDevice, ownerLookup: ctx.ownerPairing?.resolve.bind(ctx.ownerPairing) },
   );
   const isLocalOwner = (req: FastifyRequest) => requestTrust(req).kind === 'local';
   if (ctx.personalTasks) registerPersonalTaskRoutes(app, {

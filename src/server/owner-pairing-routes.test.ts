@@ -57,10 +57,10 @@ describe('owner phone REST boundary', () => {
     let enabled = false;
     const set = vi.fn((next: boolean) => { enabled = next; });
     app = buildApp({ config: defaultConfig(), manager: {} as RouteContext['manager'], ownerPairing: new OwnerPairingService(store.ownerDevices), remoteHosts: [], phoneAccess: { enabled: () => enabled, set } });
-    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'off', canToggle: true, phoneAccess: false });
+    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'off', canToggle: true, phoneAccess: false, relay: { state: 'off' } });
     const blocked = await app.inject({ method: 'POST', url: '/api/owner-pairing/challenges' });
     expect(blocked.statusCode).toBe(409);
-    expect(blocked.json().error).toBe('Turn on phone access to pair a phone.');
+    expect(blocked.json().error).toBe('Turn on phone access or set up the relay to pair a phone.');
     expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', headers: { host }, payload: { enabled: true } })).statusCode).toBe(403);
     expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: 'yes' } })).statusCode).toBe(400);
     const turnedOn = await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: true } });
@@ -72,7 +72,7 @@ describe('owner phone REST boundary', () => {
   it('reports ready without a toggle for a CLI service on Tailscale', async () => {
     store = new Store(':memory:');
     app = buildApp({ config: defaultConfig(), manager: {} as RouteContext['manager'], ownerPairing: new OwnerPairingService(store.ownerDevices), remoteHosts: [host] });
-    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'ready', canToggle: false, phoneAccess: true });
+    expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/availability' })).json()).toEqual({ state: 'ready', canToggle: false, phoneAccess: true, relay: { state: 'off' } });
     expect((await app.inject({ method: 'POST', url: '/api/owner-pairing/phone-access', payload: { enabled: true } })).statusCode).toBe(409);
   });
 });

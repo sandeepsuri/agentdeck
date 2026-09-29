@@ -58,6 +58,11 @@ export interface AgentDeckConfig {
    */
   phoneAccess?: boolean;
   /**
+   * Issue #90: the relay this Mac dials out to so paired phones can reach it
+   * away from home (wss://). Unset means phones reach it only directly.
+   */
+  relayUrl?: string;
+  /**
    * Per-model price overrides for the Usage view's estimated API cost, USD
    * per million tokens: { "<model id or prefix>": { input, output,
    * cacheRead?, cacheWrite?, cacheWrite1h? } }. Merged over the bundled
@@ -141,6 +146,7 @@ export function loadConfig(configPath?: string, env: NodeJS.ProcessEnv = process
     cfg.structuredAttemptsEnabled = o.structuredAttemptsEnabled;
   }
   if (typeof o.phoneAccess === 'boolean') cfg.phoneAccess = o.phoneAccess;
+  if (typeof o.relayUrl === 'string' && o.relayUrl) cfg.relayUrl = o.relayUrl;
   const usagePricing = parsePricingOverrides(o.usagePricing);
   if (usagePricing) cfg.usagePricing = usagePricing;
   return cfg;

@@ -64,6 +64,13 @@ export function toRunActor(device: RemoteDevice): {
 // in protocol.ts. Ticket 14's raw-write enforcement imports them from here.
 export { TOKEN_HEADER, TOKEN_QUERY_PARAM };
 
+/**
+ * Issue #90: the Host every request relayed from a phone carries
+ * (server/relay-dispatch.ts), so it is classified as a remote phone and meets
+ * the same token and allowlist checks. No listener answers to this name.
+ */
+export const RELAY_HOST = 'relay.agentdeck.invalid';
+
 const ALL_CAPABILITIES: Capability[] = ['view', 'compose', 'control-keys', 'raw-write'];
 const REMOTE_CAPABILITIES: Capability[] = ['view', 'compose', 'control-keys'];
 

@@ -71,3 +71,47 @@ describe('OwnerPhonesPanel phone access', () => {
     expect(rows[1]).toContain('Asked for personal task task-1');
   });
 });
+
+describe('OwnerPhonesPanel away from home (issue #90)', () => {
+  it('shows the relay state and saves the relay address the owner enters', async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/owner-devices') return json([]);
+      if (url === '/api/owner-pairing/availability') return json({ state: 'no-tailscale', canToggle: false, phoneAccess: true });
+      if (url === '/api/owner-pairing/relay' && init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)));
+        return json({ state: 'connected', url: 'wss://relay.example.com' });
+      }
+      if (url === '/api/owner-pairing/relay') return json({ state: 'off' });
+      return json({ error: 'unexpected' }, 500);
+    }));
+    await render();
+    const card = container!.querySelector('[aria-label="Away from home"]')!;
+    expect(card.textContent).toContain('Relay: Off');
+    expect(card.textContent).toContain("can't read tasks");
+    const input = card.querySelector('input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'wss://relay.example.com');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { button('Save relay')!.click(); });
+    expect(posts).toEqual([{ url: 'wss://relay.example.com' }]);
+    expect(card.textContent).toContain('Relay: Connected');
+    expect(button('Turn off')).toBeDefined();
+  });
+
+  it("shows why the relay can't be used", async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/owner-devices') return json([]);
+      if (url === '/api/owner-pairing/availability') return json({ state: 'ready', canToggle: false, phoneAccess: true });
+      if (url === '/api/owner-pairing/relay' && init?.method === 'POST') return json({ error: 'The relay address must start with wss://' }, 409);
+      if (url === '/api/owner-pairing/relay') return json({ state: 'unreachable', url: 'wss://relay.example.com', detail: 'The relay is not answering.' });
+      return json({ error: 'unexpected' }, 500);
+    }));
+    await render();
+    const card = container!.querySelector('[aria-label="Away from home"]')!;
+    expect(card.textContent).toContain('Relay: Unreachable — The relay is not answering.');
+    await act(async () => { button('Save relay')!.click(); });
+    expect(card.querySelector('[role="alert"]')?.textContent).toBe('The relay address must start with wss://');
+  });
+});

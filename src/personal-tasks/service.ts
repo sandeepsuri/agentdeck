@@ -59,6 +59,21 @@ export interface PersonalTaskServiceOptions {
   autoRun?: boolean;
   /** The confined provider behind filing proposals; without one, proposals explain that agent access is off. */
   filingProvider?: FilingProvider;
+  /**
+   * Issue #90: called once when a task comes to need the owner — a proposal
+   * to review, a failure, or a filing that needs checking — so the Mac can
+   * send owner phones a content-free push. Given only the task id.
+   */
+  onNeedsOwner?: (taskId: string) => void;
+}
+
+/** Whether a task is waiting on the owner, as the phone's Needs you list reads it. */
+export function needsOwner(task: PersonalTaskView): boolean {
+  if (task.status === 'failed') return true;
+  if (task.status !== 'completed' || !task.result || !isFilingProposal(task.result)) return false;
+  if (!task.filing) return true;
+  if (task.filing.state === 'expired') return true;
+  return task.filing.state === 'finished' && task.filing.receipts.some((receipt) => receipt.state === 'failed' || receipt.state === 'uncertain');
 }
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -111,6 +126,14 @@ export class PersonalTaskService {
 
   private at(): string {
     return this.now().toISOString();
+  }
+
+  private signalIfNeeded(taskId: string): void {
+    if (!this.options.onNeedsOwner) return;
+    const task = this.get(taskId);
+    if (task && needsOwner(task)) {
+      try { this.options.onNeedsOwner(taskId); } catch { /* a push is best effort */ }
+    }
   }
 
   // -- grants --
@@ -277,11 +300,11 @@ export class PersonalTaskService {
   }
 
   private schedule(taskId: string): void {
-    this.queue = this.queue.then(() => this.runAttempt(taskId)).catch(() => undefined);
+    this.queue = this.queue.then(() => this.runAttempt(taskId)).catch(() => undefined).then(() => this.signalIfNeeded(taskId));
   }
 
   private scheduleFilingExecution(taskId: string): void {
-    this.queue = this.queue.then(() => this.executeFilingApproval(taskId)).catch(() => undefined);
+    this.queue = this.queue.then(() => this.executeFilingApproval(taskId)).catch(() => undefined).then(() => this.signalIfNeeded(taskId));
   }
 
   private async runAttempt(taskId: string): Promise<void> {

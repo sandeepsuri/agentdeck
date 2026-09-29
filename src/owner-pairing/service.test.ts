@@ -60,3 +60,66 @@ describe('owner phone pairing', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe('owner phone channel keys (issue #90)', () => {
+  const KEY = Buffer.alloc(32, 7).toString('base64url');
+  const OTHER = Buffer.alloc(32, 8).toString('base64url');
+
+  function paired(pairing: OwnerPairingService, publicKey?: string) {
+    const challenge = pairing.create();
+    const phone = pairing.join(challenge.id, challenge.secret, 'My iPhone', publicKey);
+    pairing.confirmPhone(challenge.id, phone.nonce, phone.code);
+    pairing.confirmOwner(challenge.id, phone.code);
+    return pairing.collect(challenge.id, phone.nonce)!;
+  }
+
+  it('binds the phone key given at pairing to the new device, and forgets it on revoke', () => {
+    store = new Store(':memory:');
+    const pairing = new OwnerPairingService(store.ownerDevices);
+    const issued = paired(pairing, KEY);
+    expect(pairing.byPublicKey(KEY)?.id).toBe(issued.deviceId);
+    expect(() => paired(pairing, 'short')).toThrow();
+    pairing.revoke(issued.deviceId);
+    expect(pairing.byPublicKey(KEY)).toBeUndefined();
+  });
+
+  it('lets a phone paired before keys existed enroll one, rotate it, and register a push token', () => {
+    store = new Store(':memory:');
+    const pairing = new OwnerPairingService(store.ownerDevices);
+    const issued = paired(pairing);
+    expect(pairing.byPublicKey(KEY)).toBeUndefined();
+    pairing.enrollKey(issued.deviceId, KEY);
+    expect(pairing.byPublicKey(KEY)?.id).toBe(issued.deviceId);
+    pairing.enrollKey(issued.deviceId, OTHER);
+    expect(pairing.byPublicKey(KEY)).toBeUndefined();
+    expect(pairing.byPublicKey(OTHER)?.id).toBe(issued.deviceId);
+
+    const second = paired(pairing);
+    expect(() => pairing.enrollKey(second.deviceId, OTHER)).toThrow();
+
+    pairing.setPushToken(issued.deviceId, 'ab'.repeat(32), 'sandbox');
+    expect(() => pairing.setPushToken(issued.deviceId, 'nope', 'sandbox')).toThrow();
+    expect(pairing.pushTargets()).toEqual([{ deviceId: issued.deviceId, token: 'ab'.repeat(32), environment: 'sandbox' }]);
+    pairing.revoke(issued.deviceId);
+    expect(pairing.pushTargets()).toEqual([]);
+  });
+});
+
+describe('one key, one phone (issue #90)', () => {
+  it('refuses to finish a pairing whose key another pairing claimed first', () => {
+    store = new Store(':memory:');
+    const pairing = new OwnerPairingService(store.ownerDevices);
+    const key = Buffer.alloc(32, 5).toString('base64url');
+    const start = () => {
+      const challenge = pairing.create();
+      const phone = pairing.join(challenge.id, challenge.secret, 'Phone', key);
+      pairing.confirmPhone(challenge.id, phone.nonce, phone.code);
+      pairing.confirmOwner(challenge.id, phone.code);
+      return () => pairing.collect(challenge.id, phone.nonce);
+    };
+    const first = start();
+    const second = start();
+    expect(first()?.deviceId).toBeDefined();
+    expect(second).toThrowError(/already paired/);
+  });
+});

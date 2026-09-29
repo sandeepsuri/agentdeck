@@ -14,7 +14,71 @@ const AUDIT_LABEL = {
   'filing-undo': 'Undid recorded moves for task',
 } as const;
 interface Challenge { id: string; expiresAt: string; qr: string }
-interface Availability { state: 'ready' | 'off' | 'no-tailscale'; canToggle: boolean; phoneAccess: boolean }
+interface RelayStatus { state: 'off' | 'connecting' | 'connected' | 'unreachable' | 'refused' | 'stopped'; url?: string; detail?: string }
+interface Availability { state: 'ready' | 'off' | 'no-tailscale'; canToggle: boolean; phoneAccess: boolean; relay?: RelayStatus }
+
+const RELAY_LABEL: Record<RelayStatus['state'], string> = {
+  off: 'Off',
+  connecting: 'Connecting…',
+  connected: 'Connected',
+  unreachable: 'Unreachable',
+  refused: 'Refused',
+  stopped: 'Off',
+};
+
+/**
+ * Issue #90: the relay this Mac dials out to, so paired phones can use tasks
+ * and decisions away from home. Nothing on the Mac is opened to the internet.
+ */
+function AwayFromHome({ onChange }: { onChange: () => void }) {
+  const [relay, setRelay] = useState<RelayStatus | null>(null);
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    const next = await responseJson<RelayStatus>(await apiFetch('/api/owner-pairing/relay'));
+    setRelay(next);
+    return next;
+  }, []);
+  useEffect(() => { void load().then((next) => setUrl(next.url ?? '')).catch(() => undefined); }, [load]);
+  useEffect(() => {
+    if (relay?.state !== 'connecting') return;
+    const timer = window.setInterval(() => void load().then(() => onChange()).catch(() => undefined), 1000);
+    return () => window.clearInterval(timer);
+  }, [relay?.state, load, onChange]);
+
+  const save = async (next: string) => {
+    setBusy(true); setError(null);
+    try {
+      const response = await apiFetch('/api/owner-pairing/relay', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: next }),
+      });
+      const body = await response.json().catch(() => ({})) as RelayStatus & { error?: string };
+      if (!response.ok) throw new Error(body.error ?? `request failed: ${response.status}`);
+      setRelay(body); setUrl(body.url ?? ''); onChange();
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not save the relay.'); }
+    finally { setBusy(false); }
+  };
+
+  if (!relay) return null;
+  return <div className="settings-card" aria-label="Away from home">
+    <h3>Away from home</h3>
+    <p>
+      With a relay, paired phones can follow tasks and approve decisions from anywhere, without Tailscale. This Mac connects out to the relay; nothing on it is opened to the internet.
+      Everything is encrypted between the phone and this Mac, so the relay can't read tasks, files, or decisions. It can see when a phone connects, how much it sends, and its notification token.
+    </p>
+    <p role="status">Relay: <strong>{RELAY_LABEL[relay.state]}</strong>{relay.detail ? ` — ${relay.detail}` : ''}</p>
+    <form onSubmit={(event) => { event.preventDefault(); void save(url); }}>
+      <label>Relay address
+        <input onChange={(event) => setUrl(event.target.value)} placeholder="wss://relay.example.com" type="url" value={url} />
+      </label>
+      <button className="button button-primary" disabled={busy || !url.trim()} type="submit">Save relay</button>
+      {relay.state !== 'off' && <button className="button" disabled={busy} onClick={() => void save('')} type="button">Turn off</button>}
+    </form>
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <p>Phones paired before the relay was set up pick it up the next time they reach this Mac on the home network.</p>
+  </div>;
+}
 interface Status { state: 'waiting' | 'compare' | 'confirmed'; code?: string; label?: string; expiresAt: string; ownerConfirmed: boolean; deviceId?: string }
 
 export function OwnerPhonesPanel() {
@@ -29,9 +93,10 @@ export function OwnerPhonesPanel() {
   const refresh = useCallback(async () => setDevices(await responseJson<OwnerDevice[]>(await apiFetch('/api/owner-devices'))), []);
 
   useEffect(() => { void refresh().catch(() => setError('Could not load owner phones.')); }, [refresh]);
-  useEffect(() => {
+  const loadAvailability = useCallback(() => {
     void apiFetch('/api/owner-pairing/availability').then((response) => responseJson<Availability>(response)).then(setAvailability).catch(() => undefined);
   }, []);
+  useEffect(() => { loadAvailability(); }, [loadAvailability]);
   useEffect(() => {
     if (!restarting) return;
     // The service is relaunching; keep asking until the new one answers.
@@ -102,13 +167,13 @@ export function OwnerPhonesPanel() {
 
   return <section>
     <h2>Owner phones</h2>
-    <p>Pair your iPhone while it and this Mac are on the same tailnet. Each phone gets its own credential.</p>
+    <p>Pair your iPhone over Tailscale, or anywhere once the relay below is connected. Each phone gets its own credential and key.</p>
     {restarting && <p role="status">Restarting AgentDeck…</p>}
     {!restarting && availability?.state === 'off' && <div className="settings-card">
       <p>Phone access is off, so AgentDeck only listens on this Mac. Turn it on to let paired phones reach it over Tailscale. AgentDeck restarts to apply this.</p>
       <button className="button button-primary" disabled={busy} onClick={() => void setPhoneAccess(true)} type="button">Turn on phone access</button>
     </div>}
-    {!restarting && availability?.state === 'no-tailscale' && <p>Tailscale isn't running on this Mac, or MagicDNS is off. Start Tailscale, then restart AgentDeck.</p>}
+    {!restarting && availability?.state === 'no-tailscale' && <p>To pair, connect the relay under Away from home, or start Tailscale with MagicDNS and restart AgentDeck.</p>}
     <button className="button button-primary" disabled={busy || restarting || (availability !== null && availability.state !== 'ready')} onClick={() => void start()} type="button">Pair a phone</button>
     {!restarting && availability?.canToggle && availability.phoneAccess && <button className="button" disabled={busy} onClick={() => void setPhoneAccess(false)} type="button">Turn off phone access</button>}
     {challenge && status?.state !== 'confirmed' && <div className="settings-card">
@@ -130,6 +195,7 @@ export function OwnerPhonesPanel() {
         {AUDIT_LABEL[entry.action] ?? entry.action} {entry.targetId} · {new Date(entry.createdAt).toLocaleString()}
       </li>)}</ul>}
     </div>)}
-    <p>Lost a phone? Revoke it here, then pair a replacement.</p>
+    <p>Lost a phone? Revoke it here, then pair a replacement. It loses access at once, through the relay too.</p>
+    <AwayFromHome onChange={loadAvailability} />
   </section>;
 }

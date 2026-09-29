@@ -186,10 +186,35 @@ enum CompanionFailure: Error, Equatable {
     case refused(String)
 }
 
+/**
+ * Reaches the Mac directly (home network or Tailscale) or, issue #90, through
+ * the relay when away. Whichever answered last is tried first. Only a failure
+ * to reach the Mac by every path is `.unavailable`; an answer the Mac gave is
+ * never replaced by an older one.
+ */
 struct CompanionClient {
-    let base: URL
+    let base: URL?
     let credential: String
     var session: URLSession = .shared
+    var relay: RelayTransport?
+    /** Shared by copies of this client so they agree on which path answered last. */
+    let route = Route()
+
+    final class Route: @unchecked Sendable {
+        private let lock = NSLock()
+        private var relayFirst = false
+        var preferRelay: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return relayFirst }
+            set { lock.lock(); relayFirst = newValue; lock.unlock() }
+        }
+    }
+
+    init(base: URL?, credential: String, session: URLSession = .shared, relay: RelayTransport? = nil) {
+        self.base = base
+        self.credential = credential
+        self.session = session
+        self.relay = relay
+    }
 
     private struct ServerError: Decodable { let error: String? }
     private struct Connection: Decodable { let kind: String; let capabilities: [String] }
@@ -208,11 +233,26 @@ struct CompanionClient {
         return connection.kind == "remote" && !connection.capabilities.isEmpty
     }
 
-    private func send<T: Decodable>(_ path: String, method: String, body: Data?, checkRevoked: Bool = true) async throws -> T {
+    /** One round trip by whichever path reaches the Mac; the one that answered is tried first next time. */
+    func exchange(_ path: String, method: String, body: Data?) async throws -> (Int, Data) {
+        let order = route.preferRelay ? [true, false] : [false, true]
+        for useRelay in order {
+            do {
+                let answer = useRelay ? try await viaRelay(path, method: method, body: body) : try await direct(path, method: method, body: body)
+                route.preferRelay = useRelay
+                return answer
+            } catch CompanionFailure.unavailable { continue }
+        }
+        throw CompanionFailure.unavailable
+    }
+
+    private func direct(_ path: String, method: String, body: Data?) async throws -> (Int, Data) {
+        guard let base else { throw CompanionFailure.unavailable }
         var request = URLRequest(url: base.appending(path: path))
         request.httpMethod = method
-        request.timeoutInterval = 10
-        request.setValue(credential, forHTTPHeaderField: "x-agentdeck-token")
+        // Short when the relay can take over, so a phone away from home is not kept waiting.
+        request.timeoutInterval = relay == nil ? 10 : 4
+        if !credential.isEmpty { request.setValue(credential, forHTTPHeaderField: "x-agentdeck-token") }
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "content-type")
             request.httpBody = body
@@ -222,11 +262,21 @@ struct CompanionClient {
         do { (data, response) = try await session.data(for: request) }
         catch { throw CompanionFailure.unavailable }
         guard let http = response as? HTTPURLResponse else { throw CompanionFailure.unavailable }
-        if (200..<300).contains(http.statusCode) {
+        return (http.statusCode, data)
+    }
+
+    private func viaRelay(_ path: String, method: String, body: Data?) async throws -> (Int, Data) {
+        guard let relay else { throw CompanionFailure.unavailable }
+        return try await relay.send(method: method, path: path, body: body, credential: credential.isEmpty ? nil : credential)
+    }
+
+    private func send<T: Decodable>(_ path: String, method: String, body: Data?, checkRevoked: Bool = true) async throws -> T {
+        let (status, data) = try await exchange(path, method: method, body: body)
+        if (200..<300).contains(status) {
             do { return try JSONDecoder().decode(T.self, from: data) }
             catch { throw CompanionFailure.refused("The Mac sent an answer this app does not understand. Update AgentDeck Phone.") }
         }
-        if http.statusCode == 403, checkRevoked {
+        if status == 403, checkRevoked {
             let paired = try await stillPaired()
             if !paired { throw CompanionFailure.revoked }
         }

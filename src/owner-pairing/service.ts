@@ -1,9 +1,17 @@
 import crypto from 'node:crypto';
-import type { OwnerDevice, OwnerDeviceAudit, OwnerDeviceRepository } from '../store/owner-devices.js';
+import { APNS_TOKEN, type PushEnvironment } from '../relay/protocol.js';
+import type { OwnerDevice, OwnerDeviceAudit, OwnerDeviceRepository, OwnerPushTarget } from '../store/owner-devices.js';
 
 export const PAIRING_TTL_MS = 2 * 60_000;
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const bearer = () => crypto.randomBytes(32).toString('base64url');
+
+/** Issue #90: a phone's channel key is exactly 32 bytes, base64url. */
+function checkPublicKey(value: string): string {
+  const raw = Buffer.from(value, 'base64url');
+  if (raw.length !== 32 || raw.toString('base64url') !== value) throw new PairingError('The phone key is not valid.');
+  return value;
+}
 
 interface Challenge {
   id: string;
@@ -11,6 +19,7 @@ interface Challenge {
   expiresAt: number;
   code?: string;
   label?: string;
+  publicKey?: string;
   phoneNonceHash?: string;
   phoneConfirmed: boolean;
   ownerConfirmed: boolean;
@@ -56,11 +65,17 @@ export class OwnerPairingService {
     return challenge;
   }
 
-  join(id: string, secret: string, label: string): { nonce: string; code: string; expiresAt: string } {
+  /** `publicKey` (issue #90) is the phone's channel key; over the relay it is the key the handshake proved. */
+  join(id: string, secret: string, label: string, publicKey?: string): { nonce: string; code: string; expiresAt: string } {
     const challenge = this.live(id);
     if (challenge.phoneNonceHash || hash(secret) !== challenge.secretHash) throw new PairingError('Pairing challenge already used or mismatched.');
     const cleanLabel = label.trim().slice(0, 80);
     if (!cleanLabel) throw new PairingError('A device name is required.');
+    if (publicKey !== undefined) {
+      checkPublicKey(publicKey);
+      if (this.devices.byPublicKey(publicKey)) throw new PairingError('This phone key is already paired. Revoke the old pairing first.');
+      challenge.publicKey = publicKey;
+    }
     const nonce = bearer();
     challenge.phoneNonceHash = hash(nonce);
     challenge.code = crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
@@ -95,8 +110,13 @@ export class OwnerPairingService {
     const challenge = this.phone(id, nonce);
     if (challenge.collected) throw new PairingError('Pairing credential already collected.');
     if (!challenge.ownerConfirmed || !challenge.phoneConfirmed) return undefined;
+    // Another pairing may have claimed the same key since this one joined.
+    if (challenge.publicKey && this.devices.byPublicKey(challenge.publicKey)) throw new PairingError('This phone key is already paired. Revoke the old pairing first.');
     const credential = bearer();
-    const device: OwnerDevice = { id: crypto.randomUUID(), label: challenge.label!, createdAt: new Date(this.now()).toISOString() };
+    const device: OwnerDevice = {
+      id: crypto.randomUUID(), label: challenge.label!, createdAt: new Date(this.now()).toISOString(),
+      ...(challenge.publicKey ? { publicKey: challenge.publicKey } : {}),
+    };
     this.devices.create(device, hash(credential));
     challenge.collected = true;
     challenge.deviceId = device.id;
@@ -108,6 +128,21 @@ export class OwnerPairingService {
   }
 
   list(): OwnerDevice[] { return this.devices.list(); }
+
+  /** The active paired phone holding this channel key, if any. */
+  byPublicKey(publicKey: string): OwnerDevice | undefined { return this.devices.byPublicKey(publicKey); }
+
+  /** Enrolls or rotates an active phone's channel key; only ever called over a direct connection. */
+  enrollKey(deviceId: string, publicKey: string): void {
+    if (!this.devices.setPublicKey(deviceId, checkPublicKey(publicKey))) throw new PairingError('The key could not be enrolled for this phone.');
+  }
+
+  setPushToken(deviceId: string, token: string, environment: PushEnvironment): void {
+    if (!APNS_TOKEN.test(token)) throw new PairingError('The notification token is not valid.');
+    if (!this.devices.setPushToken(deviceId, token, environment)) throw new PairingError('This phone is no longer paired.');
+  }
+
+  pushTargets(): OwnerPushTarget[] { return this.devices.pushTargets(); }
 
   audit(deviceId: string, action: OwnerDeviceAudit['action'], targetId: string): void {
     this.devices.appendAudit({ id: crypto.randomUUID(), deviceId, action, targetId, createdAt: new Date(this.now()).toISOString() });

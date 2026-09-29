@@ -296,3 +296,28 @@ describe('filing proposal', () => {
     expect(task.failure).toMatch(/No proposal was recorded/);
   });
 });
+
+describe('telling the owner a task needs them (issue #90 push)', () => {
+  it('signals once when a proposal is ready to review, and when a task fails, but not when an inventory finishes', async () => {
+    const needed: string[] = [];
+    const service = new PersonalTaskService({
+      repository: openStore().personal, homeDir: home,
+      filingProvider: scriptedFilingProvider({ script: cooperative({ power: ['Power 2026-03.pdf', 'Bills'] }) }),
+      onNeedsOwner: (taskId) => needed.push(taskId),
+    });
+    const ready = await propose(service, ['power.pdf']);
+    expect(needed).toEqual([ready.id]);
+
+    const grant = service.listGrants()[0]!;
+    const inventory = service.submitInventory({ grantId: grant.id, files: ['water.pdf'] }, owner);
+    await service.whenIdle();
+    expect(service.get(inventory.id)!.status).toBe('completed');
+    expect(needed).toEqual([ready.id]);
+
+    const broken = service.submitFilingProposal({ grantId: grant.id, files: ['water.pdf'] }, owner);
+    service.revokeGrant(grant.id);
+    await service.whenIdle();
+    expect(service.get(broken.id)!.status).toBe('failed');
+    expect(needed).toEqual([ready.id, broken.id]);
+  });
+});

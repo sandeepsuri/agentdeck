@@ -13,6 +13,9 @@
 		A00000000000000000000034 /* CompanionViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000035 /* CompanionViews.swift */; };
 		A00000000000000000000036 /* CompanionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000037 /* CompanionTests.swift */; };
 		A00000000000000000000018 /* PairingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* PairingTests.swift */; };
+		A00000000000000000000038 /* RelayChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000039 /* RelayChannel.swift */; };
+		A00000000000000000000040 /* RelayChannelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000041 /* RelayChannelTests.swift */; };
+		A00000000000000000000043 /* RelayTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000044 /* RelayTransportTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -35,6 +38,10 @@
 		A00000000000000000000037 /* CompanionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompanionTests.swift; sourceTree = "<group>"; };
 		A00000000000000000000019 /* PairingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingTests.swift; sourceTree = "<group>"; };
 		A00000000000000000000020 /* AgentDeckPhoneTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = AgentDeckPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000039 /* RelayChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayChannel.swift; sourceTree = "<group>"; };
+		A00000000000000000000041 /* RelayChannelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayChannelTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000044 /* RelayTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayTransportTests.swift; sourceTree = "<group>"; };
+		A00000000000000000000042 /* AgentDeckPhone.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AgentDeckPhone.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,7 +78,9 @@
 				A00000000000000000000031 /* CompanionAPI.swift */,
 				A00000000000000000000033 /* CompanionModel.swift */,
 				A00000000000000000000035 /* CompanionViews.swift */,
+				A00000000000000000000039 /* RelayChannel.swift */,
 				A00000000000000000000004 /* Info.plist */,
+				A00000000000000000000042 /* AgentDeckPhone.entitlements */,
 			);
 			path = AgentDeckPhone;
 			sourceTree = "<group>";
@@ -90,6 +99,8 @@
 			children = (
 				A00000000000000000000019 /* PairingTests.swift */,
 				A00000000000000000000037 /* CompanionTests.swift */,
+				A00000000000000000000041 /* RelayChannelTests.swift */,
+				A00000000000000000000044 /* RelayTransportTests.swift */,
 			);
 			path = AgentDeckPhoneTests;
 			sourceTree = "<group>";
@@ -175,6 +186,7 @@
 				A00000000000000000000030 /* CompanionAPI.swift in Sources */,
 				A00000000000000000000032 /* CompanionModel.swift in Sources */,
 				A00000000000000000000034 /* CompanionViews.swift in Sources */,
+				A00000000000000000000038 /* RelayChannel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,6 +196,8 @@
 			files = (
 				A00000000000000000000018 /* PairingTests.swift in Sources */,
 				A00000000000000000000036 /* CompanionTests.swift in Sources */,
+				A00000000000000000000040 /* RelayChannelTests.swift in Sources */,
+				A00000000000000000000043 /* RelayTransportTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -206,6 +220,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				CODE_SIGN_ENTITLEMENTS = AgentDeckPhone/AgentDeckPhone.entitlements;
 				INFOPLIST_FILE = AgentDeckPhone/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 0.1.0;
@@ -224,6 +239,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
+				CODE_SIGN_ENTITLEMENTS = AgentDeckPhone/AgentDeckPhone.entitlements;
 				INFOPLIST_FILE = AgentDeckPhone/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				MARKETING_VERSION = 0.1.0;

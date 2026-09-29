@@ -132,6 +132,18 @@ _Avoid_: Email job, inbox run
 The editable reply AgentDeck writes to the owner's Gmail drafts after the match is confirmed. Every save is a durable version recorded before the one provider write and settled from what Gmail reads back, so each version shows exactly the recipients, subject, body, and attachments Gmail holds, and a lost response never produces a second draft. A reply draft is never sent by preparing or editing it.
 _Avoid_: Proposal (for the draft itself), outbox, message
 
+**Relay**:
+The service a Mac dials out to so its paired owner phones can reach it away from home without Tailscale or an open port. It forwards sealed frames between one Mac's mailbox and that Mac's phones. It can see connection timing, sizes, addresses, and push tokens, but no task content, and it decides nothing about who is the owner. The Mac checks every relayed request as it would a direct one.
+_Avoid_: Tunnel, proxy, cloud sync, server (for the relay itself)
+
+**Channel key**:
+The long-lived X25519 key pair a paired phone or the Mac holds for the relay channel. The phone's public key is bound to its owner device at pairing or enrolled over a direct connection, and is never set or changed through the relay. Revoking the phone forgets it.
+_Avoid_: Device key (for the bearer credential), session key
+
+**Pointer push**:
+A notification the relay sends a paired phone that says only that something on the Mac needs the owner. It carries no task, file, or decision. The phone opens and asks the Mac.
+_Avoid_: Task notification, alert (for its content)
+
 **Reply send**:
 The owner's approval of one saved Reply draft version, bound to its version and digest, and the single Gmail send it allows. AgentDeck records the approval, with exactly the content approved and a fresh send intent, before the send, and builds the message from that record rather than from whatever the Gmail draft holds by then. It is settled as sent, failed (not sent), expired, or ambiguous; an ambiguous send is settled from the thread's sent mail by its intent before anything is sent again. Any later edit needs a new approval, and only the owner at this Mac can approve.
 _Avoid_: Auto-send, outbox, standing approval
