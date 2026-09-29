@@ -17,6 +17,42 @@ describe('parseMarkdown', () => {
   it('keeps an unterminated fence as code', () => {
     expect(parseMarkdown('```\nstill streaming')).toEqual([{ kind: 'code', lang: '', text: 'still streaming' }]);
   });
+
+  it('parses a GFM table, keeping an empty header cell and padding short rows', () => {
+    const source = [
+      'What the commits show is already built:',
+      '',
+      '| Issue | Commit on feat/simplify-product | |',
+      '|---|---|---|',
+      '| #81 Propose a PDF filing plan | f358146 |',
+      '| #84 Install and launch the Mac app | 91ead05, c46b627 | extra | dropped |',
+      '',
+      'Done.',
+    ].join('\n');
+    expect(parseMarkdown(source)).toEqual([
+      { kind: 'paragraph', text: 'What the commits show is already built:' },
+      {
+        kind: 'table',
+        align: [null, null, null],
+        header: ['Issue', 'Commit on feat/simplify-product', ''],
+        rows: [
+          ['#81 Propose a PDF filing plan', 'f358146', ''],
+          ['#84 Install and launch the Mac app', '91ead05, c46b627', 'extra'],
+        ],
+      },
+      { kind: 'paragraph', text: 'Done.' },
+    ]);
+  });
+
+  it('reads column alignment, pipes inside code and escaped pipes', () => {
+    expect(parseMarkdown('a | b | c\n:-- | :-: | --:\n`x | y` | a \\| b | 3')).toEqual([
+      { kind: 'table', align: ['left', 'center', 'right'], header: ['a', 'b', 'c'], rows: [['`x | y`', 'a | b', '3']] },
+    ]);
+  });
+
+  it('leaves a line with a stray pipe as a paragraph', () => {
+    expect(parseMarkdown('use a | b here\nnext line')).toEqual([{ kind: 'paragraph', text: 'use a | b here\nnext line' }]);
+  });
 });
 
 describe('Markdown', () => {
@@ -26,6 +62,12 @@ describe('Markdown', () => {
     expect(html).toContain('<strong>then</strong>');
     expect(html).toContain('<em>ship</em>');
     expect(html).toContain('<a href="https://example.com/a" rel="noreferrer noopener" target="_blank">docs</a>');
+  });
+
+  it('renders a table with inline formatting and alignment', () => {
+    const html = renderToStaticMarkup(<Markdown text={'| Issue | Commit |\n|---|--:|\n| **#81** | `f358146` |'} />);
+    expect(html).toContain('<div class="md-table-wrap"><table><thead><tr><th>Issue</th><th style="text-align:right">Commit</th></tr></thead>');
+    expect(html).toContain('<td><strong>#81</strong></td><td style="text-align:right"><code>f358146</code></td>');
   });
 
   it('never turns agent text into markup or script links', () => {

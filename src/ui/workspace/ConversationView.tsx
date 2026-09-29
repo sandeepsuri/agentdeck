@@ -6,12 +6,15 @@
 // into the live session through the same /send path as the terminal
 // composer. A multiple-choice question the agent opens (Claude's
 // AskUserQuestion, Codex's request_user_input) is answered here as a card;
-// permission approvals still happen in the Terminal tab.
-import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+// permission approvals still happen in the Terminal tab. Typing "/" opens a
+// picker of the session's skills and slash commands.
+import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ConversationTurn, ConversationView as ConversationBody } from '../../sessions/conversation.js';
+import type { SkillEntry } from '../../sessions/skill-catalog.js';
 import type { Session } from '../../types.js';
 import { apiFetch } from '../apiFetch.js';
 import { Markdown } from './markdown.js';
+import { SlashMenu, filterSkills, slashOptionId, slashQuery } from './SlashMenu.js';
 
 const POLL_MS = 1500;
 /** Within this many pixels of the end counts as "following along". */
@@ -151,6 +154,12 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
   /** The question just answered here: hidden until the transcript records the answer. */
   const [answeredId, setAnsweredId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const slashListId = useId();
+  const [skills, setSkills] = useState<SkillEntry[] | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  /** The draft the picker was closed on with Esc; it reopens once the draft changes. */
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -188,6 +197,32 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
   };
 
   const live = session.status !== 'exited' && session.status !== 'completed';
+  const query = session.agent === 'claude' && live && draft !== slashDismissed ? slashQuery(draft) : undefined;
+  const slashOpen = query !== undefined;
+  const slashItems = slashOpen ? filterSkills(skills ?? [], query) : [];
+  const slashActive = Math.min(slashIndex, Math.max(0, slashItems.length - 1));
+
+  // Re-read the list each time the picker opens, so a skill added mid-session shows up.
+  useEffect(() => {
+    if (!slashOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await apiFetch(`/api/sessions/${encodeURIComponent(session.id)}/skills`);
+        const next = response.ok ? await response.json() as { skills?: SkillEntry[] } : undefined;
+        if (!cancelled) setSkills(Array.isArray(next?.skills) ? next.skills : []);
+      } catch {
+        if (!cancelled) setSkills((current) => current ?? []);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [slashOpen, session.id]);
+
+  const pickSkill = (skill: SkillEntry) => {
+    setDraft(`/${skill.name} `);
+    setSlashIndex(0);
+    textareaRef.current?.focus();
+  };
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
@@ -209,6 +244,26 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
     }
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashOpen && !event.nativeEvent.isComposing) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSlashDismissed(draft);
+        return;
+      }
+      if (slashItems.length > 0 && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        event.preventDefault();
+        const direction = event.key === 'ArrowDown' ? 1 : -1;
+        setSlashIndex((slashActive + direction + slashItems.length) % slashItems.length);
+        return;
+      }
+      // Enter on a name typed out in full sends it; otherwise it completes the highlighted one.
+      const typedInFull = slashItems[slashActive]?.name === query;
+      if (slashItems.length > 0 && (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey && !typedInFull))) {
+        event.preventDefault();
+        pickSkill(slashItems[slashActive]!);
+        return;
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void send();
@@ -262,12 +317,22 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
         <button className="conversation-jump" onClick={() => { setFollowing(true); }} type="button">↓ Latest</button>
       )}
       <form className="conversation-composer" onSubmit={(event) => void send(event)}>
+        {slashOpen && (
+          <SlashMenu activeIndex={slashActive} id={slashListId} items={slashItems} loading={skills === null}
+            onHover={setSlashIndex} onPick={pickSkill} />
+        )}
         <textarea
+          aria-activedescendant={slashOpen && slashItems.length > 0 ? slashOptionId(slashListId, slashActive) : undefined}
+          aria-autocomplete="list"
+          aria-controls={slashOpen ? slashListId : undefined}
+          aria-expanded={slashOpen}
           aria-label={`Message ${agentName}`}
           disabled={!live}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => { setDraft(event.target.value); setSlashIndex(0); }}
           onKeyDown={onKeyDown}
-          placeholder={live ? `Message ${agentName}… (Enter to send, Shift+Enter for a new line)` : 'This session has ended.'}
+          placeholder={live ? `Message ${agentName}… (Enter to send, Shift+Enter for a new line${session.agent === 'claude' ? ', / for skills' : ''})` : 'This session has ended.'}
+          ref={textareaRef}
+          role="combobox"
           rows={Math.min(8, Math.max(1, draft.split('\n').length))}
           value={draft}
         />

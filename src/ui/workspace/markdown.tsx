@@ -1,5 +1,5 @@
 // The small Markdown subset agents actually reply with — fenced code,
-// headings, lists, paragraphs, `code`, **bold**, *italic* and http(s) links —
+// headings, lists, GFM tables, paragraphs, `code`, **bold**, *italic* and http(s) links —
 // rendered as React elements. Never innerHTML: agent text is untrusted.
 import { type ReactNode, useState } from 'react';
 
@@ -7,9 +7,40 @@ export type MarkdownBlock =
   | { kind: 'code'; lang: string; text: string }
   | { kind: 'heading'; level: number; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
+  | { kind: 'table'; align: TableAlign[]; header: string[]; rows: string[][] }
   | { kind: 'paragraph'; text: string };
 
+export type TableAlign = 'left' | 'center' | 'right' | null;
+
 const LIST_ITEM = /^\s*(?:([-*+])|(\d+)[.)])\s+(.*)$/;
+const TABLE_SEPARATOR = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+
+/** Splits one table row on pipes outside `code` (\| is a literal pipe), dropping the optional outer pipes. */
+export function splitTableRow(line: string): string[] {
+  const cells: string[] = [];
+  let cell = '';
+  let inCode = false;
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index]!;
+    if (char === '\\' && line[index + 1] === '|') { cell += '|'; index++; continue; }
+    if (char === '`') inCode = !inCode;
+    if (char === '|' && !inCode) { cells.push(cell); cell = ''; continue; }
+    cell += char;
+  }
+  cells.push(cell);
+  const trimmed = line.trim();
+  if (trimmed.startsWith('|')) cells.shift();
+  if (trimmed.endsWith('|') && !trimmed.endsWith('\\|')) cells.pop();
+  return cells.map((value) => value.trim());
+}
+
+function columnAlign(cell: string): TableAlign {
+  const left = cell.startsWith(':');
+  const right = cell.endsWith(':');
+  if (left && right) return 'center';
+  if (right) return 'right';
+  return left ? 'left' : null;
+}
 
 export function parseMarkdown(source: string): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = [];
@@ -34,6 +65,23 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
       flush();
       blocks.push({ kind: 'heading', level: heading[1]!.length, text: heading[2]! });
       continue;
+    }
+    const separator = lines[index + 1];
+    if (line.includes('|') && separator !== undefined && TABLE_SEPARATOR.test(separator)) {
+      const header = splitTableRow(line);
+      const align = splitTableRow(separator).map(columnAlign);
+      if (align.length === header.length) {
+        flush();
+        const rows: string[][] = [];
+        for (index += 2; index < lines.length && lines[index]!.trim() && lines[index]!.includes('|'); index++) {
+          const cells = splitTableRow(lines[index]!).slice(0, header.length);
+          while (cells.length < header.length) cells.push('');
+          rows.push(cells);
+        }
+        index--;
+        blocks.push({ kind: 'table', align, header, rows });
+        continue;
+      }
     }
     const item = LIST_ITEM.exec(line);
     if (item) {
@@ -114,6 +162,23 @@ export function Markdown({ text }: { text: string }) {
         if (block.kind === 'list') {
           const Tag = block.ordered ? 'ol' : 'ul';
           return <Tag key={index}>{block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInline(item)}</li>)}</Tag>;
+        }
+        if (block.kind === 'table') {
+          const style = (column: number) => (block.align[column] ? { textAlign: block.align[column]! } : undefined);
+          return (
+            <div className="md-table-wrap" key={index}>
+              <table>
+                <thead>
+                  <tr>{block.header.map((cell, column) => <th key={column} style={style(column)}>{renderInline(cell)}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>{row.map((cell, column) => <td key={column} style={style(column)}>{renderInline(cell)}</td>)}</tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
         }
         return <p key={index}>{renderInline(block.text)}</p>;
       })}
