@@ -135,3 +135,25 @@
 .email-send.is-approved h4, .email-send.is-sending h4, .email-send.is-ambiguous h4 { color: var(--status-running); }
 .email-versions { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 .email-versions small { color: var(--text-muted); }
+
+/* Issue #92: saved routines and "Save as routine" on a task that worked. */
+.routine-list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.routine-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-panel); }
+.routine-card > header { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; }
+.routine-card > header > div:first-child { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.routine-card strong { font-size: 13px; }
+.routine-card small { color: var(--text-muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.routine-request { font-style: italic; }
+.routine-actions { display: flex; align-items: center; gap: 8px; }
+.routine-runs { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.routine-runs li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.routine-runs time { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.routine-runs li.is-blocked span { color: var(--text-secondary); }
+.routine-save, .routine-repair { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.routine-save label, .routine-repair label { display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.routine-save input, .routine-repair select { min-width: 220px; padding: 6px 9px; border: 1px solid var(--border-muted); border-radius: var(--radius-sm); background: var(--surface-input); color: var(--text-primary); font: inherit; font-size: 12.5px; font-weight: 400; }
+.routine-save .personal-note, .routine-save .personal-error { flex-basis: 100%; }
+.personal-failure .routine-repair { flex: 0 1 auto; }
+@media (max-width: 640px) {
+  .routine-save input, .routine-repair select { min-width: 0; width: 100%; }
+}

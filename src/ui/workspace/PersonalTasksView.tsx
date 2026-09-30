@@ -15,6 +15,7 @@ import {
 } from '../../personal-tasks/types.js';
 import { apiFetch } from '../apiFetch.js';
 import { EmailRepliesPanel } from './EmailRepliesPanel.js';
+import { RoutinesPanel, SaveRoutine } from './RoutinesPanel.js';
 
 const POLL_MS = 1500;
 
@@ -305,11 +306,12 @@ function FilingProposal({ result, filing, onApprove, onFilingAction }: {
   );
 }
 
-function TaskDetail({ task, onRetry, onApprove, onFilingAction }: {
+function TaskDetail({ task, onRetry, onApprove, onFilingAction, onRoutineSaved }: {
   task: PersonalTaskView;
   onRetry: () => void;
   onApprove: (overwrite: string[]) => Promise<void>;
   onFilingAction: (action: 'retry' | 'undo') => Promise<void>;
+  onRoutineSaved?: () => void;
 }) {
   return (
     <article aria-labelledby={`personal-task-${task.id}`} className="personal-task-detail">
@@ -330,6 +332,16 @@ function TaskDetail({ task, onRetry, onApprove, onFilingAction }: {
           <p>{task.failure}</p>
           {task.status === 'failed' && <button className="button" onClick={onRetry} type="button">Try again</button>}
         </div>
+      )}
+
+      {task.status === 'completed' && (
+        <SaveRoutine
+          defaultName={task.kind === 'pdf-filing-proposal' ? `File new PDFs in ${task.grant.name}` : `Inspect PDFs in ${task.grant.name}`}
+          key={`routine-${task.id}`}
+          source="personal"
+          taskId={task.id}
+          {...(onRoutineSaved ? { onSaved: onRoutineSaved } : {})}
+        />
       )}
 
       {task.result && (isFilingProposal(task.result)
@@ -359,6 +371,9 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  const [routineSignal, setRoutineSignal] = useState(0);
+  const [emailSignal, setEmailSignal] = useState(0);
+  const [emailFocus, setEmailFocus] = useState<string | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     try {
@@ -484,6 +499,18 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
         )}
       </section>
 
+      <RoutinesPanel
+        active={active}
+        onOpenTask={(source, taskId) => {
+          if (source === 'personal') {
+            setSelectedTaskId(taskId);
+            void refresh();
+          } else setEmailFocus(taskId);
+        }}
+        onRan={(source) => { if (source === 'email') setEmailSignal((n) => n + 1); else void refresh(); }}
+        refreshSignal={routineSignal}
+      />
+
       <section aria-labelledby="personal-tasks" className="home-section">
         <header className="home-section-header"><h2 id="personal-tasks">Tasks</h2></header>
         {tasks === null ? null : tasks.length === 0 ? (
@@ -502,13 +529,24 @@ export function PersonalTasksView({ active = true }: { active?: boolean }) {
               ))}
             </ul>
             {selectedTask && (
-              <TaskDetail onApprove={(overwrite) => approve(selectedTask, overwrite)} onFilingAction={(action) => filingAction(selectedTask, action)} onRetry={() => void retry(selectedTask)} task={selectedTask} />
+              <TaskDetail
+                onApprove={(overwrite) => approve(selectedTask, overwrite)}
+                onFilingAction={(action) => filingAction(selectedTask, action)}
+                onRetry={() => void retry(selectedTask)}
+                onRoutineSaved={() => setRoutineSignal((n) => n + 1)}
+                task={selectedTask}
+              />
             )}
           </div>
         )}
       </section>
 
-      <EmailRepliesPanel active={active} />
+      <EmailRepliesPanel
+        active={active}
+        focusTaskId={emailFocus}
+        onRoutineSaved={() => setRoutineSignal((n) => n + 1)}
+        refreshSignal={emailSignal}
+      />
     </section>
   );
 }
