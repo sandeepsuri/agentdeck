@@ -10,7 +10,7 @@
 -- remain in personal_tasks and email_tasks and stay readable. To remove the
 -- data entirely, stop AgentDeck and run, in this order:
 --   DROP TABLE personal_routine_runs; DROP TABLE personal_routines;
---   DELETE FROM schema_migrations WHERE name = '032_personal_routines.sql';
+--   DELETE FROM schema_migrations WHERE name = '033_personal_routines.sql';
 -- Deleting a routine is a timestamp, never a row delete, so its run history
 -- and the tasks it links to survive.
 

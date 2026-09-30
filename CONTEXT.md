@@ -133,7 +133,7 @@ The editable reply AgentDeck writes to the owner's Gmail drafts after the match 
 _Avoid_: Proposal (for the draft itself), outbox, message
 
 **Routine**:
-A PDF or email request the owner saved from a Personal task or Email reply task that worked, to run again. It names only the operation and the Folder grant or Email account grant it uses, plus the owner's words for an email. Each run rechecks that grant, then starts a new task with its own identity and result; a run that cannot start is recorded with the repair the owner can make, such as choosing the folder again. A routine carries no approval: every move or send still needs a Filing approval or Reply send on that run's own proposal or draft. Deleting a routine keeps every task it started.
+A PDF or email request the owner saved to run again, from a Personal task or Email reply task that worked: an inventory that finished, a filing plan the owner approved and AgentDeck carried out, or a reply the owner approved and sent. It names only the operation and the Folder grant or Email account grant it uses, plus the owner's words for an email. Each run rechecks that grant, then starts a new task with its own identity and result; a run that cannot start is recorded with the repair the owner can make, such as choosing the folder again. A routine carries no approval: every move or send still needs a Filing approval or Reply send on that run's own proposal or draft. Deleting a routine keeps every task it started.
 _Avoid_: Automation, schedule, standing approval, Profile
 
 **Relay**:

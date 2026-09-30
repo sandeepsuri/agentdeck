@@ -73,6 +73,8 @@ async function workingTask(): Promise<string> {
   const account = await email.connectAccount(OWNER);
   const task = email.submit({ accountId: account.id, request: 'The lease email. Say yes by Friday.' }, OWNER);
   await email.whenIdle();
+  const drafted = await email.confirm(task.id, { messageId: 'gm-lease' }, OWNER);
+  await email.approveSend(task.id, { version: drafted.drafts[0]!.version, digest: drafted.drafts[0]!.digest }, OWNER);
   return task.id;
 }
 

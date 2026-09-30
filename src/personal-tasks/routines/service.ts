@@ -9,7 +9,7 @@
 // with what the owner can do about it.
 import { randomUUID } from 'node:crypto';
 import type { RoutineRepository } from '../../store/routines.js';
-import type { EmailTaskService } from '../email/service.js';
+import { EmailTaskError, type EmailTaskService } from '../email/service.js';
 import type { EmailAccountView } from '../email/types.js';
 import { GrantPathError } from '../folder-grant.js';
 import { DEFAULT_MAX_FILES_PER_TASK, PersonalTaskError, type PersonalTaskService } from '../service.js';
@@ -55,7 +55,12 @@ export class RoutineService {
     return this.now().toISOString();
   }
 
-  /** Saves the request behind a task that worked, with the grant or account it used. */
+  /**
+   * Saves the request behind a task that worked, with the grant or account it
+   * used. A filing plan counts once the owner approved it and it was carried
+   * out, and an email reply once the approved reply was sent; an inventory,
+   * which changes nothing, once it finished.
+   */
   save(input: { name: unknown; source: unknown; taskId: unknown }, actor: PersonalActor): RoutineView {
     const name = this.name(input.name);
     if (typeof input.taskId !== 'string' || !input.taskId) throw new RoutineError('invalid-input', 'Choose the task to save.');
@@ -64,11 +69,14 @@ export class RoutineService {
       const task = this.options.personal.get(input.taskId);
       if (!task) throw new RoutineError('not-found', 'No such task.');
       if (task.status !== 'completed') throw new RoutineError('invalid-state', 'Save a routine from a task that finished.');
+      if (task.kind === 'pdf-filing-proposal' && task.filing?.state !== 'finished') {
+        throw new RoutineError('invalid-state', 'Save a filing routine once you have approved a plan and it was carried out.');
+      }
       config = { kind: task.kind, grantId: task.grant.id };
     } else if (input.source === 'email') {
       const task = this.options.email.get(input.taskId);
       if (!task) throw new RoutineError('not-found', 'No such task.');
-      if (task.status !== 'completed') throw new RoutineError('invalid-state', 'Save a routine from a search that found the email.');
+      if (!task.sends.some((sent) => sent.state === 'sent')) throw new RoutineError('invalid-state', 'Save an email routine once you have approved and sent its reply.');
       config = { kind: 'email-reply', accountId: task.account.id, request: task.request };
     } else {
       throw new RoutineError('invalid-input', 'source must be personal or email.');
@@ -120,8 +128,8 @@ export class RoutineService {
    */
   async run(id: string, actor: PersonalActor): Promise<RoutineRunView> {
     const routine = this.live(id);
-    const last = this.repository.listRuns(id)[0];
-    if (this.starting.has(id) || (last?.task && UNSETTLED.includes(this.taskSummary(last.task)?.status ?? 'completed'))) {
+    const pending = this.repository.listRuns(id).some((run) => run.task && UNSETTLED.includes(this.taskSummary(run.task)?.status ?? 'completed'));
+    if (this.starting.has(id) || pending) {
       throw new RoutineError('invalid-state', 'The last run of this routine has not finished yet.');
     }
     this.starting.add(id);
@@ -179,29 +187,45 @@ export class RoutineService {
     const revoked = this.accountBlock(config.accountId, { recheck: true });
     if (revoked) return { block: revoked };
     // A fresh check each run: a sign-in that expired since the last run is found here, not partway through the search.
-    const account = await email.checkAccount(config.accountId).catch(() => undefined);
-    if (!account || account.revokedAt) return { block: this.accountBlock(config.accountId) ?? revokedAccount() };
+    let account: EmailAccountView;
+    try {
+      account = await email.checkAccount(config.accountId);
+    } catch {
+      return { block: this.accountBlock(config.accountId) ?? { code: 'account-needs-repair', message: 'The Gmail account could not be checked. Try again.' } };
+    }
     if (account.state !== 'ready') return { block: accountRepair(account) };
     try {
       const task = email.submit({ accountId: config.accountId, request: config.request }, actor);
       return { task: { source: 'email', id: task.id } };
     } catch (error) {
-      if (error instanceof Error && 'code' in error && (error.code === 'account-revoked' || error.code === 'not-found')) return { block: revokedAccount(account.address) };
+      if (error instanceof EmailTaskError && (error.code === 'account-revoked' || error.code === 'not-found')) return { block: revokedAccount(account.address) };
       throw error;
     }
   }
 
   // -- checks --
 
-  private folderBlock(grantId: string): RoutineBlock | undefined {
+  /** With { onDisk }, also finds a folder that was moved or removed, so the routine shows it before a run. */
+  private folderBlock(grantId: string, options: { onDisk?: boolean } = {}): RoutineBlock | undefined {
     const grant = this.options.personal.getGrant(grantId);
     if (!grant || grant.revokedAt) return revokedFolder(grant?.name ?? 'The folder');
+    if (options.onDisk) {
+      try {
+        this.options.personal.listGrantPdfs(grantId, { maxDepth: 1, maxFiles: 1 });
+      } catch (error) {
+        if (error instanceof GrantPathError && error.code === 'grant-unavailable') return this.personalFailure(error, grant.name);
+      }
+    }
     return undefined;
+  }
+
+  private account(accountId: string): EmailAccountView | undefined {
+    return this.options.email.listAccounts().find((entry) => entry.id === accountId);
   }
 
   /** Without a recheck, a state the owner must fix counts; with one, only revocation does, as the check comes next. */
   private accountBlock(accountId: string, options: { recheck?: boolean } = {}): RoutineBlock | undefined {
-    const account = this.options.email.listAccounts().find((entry) => entry.id === accountId);
+    const account = this.account(accountId);
     if (!account || account.revokedAt) return revokedAccount(account?.address);
     if (!options.recheck && NEEDS_REPAIR.has(account.state)) return accountRepair(account);
     return undefined;
@@ -209,7 +233,7 @@ export class RoutineService {
 
   private assertTargetActive(config: RoutineConfig): void {
     if (config.kind === 'email-reply') {
-      const account = this.options.email.listAccounts().find((entry) => entry.id === config.accountId);
+      const account = this.account(config.accountId);
       if (!account) throw new RoutineError('not-found', 'No such Gmail account.');
       if (account.revokedAt) throw new RoutineError('account-revoked', 'Access to this Gmail account was revoked. Reconnect it first.');
       return;
@@ -239,13 +263,13 @@ export class RoutineService {
     let target: RoutineView['target'];
     let repair: RoutineBlock | undefined;
     if (config.kind === 'email-reply') {
-      const account = this.options.email.listAccounts().find((entry) => entry.id === config.accountId);
+      const account = this.account(config.accountId);
       target = { id: config.accountId, label: account?.address ?? 'Unknown account', revoked: !account || Boolean(account.revokedAt) };
       repair = this.accountBlock(config.accountId);
     } else {
       const grant = this.options.personal.getGrant(config.grantId);
       target = { id: config.grantId, label: grant?.name ?? 'Unknown folder', revoked: !grant || Boolean(grant.revokedAt) };
-      repair = this.folderBlock(config.grantId);
+      repair = this.folderBlock(config.grantId, { onDisk: true });
     }
     return {
       id: routine.id,

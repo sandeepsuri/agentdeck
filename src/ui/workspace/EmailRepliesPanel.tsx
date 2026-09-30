@@ -276,7 +276,7 @@ function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove,
         </div>
       )}
 
-      {task.status === 'completed' && (
+      {task.sends.some((sent) => sent.state === 'sent') && (
         <SaveRoutine defaultName={task.title} source="email" taskId={task.id} {...(onRoutineSaved ? { onSaved: onRoutineSaved } : {})} />
       )}
 

@@ -1,4 +1,4 @@
-// Persistence for saved routines and their runs (migration 032). Exposed as
+// Persistence for saved routines and their runs (migration 033). Exposed as
 // Store.routines so the "no SQL outside src/store" rule holds. Deleting a
 // routine only stamps it; its runs and the tasks they link to are kept.
 import type { Database } from 'better-sqlite3';

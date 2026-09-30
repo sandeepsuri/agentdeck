@@ -334,7 +334,7 @@ function TaskDetail({ task, onRetry, onApprove, onFilingAction, onRoutineSaved }
         </div>
       )}
 
-      {task.status === 'completed' && (
+      {task.status === 'completed' && (task.kind === 'pdf-inventory' || task.filing?.state === 'finished') && (
         <SaveRoutine
           defaultName={task.kind === 'pdf-filing-proposal' ? `File new PDFs in ${task.grant.name}` : `Inspect PDFs in ${task.grant.name}`}
           key={`routine-${task.id}`}

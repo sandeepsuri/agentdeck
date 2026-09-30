@@ -30,6 +30,9 @@ export type RoutineBlockCode =
   | 'account-needs-repair'
   | 'nothing-to-run';
 
+/** Blocks that stop every run until the owner points the routine at a folder or account chosen again. */
+export const REPOINT_CODES: readonly RoutineBlockCode[] = ['folder-revoked', 'folder-unavailable', 'account-revoked'];
+
 export interface RoutineBlock {
   readonly code: RoutineBlockCode;
   /** Owner-facing: what is wrong and what to do about it. */

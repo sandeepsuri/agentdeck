@@ -87,31 +87,32 @@ afterEach(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-async function workingFiling(): Promise<PersonalTaskView> {
-  const grant = personal.createGrant(folder, OWNER);
-  const task = personal.submitFilingProposal({ grantId: grant.id, files: ['power.pdf'] }, OWNER);
-  await idle();
-  return personal.get(task.id)!;
-}
-
 function digestOf(task: PersonalTaskView | undefined): string {
   if (!task?.result || !isFilingProposal(task.result)) throw new Error(`no proposal: ${task?.failure}`);
   return task.result.planDigest;
 }
 
+/** A filing plan the owner approved and AgentDeck carried out; then a new bill arrives, loose in the folder. */
+async function workingFiling(): Promise<PersonalTaskView> {
+  const grant = personal.createGrant(folder, OWNER);
+  const task = personal.submitFilingProposal({ grantId: grant.id, files: ['power.pdf'] }, OWNER);
+  await idle();
+  personal.approveFiling(task.id, { planDigest: digestOf(personal.get(task.id)) }, OWNER);
+  await idle();
+  pdf('gas.pdf', 'Metro Gas April 2026');
+  return personal.get(task.id)!;
+}
+
 describe('a PDF filing routine', () => {
   it('is saved from a proposal that worked and each run starts its own task that needs its own approval', async () => {
     const first = await workingFiling();
-    personal.approveFiling(first.id, { planDigest: digestOf(first) }, OWNER);
-    await idle();
     expect(fs.existsSync(path.join(folder, 'Bills', 'Power', 'Power 2026-03.pdf'))).toBe(true);
 
     const routine = routines.save({ name: 'File new bills', source: 'personal', taskId: first.id }, OWNER);
     expect(routine).toMatchObject({ name: 'File new bills', kind: 'pdf-filing-proposal', target: { label: 'Inbox', revoked: false }, runs: [] });
     expect(routine.repair).toBeUndefined();
 
-    // A new bill arrives; the routine files what sits loose in the folder, not what it filed last time.
-    pdf('gas.pdf', 'Metro Gas April 2026');
+    // The routine files what sits loose in the folder, not what it filed last time.
     const run = await routines.run(routine.id, OWNER);
     expect(run.outcome).toBe('started');
     await idle();
@@ -148,6 +149,14 @@ describe('a PDF filing routine', () => {
     expect(() => routines.save({ name: '  ', source: 'personal', taskId: broken.id }, OWNER)).toThrow(expect.objectContaining({ code: 'invalid-input' }));
   });
 
+  it('is not saved from a filing plan the owner has not approved and carried out', async () => {
+    const grant = personal.createGrant(folder, OWNER);
+    const proposal = personal.submitFilingProposal({ grantId: grant.id, files: ['power.pdf'] }, OWNER);
+    await idle();
+    expect(personal.get(proposal.id)!.status).toBe('completed');
+    expect(() => routines.save({ name: 'x', source: 'personal', taskId: proposal.id }, OWNER)).toThrow(expect.objectContaining({ code: 'invalid-state' }));
+  });
+
   it('is blocked by a revoked folder with a repair, and runs again once pointed at a folder chosen again', async () => {
     const first = await workingFiling();
     const routine = routines.save({ name: 'File new bills', source: 'personal', taskId: first.id }, OWNER);
@@ -175,12 +184,14 @@ describe('a PDF filing routine', () => {
   it('says when the folder is gone or nothing is waiting, without starting a task', async () => {
     const first = await workingFiling();
     const routine = routines.save({ name: 'File new bills', source: 'personal', taskId: first.id }, OWNER);
-    // power.pdf is still loose, so move it into a sub-folder by hand: nothing is left to file.
+    // The owner files the new bill by hand: nothing is left loose.
     fs.mkdirSync(path.join(folder, 'Old'));
-    fs.renameSync(path.join(folder, 'power.pdf'), path.join(folder, 'Old', 'power.pdf'));
+    fs.renameSync(path.join(folder, 'gas.pdf'), path.join(folder, 'Old', 'gas.pdf'));
     expect(await routines.run(routine.id, OWNER)).toMatchObject({ outcome: 'blocked', block: { code: 'nothing-to-run' } });
 
     fs.rmSync(folder, { recursive: true });
+    // The routine shows the folder is gone before anyone runs it.
+    expect(routines.get(routine.id)!.repair).toMatchObject({ code: 'folder-unavailable' });
     expect(await routines.run(routine.id, OWNER)).toMatchObject({ outcome: 'blocked', block: { code: 'folder-unavailable' } });
     expect(personal.list()).toHaveLength(1);
   });
@@ -208,12 +219,23 @@ describe('a PDF filing routine', () => {
 });
 
 describe('an email reply routine', () => {
+  /** A reply the owner confirmed, approved, and sent. */
   async function workingReply() {
     const account = await email.connectAccount(OWNER);
-    const task = email.submit({ accountId: account.id, request: 'The email from Pat about the lease renewal. Say I will sign by Friday.' }, OWNER);
+    const { id } = email.submit({ accountId: account.id, request: 'The email from Pat about the lease renewal. Say I will sign by Friday.' }, OWNER);
     await idle();
-    return { account, task: email.get(task.id)! };
+    const drafted = await email.confirm(id, { messageId: 'gm-lease' }, OWNER);
+    await email.approveSend(id, { version: drafted.drafts[0]!.version, digest: drafted.drafts[0]!.digest }, OWNER);
+    return { account, task: email.get(id)! };
   }
+
+  it('is not saved from a search whose reply was not sent', async () => {
+    const account = await email.connectAccount(OWNER);
+    const { id } = email.submit({ accountId: account.id, request: 'The lease email.' }, OWNER);
+    await idle();
+    expect(email.get(id)!.status).toBe('completed');
+    expect(() => routines.save({ name: 'x', source: 'email', taskId: id }, OWNER)).toThrow(expect.objectContaining({ code: 'invalid-state' }));
+  });
 
   it('runs the same request as a new task, which needs its own confirmation, draft, and send approval', async () => {
     const { task } = await workingReply();
@@ -230,13 +252,13 @@ describe('an email reply routine', () => {
     expect(again.confirmed).toBeUndefined();
     expect(again.drafts).toEqual([]);
     expect(again.sends).toEqual([]);
-    expect(mailbox.sent).toHaveLength(0);
+    expect(mailbox.sent).toHaveLength(1);
 
     // The owner confirms, drafts, and approves this run's exact version; only then is anything sent.
     const drafted = await email.confirm(again.id, { messageId: 'gm-lease' }, OWNER);
     const sent = await email.approveSend(again.id, { version: drafted.drafts[0]!.version, digest: drafted.drafts[0]!.digest }, OWNER);
     expect(sent.sends[0]!.state).toBe('sent');
-    expect(mailbox.sent).toHaveLength(1);
+    expect(mailbox.sent).toHaveLength(2);
   });
 
   it('rechecks the account on each run: revoked or signed out blocks it, and reconnecting repairs it', async () => {
@@ -252,6 +274,7 @@ describe('an email reply routine', () => {
 
     await email.revokeAccount(account.id);
     mailbox.failure = undefined;
+    expect(routines.get(routine.id)!.repair).toMatchObject({ code: 'account-revoked' });
     expect(await routines.run(routine.id, OWNER)).toMatchObject({ outcome: 'blocked', block: { code: 'account-revoked' } });
     expect(email.list()).toHaveLength(1);
 

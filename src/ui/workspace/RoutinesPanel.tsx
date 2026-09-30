@@ -5,7 +5,7 @@
 // move or a send stays on each run's own task.
 import { useCallback, useEffect, useState } from 'react';
 import type { EmailAccountView } from '../../personal-tasks/email/types.js';
-import type { RoutineKind, RoutineTaskSource, RoutineView } from '../../personal-tasks/routines/types.js';
+import { REPOINT_CODES, type RoutineKind, type RoutineTaskSource, type RoutineView } from '../../personal-tasks/routines/types.js';
 import type { FolderGrantView, PersonalTaskStatus } from '../../personal-tasks/types.js';
 import { apiFetch } from '../apiFetch.js';
 
@@ -98,7 +98,7 @@ function Repair({ routine, grants, accounts, onRepoint }: {
     ? accounts.filter((account) => !account.revokedAt && account.id !== routine.target.id).map((account) => ({ id: account.id, label: account.address }))
     : grants.filter((grant) => !grant.revokedAt && grant.id !== routine.target.id).map((grant) => ({ id: grant.id, label: `${grant.name} (${grant.displayPath})` }));
   const [chosen, setChosen] = useState(choices[0]?.id ?? '');
-  const repointable = routine.repair && (routine.repair.code === 'folder-revoked' || routine.repair.code === 'folder-unavailable' || routine.repair.code === 'account-revoked');
+  const repointable = routine.repair && REPOINT_CODES.includes(routine.repair.code);
   const current = choices.find((choice) => choice.id === chosen) ?? choices[0];
   return (
     <div className="personal-failure" role="alert">
@@ -193,7 +193,7 @@ export function RoutinesPanel({ active = true, refreshSignal = 0, onOpenTask, on
       <header className="home-section-header"><h2 id="personal-routines">Routines</h2></header>
       {error && <p className="personal-error" role="alert">{error}</p>}
       {routines === null ? null : routines.length === 0 ? (
-        <p className="personal-empty">No routines yet. When a filing plan or email reply works, choose “Save as routine” on it to run it again later.</p>
+        <p className="personal-empty">No routines yet. Once a filing plan is carried out or an email reply is sent, choose “Save as routine” on it to run it again later.</p>
       ) : (
         <ul aria-label="Routines" className="routine-list">
           {routines.map((routine) => {
@@ -208,7 +208,7 @@ export function RoutinesPanel({ active = true, refreshSignal = 0, onOpenTask, on
                     {routine.request && <small className="routine-request">“{routine.request}”</small>}
                   </div>
                   <div className="routine-actions">
-                    <button className="button button-primary" disabled={busy || routine.repair?.code === 'folder-revoked' || routine.repair?.code === 'account-revoked'} onClick={() => void runRoutine(routine)} type="button">
+                    <button className="button button-primary" disabled={busy || (routine.repair !== undefined && REPOINT_CODES.includes(routine.repair.code))} onClick={() => void runRoutine(routine)} type="button">
                       {running === routine.id ? 'Starting…' : 'Run again'}
                     </button>
                     <button aria-label={`Delete routine ${routine.name}`} className="text-button" onClick={() => void remove(routine)} type="button">Delete</button>
