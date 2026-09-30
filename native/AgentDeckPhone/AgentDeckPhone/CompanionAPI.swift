@@ -237,6 +237,8 @@ struct CompanionClient {
     func exchange(_ path: String, method: String, body: Data?) async throws -> (Int, Data) {
         let order = route.preferRelay ? [true, false] : [false, true]
         for useRelay in order {
+            // A request the phone gave up on (issue #91: leaving the window view) is not retried by the other path.
+            try Task.checkCancellation()
             do {
                 let answer = useRelay ? try await viaRelay(path, method: method, body: body) : try await direct(path, method: method, body: body)
                 route.preferRelay = useRelay
@@ -248,7 +250,12 @@ struct CompanionClient {
 
     private func direct(_ path: String, method: String, body: Data?) async throws -> (Int, Data) {
         guard let base else { throw CompanionFailure.unavailable }
-        var request = URLRequest(url: base.appending(path: path))
+        // A query (issue #91's frame requests) is kept as a query, not encoded into the path.
+        let parts = path.split(separator: "?", maxSplits: 1).map(String.init)
+        var components = URLComponents(url: base.appending(path: parts.first ?? path), resolvingAgainstBaseURL: false)
+        if parts.count == 2 { components?.percentEncodedQuery = parts[1] }
+        guard let url = components?.url else { throw CompanionFailure.unavailable }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         // Short when the relay can take over, so a phone away from home is not kept waiting.
         request.timeoutInterval = relay == nil ? 10 : 4
@@ -296,6 +303,38 @@ struct SubmitTask: Encodable { let kind: TaskKind; let grantId: String; let file
 struct ApproveFiling: Encodable { let planDigest: String; let overwrite: [String] }
 struct FilingAction: Encodable { let idempotencyKey: String }
 struct Empty: Codable {}
+
+// Issue #91: the one Mac window the owner shared on the Mac, as
+// /api/window-view/* serves it to this phone. No frame is kept once the
+// view ends.
+
+struct WindowName: Decodable, Equatable {
+    let app: String
+    let title: String
+    var label: String { title.isEmpty ? app : "\(app) — \(title)" }
+}
+
+struct WindowViewStatus: Decodable, Equatable {
+    struct Viewing: Decodable, Equatable { let viewId: String; let startedAt: String }
+    struct Ended: Decodable, Equatable { let reason: String; let message: String; let at: String }
+    let window: WindowName?
+    let viewing: Viewing?
+    let ended: Ended?
+}
+
+struct StartedView: Decodable, Equatable { let viewId: String; let startedAt: String }
+
+struct WindowFrame: Decodable, Equatable {
+    let seq: Int
+    let width: Int
+    let height: Int
+    let capturedAt: String
+    /** The JPEG, base64. */
+    let jpeg: String
+}
+
+struct FrameAnswer: Decodable, Equatable { let frame: WindowFrame? }
+struct StopView: Encodable { let viewId: String }
 
 enum Format {
     private static let parser: ISO8601DateFormatter = {

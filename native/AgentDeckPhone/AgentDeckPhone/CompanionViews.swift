@@ -32,6 +32,9 @@ struct CompanionView: View {
                     TasksView(model: model, onForget: onForget)
                         .tabItem { Label("Tasks", systemImage: "checklist") }
                         .tag(CompanionModel.Tab.tasks)
+                    MacWindowView(model: model.window)
+                        .tabItem { Label("Mac window", systemImage: "macwindow") }
+                        .tag(CompanionModel.Tab.window)
                 }
             }
         }
@@ -407,6 +410,65 @@ private struct ProposalSections: View {
     private func act(_ action: @escaping () async -> Bool) {
         busy = true
         Task { _ = await action(); busy = false }
+    }
+}
+
+// MARK: - Mac window (issue #91)
+
+/** Views the one window the owner shared on the Mac. Only viewing: nothing here controls the Mac. */
+private struct MacWindowView: View {
+    @ObservedObject var model: WindowViewModel
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                if model.state == .viewing, let jpeg = model.jpeg, let image = UIImage(data: jpeg) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("Live view of \(model.status?.window?.label ?? "the shared Mac window")")
+                } else if model.state != .idle {
+                    Spacer()
+                    ProgressView(model.state == .starting ? "Asking your Mac…" : "Waiting for the first picture…")
+                    Spacer()
+                } else {
+                    Spacer()
+                    Image(systemName: "macwindow").font(.largeTitle).accessibilityHidden(true)
+                    if let window = model.status?.window {
+                        Text(window.label).font(.headline).multilineTextAlignment(.center)
+                        Text("You’ll see only this window, and can’t control it. The Mac shows that it’s being viewed.")
+                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    } else {
+                        Text("No window is shared.").font(.headline)
+                        Text("On the Mac, choose one under Settings › Owner phones › Mac window.")
+                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                    if let ended = model.ended {
+                        Label(ended, systemImage: "exclamationmark.circle")
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("AgentDeck says: \(ended)")
+                    }
+                    Spacer()
+                }
+                if model.state == .idle {
+                    Button("View window") { model.start() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.status?.window == nil)
+                } else {
+                    Label("Live · the Mac shows it’s being viewed", systemImage: "record.circle")
+                        .font(.footnote).foregroundStyle(.red)
+                    Button("Stop viewing", role: .destructive) { model.stop() }
+                        .buttonStyle(.bordered)
+                }
+            }
+            .padding()
+            .navigationTitle("Mac window")
+            .refreshable { await model.load() }
+        }
+        .task { await model.load() }
+        // Leaving the tab ends the view, and the capture on the Mac with it.
+        .onDisappear { model.stop() }
     }
 }
 

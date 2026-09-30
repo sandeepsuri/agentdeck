@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch, responseJson } from '../apiFetch.js';
+import { WindowViewPanel } from './WindowViewPanel.js';
 
 interface OwnerDevice { id: string; label: string; createdAt: string; revokedAt?: string }
 interface AuditEntry { id: string; action: keyof typeof AUDIT_LABEL; targetId: string; createdAt: string }
@@ -12,6 +13,8 @@ const AUDIT_LABEL = {
   'filing-approve': 'Approved filing plan for task',
   'filing-retry': 'Retried unmoved files for task',
   'filing-undo': 'Undid recorded moves for task',
+  'window-view-start': 'Started viewing Mac window',
+  'window-view-stop': 'Stopped viewing Mac window',
 } as const;
 interface Challenge { id: string; expiresAt: string; qr: string }
 interface RelayStatus { state: 'off' | 'connecting' | 'connected' | 'unreachable' | 'refused' | 'stopped'; url?: string; detail?: string }
@@ -197,5 +200,6 @@ export function OwnerPhonesPanel() {
     </div>)}
     <p>Lost a phone? Revoke it here, then pair a replacement. It loses access at once, through the relay too.</p>
     <AwayFromHome onChange={loadAvailability} />
+    <WindowViewPanel />
   </section>;
 }

@@ -20,7 +20,9 @@ export interface OwnerDeviceAudit {
   deviceId: string;
   action: 'session-send' | 'session-input'
     // Issue #87: personal-task requests and decisions made from the phone.
-    | 'personal-task-submit' | 'personal-task-retry' | 'filing-approve' | 'filing-retry' | 'filing-undo';
+    | 'personal-task-submit' | 'personal-task-retry' | 'filing-approve' | 'filing-retry' | 'filing-undo'
+    // Issue #91: starting and stopping a view of the shared Mac window.
+    | 'window-view-start' | 'window-view-stop';
   targetId: string;
   createdAt: string;
 }

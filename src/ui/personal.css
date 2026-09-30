@@ -135,3 +135,11 @@
 .email-send.is-approved h4, .email-send.is-sending h4, .email-send.is-ambiguous h4 { color: var(--status-running); }
 .email-versions { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
 .email-versions small { color: var(--text-muted); }
+
+/* Issue #91: the Mac-side sign that a phone is viewing a shared window. */
+.window-view-live { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--status-error); border-radius: var(--radius-sm); background: var(--status-error-bg); }
+.window-view-live strong { flex: 1; }
+.window-view-live-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--status-error); animation: status-pulse 1.8s ease-out infinite; }
+.window-view-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.window-view-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.window-view-list li span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

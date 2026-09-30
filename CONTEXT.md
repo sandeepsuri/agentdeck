@@ -152,6 +152,10 @@ _Avoid_: Auto-send, outbox, standing approval
 The result of a harmless check that a provider CLI on this Mac is installed, signed in with the provider's own sign-in, and within its plan allowance: ready, missing CLI, signed out, expired, allowance reached, or check failed, each with repair steps. Only this metadata is kept; the credential stays in the provider's own storage.
 _Avoid_: Runtime readiness (the managed-run capability probe), login, auth
 
+**Shared window**:
+The one Mac window the owner chose at the Mac for a paired owner phone to view. Only that window is captured, only while a phone keeps viewing it, and with a visible indicator on the Mac. Viewing grants no control of the Mac. The choice and every frame live in memory only; stopping on either device, revoking the phone, withdrawing Screen Recording, closing the window, or a service restart ends the view.
+_Avoid_: Screen share, remote desktop, screen mirroring
+
 **Publication**:
 An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.
 _Avoid_: Deploy, release, publish (as a bare verb with no durable record)

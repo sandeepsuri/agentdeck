@@ -24,6 +24,8 @@ import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
 import { registerOwnerPairingRoutes, type PhoneAccessControl, type RelayControl } from './owner-pairing-routes.js';
 import { classify, RELAY_HOST, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
+import { isOwnerWindowViewRoute, registerWindowViewRoutes } from './window-view-routes.js';
+import type { WindowViewService } from '../window-view/service.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
 // canonical implementations now live in connection-trust.ts so classify()
@@ -145,6 +147,8 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
 function isOwnerDeviceAllowedRoute(method: string, pathname: string): boolean {
   if (isRemoteAllowedRoute(method, pathname)) return true;
   if (isOwnerPersonalRoute(method, pathname)) return true;
+  // Issue #91: view the one window the owner shared on the Mac.
+  if (isOwnerWindowViewRoute(method, pathname)) return true;
   // Issue #90: a phone enrolls its channel key (direct connection only; the
   // relay dispatcher never forwards this) and registers its push token.
   return method === 'POST' && (pathname === '/api/owner-pairing/relay-key' || pathname === '/api/owner-pairing/push-token');
@@ -220,6 +224,8 @@ export interface AppContext {
   emailTasks?: Omit<EmailTaskRouteDeps, 'resolveOwner'>;
   /** Issue #85: provider CLI setup — /api/provider-setup/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
   providerSetup?: ProviderSetupService;
+  /** Issue #91: one Mac window, chosen at the Mac, viewed from a paired owner phone — /api/window-view/*. On no collaborator or shared-token allowlist, and re-checked per route. */
+  windowView?: { service: WindowViewService; openSettings: () => Promise<void> };
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -359,6 +365,18 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   });
   if (ctx.emailTasks) registerEmailTaskRoutes(app, { ...ctx.emailTasks, resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined) });
   if (ctx.providerSetup) registerProviderSetupRoutes(app, { service: ctx.providerSetup, isOwner: isLocalOwner });
+  if (ctx.windowView) {
+    const { service } = ctx.windowView;
+    registerWindowViewRoutes(app, {
+      service,
+      openSettings: ctx.windowView.openSettings,
+      isLocalOwner,
+      ownerPhone: (req) => requestTrust(req).ownerDevice,
+      ...(ctx.ownerPairing ? { audit: ctx.ownerPairing.audit.bind(ctx.ownerPairing) } : {}),
+    });
+    // Revoking a phone ends its view at once, whichever path it arrived by.
+    ctx.ownerPairing?.onRevoke((deviceId) => service.endForDevice(deviceId));
+  }
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.
