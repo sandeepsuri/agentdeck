@@ -19,8 +19,6 @@ import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
-import { nativeCaptureDriver } from '../native/window-capture.js';
-import { WindowViewService } from '../window-view/service.js';
 import { WakeLock } from './wake-lock.js';
 import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
 import { coordinateManagedWakeLock } from './managed-wake-lock.js';
@@ -47,6 +45,8 @@ import { keychainTokenVault } from '../personal-tasks/email/keychain.js';
 import { RELAY_KEYCHAIN_SERVICE } from '../relay/identity.js';
 import { RelayService } from '../relay/service.js';
 import { relayDispatcher } from './relay-dispatch.js';
+import { watchWorkNeeds } from './phone-work-push.js';
+import { workState } from './phone-work-routes.js';
 import { ProviderSetupService } from '../provider-setup/service.js';
 import { macProviderCommands } from '../provider-setup/commands.js';
 
@@ -203,11 +203,6 @@ export async function startServer(): Promise<RunningServer> {
     getPricing: () => ({ ...DEFAULT_PRICING, ...config.usagePricing }),
     status: () => ({ indexedAt: usageIndexer.indexedAt, indexing: usageIndexer.indexing }),
   });
-  // Issue #91: one Mac window, chosen at the Mac, viewed from a paired owner
-  // phone. The capture helper exits with the service (its stdin closes), so
-  // a restart never leaves a capture or its indicator behind.
-  const captureDriver = nativeCaptureDriver();
-  const windowView = new WindowViewService({ driver: captureDriver });
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators, ownerPairing,
@@ -227,9 +222,13 @@ export async function startServer(): Promise<RunningServer> {
     providerSetup,
     pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
     relay,
-    windowView: { service: windowView, openSettings: () => captureDriver.openSettings() },
   });
   relay.attach(relayDispatcher(app, ownerPairing));
+  // Phone work: tell the owner's phones when coding work starts waiting on them.
+  const stopWorkPush = watchWorkNeeds({
+    state: () => workState({ manager, store, workEngine }),
+    push: () => relay.push(ownerPairing.pushTargets()),
+  });
   const access = folderAccess(config, () => store.listRepos());
   // Ticket 11/12: the same ConnectionTrust.classify() every other route
   // defers to (see app.ts's onRequest hook) — resolves a collaborator
@@ -270,7 +269,7 @@ export async function startServer(): Promise<RunningServer> {
     discovery.stop(); coordination.stop();
     usageIndexer.stop(); modelNews.stop();
     companion?.close();
-    windowView.shutdown();
+    stopWorkPush();
     relay.stop();
     providerSetup.shutdown();
     releaseWakeLock();

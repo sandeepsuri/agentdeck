@@ -97,9 +97,29 @@ private struct EnrollResult: Decodable { let relay: RelayLink? }
 private struct PushToken: Encodable { let token: String; let environment: String }
 
 /** Receives the APNs token; the phone registers only once paired (issue #90 pointer pushes). */
-final class PhoneAppDelegate: NSObject, UIApplicationDelegate {
+final class PhoneAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     static var onToken: ((String) -> Void)?
     static var latestToken: String?
+    /** Opening a push goes to Needs you; set once a Mac is paired. */
+    static var onOpenPush: (() -> Void)?
+    /** A push opened before the companion was ready, for it to act on. */
+    static var openedPush = false
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        await MainActor.run {
+            if let open = PhoneAppDelegate.onOpenPush { open() } else { PhoneAppDelegate.openedPush = true }
+        }
+    }
+
+    /** While the app is open the lists refresh themselves; the banner still says something is waiting. */
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
+    }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
@@ -140,6 +160,11 @@ final class PhoneAppDelegate: NSObject, UIApplicationDelegate {
             self?.error = "This phone was revoked on the Mac. Pair it again to continue."
         }
         error = nil
+        PhoneAppDelegate.onOpenPush = { [weak self] in self?.companion?.openNeedsYou() }
+        if PhoneAppDelegate.openedPush {
+            PhoneAppDelegate.openedPush = false
+            companion?.tab = .needsYou
+        }
         Task { await enroll(phone) }
         registerForPushes()
     }

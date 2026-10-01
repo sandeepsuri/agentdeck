@@ -33,8 +33,7 @@ if (binPathResult.status !== 0) {
   process.exit(binPathResult.status ?? 1);
 }
 
-// The menu bar companion, and (issue #91) the window-capture helper, each as
-// its own ad hoc signed app bundle so each has its own Info.plist.
+// The menu bar companion, as its own ad hoc signed app bundle with its own Info.plist.
 function bundle(name, plist) {
   const executable = path.join(binPathResult.stdout.trim(), name);
   if (!existsSync(executable)) {
@@ -55,4 +54,3 @@ function bundle(name, plist) {
 }
 
 bundle('AgentDeckNotch', 'Info.plist');
-bundle('AgentDeckWindowView', 'Info-WindowView.plist');

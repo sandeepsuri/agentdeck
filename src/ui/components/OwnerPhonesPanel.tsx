@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import { apiFetch, responseJson } from '../apiFetch.js';
-import { WindowViewPanel } from './WindowViewPanel.js';
 
 interface OwnerDevice { id: string; label: string; createdAt: string; revokedAt?: string }
 interface AuditEntry { id: string; action: keyof typeof AUDIT_LABEL; targetId: string; createdAt: string }
@@ -13,6 +12,7 @@ const AUDIT_LABEL = {
   'filing-approve': 'Approved filing plan for task',
   'filing-retry': 'Retried unmoved files for task',
   'filing-undo': 'Undid recorded moves for task',
+  // The Mac window view was removed; its entries stay readable in history.
   'window-view-start': 'Started viewing Mac window',
   'window-view-stop': 'Stopped viewing Mac window',
 } as const;
@@ -200,6 +200,5 @@ export function OwnerPhonesPanel() {
     </div>)}
     <p>Lost a phone? Revoke it here, then pair a replacement. It loses access at once, through the relay too.</p>
     <AwayFromHome onChange={loadAvailability} />
-    <WindowViewPanel />
   </section>;
 }

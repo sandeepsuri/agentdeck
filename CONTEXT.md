@@ -145,8 +145,12 @@ The long-lived X25519 key pair a paired phone or the Mac holds for the relay cha
 _Avoid_: Device key (for the bearer credential), session key
 
 **Pointer push**:
-A notification the relay sends a paired phone that says only that something on the Mac needs the owner. It carries no task, file, or decision. The phone opens and asks the Mac.
+A notification the relay sends a paired phone that says only that something on the Mac needs the owner. It carries no task, file, or decision. The phone opens and asks the Mac. A Session or Run that starts waiting on an approval, a question, or a review sends one too, once per waiting item.
 _Avoid_: Task notification, alert (for its content)
+
+**Phone work**:
+Starting and steering the owner's coding Sessions and Runs from a paired owner phone, at home or through the Relay. The phone drives the same Session or Run the Mac shows, not a copy: it follows the conversation, sends messages and fixed control keys, answers questions, approves tool use, and starts, pauses, cancels, reviews, applies, or publishes a Run. It may start work only in a Repository the Mac already has, with no free path, environment, or extra arguments, and with the Repository's checks as set on the Mac. Every action is recorded against the phone before it takes effect. Settings, hooks, deleting work, and Repository policy stay on the Mac.
+_Avoid_: Remote session, mobile copy, phone session
 
 **Reply send**:
 The owner's approval of one saved Reply draft version, bound to its version and digest, and the single Gmail send it allows. AgentDeck records the approval, with exactly the content approved and a fresh send intent, before the send, and builds the message from that record rather than from whatever the Gmail draft holds by then. It is settled as sent, failed (not sent), expired, or ambiguous; an ambiguous send is settled from the thread's sent mail by its intent before anything is sent again. Any later edit needs a new approval, and only the owner at this Mac can approve.
@@ -156,9 +160,9 @@ _Avoid_: Auto-send, outbox, standing approval
 The result of a harmless check that a provider CLI on this Mac is installed, signed in with the provider's own sign-in, and within its plan allowance: ready, missing CLI, signed out, expired, allowance reached, or check failed, each with repair steps. Only this metadata is kept; the credential stays in the provider's own storage.
 _Avoid_: Runtime readiness (the managed-run capability probe), login, auth
 
-**Shared window**:
-The one Mac window the owner chose at the Mac for a paired owner phone to view. Only that window is captured, only while a phone keeps viewing it, and with a visible indicator on the Mac. Viewing grants no control of the Mac. The choice and every frame live in memory only; stopping on either device, revoking the phone, withdrawing Screen Recording, closing the window, or a service restart ends the view.
-_Avoid_: Screen share, remote desktop, screen mirroring
+**Agent image**:
+An image a session's agent looked at — a screenshot it read, or one a tool such as Codex's view_image or a browser tool returned — shown inline in that session's Conversation on the Mac and the paired owner phone. It is read from the agent's own transcript when shown, never captured from the screen; images the owner pasted into a prompt are not shown again. Too large for one relay frame, it is re-encoded smaller on the Mac.
+_Avoid_: Screen share, shared window, attachment
 
 **Publication**:
 An explicit, durable, admin-authorized intent to push a Run's local delivery commit — and optionally open a draft pull request — to a Repository's remote, persisted before execution with a stable identity and settled as succeeded, failed, or ambiguous. Never created automatically by local Run completion, and never granted to a collaborator.

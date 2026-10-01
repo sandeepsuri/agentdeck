@@ -304,38 +304,6 @@ struct ApproveFiling: Encodable { let planDigest: String; let overwrite: [String
 struct FilingAction: Encodable { let idempotencyKey: String }
 struct Empty: Codable {}
 
-// Issue #91: the one Mac window the owner shared on the Mac, as
-// /api/window-view/* serves it to this phone. No frame is kept once the
-// view ends.
-
-struct WindowName: Decodable, Equatable {
-    let app: String
-    let title: String
-    var label: String { title.isEmpty ? app : "\(app) — \(title)" }
-}
-
-struct WindowViewStatus: Decodable, Equatable {
-    struct Viewing: Decodable, Equatable { let viewId: String; let startedAt: String }
-    struct Ended: Decodable, Equatable { let reason: String; let message: String; let at: String }
-    let window: WindowName?
-    let viewing: Viewing?
-    let ended: Ended?
-}
-
-struct StartedView: Decodable, Equatable { let viewId: String; let startedAt: String }
-
-struct WindowFrame: Decodable, Equatable {
-    let seq: Int
-    let width: Int
-    let height: Int
-    let capturedAt: String
-    /** The JPEG, base64. */
-    let jpeg: String
-}
-
-struct FrameAnswer: Decodable, Equatable { let frame: WindowFrame? }
-struct StopView: Encodable { let viewId: String }
-
 enum Format {
     private static let parser: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()

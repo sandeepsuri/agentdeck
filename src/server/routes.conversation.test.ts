@@ -10,6 +10,7 @@ import { Store } from '../store/index.js';
 import type { Session } from '../types.js';
 import { TOKEN_HEADER } from './connection-trust.js';
 import { registerRoutes } from './routes.js';
+import { MAX_IMAGE_BYTES } from './session-images.js';
 
 const session: Session = {
   id: 'sess-1', origin: 'managed', agent: 'claude', cwd: '/Users/me/app',
@@ -53,6 +54,67 @@ describe('GET /api/sessions/:id/conversation', () => {
     const app = build(token);
     const response = await app.inject({
       method: 'GET', url: '/api/sessions/sess-1/conversation',
+      headers: { host: 'my-mac.tailnet-1234.ts.net:4040', [TOKEN_HEADER]: token },
+    });
+    expect(response.statusCode).toBe(403);
+    await app.close();
+  });
+});
+
+describe('GET /api/sessions/:id/images/:imageId', () => {
+  const png = (size: number) => Buffer.alloc(size, 7);
+
+  function buildWithImage(data: Buffer, shrinkImage?: (image: { data: Buffer }) => Promise<Buffer>, token?: string) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdeck-image-route-'));
+    dirs.push(root);
+    const project = path.join(root, claudeProjectDirName(session.cwd));
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'x.jsonl'), `${JSON.stringify({
+      type: 'user', uuid: 'u', timestamp: '2026-09-27T20:00:01Z', message: { content: 'show me' },
+    })}\n${JSON.stringify({
+      type: 'user', uuid: 'r', timestamp: '2026-09-27T20:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: data.toString('base64') } },
+      ] }] },
+    })}`);
+    const app = Fastify();
+    registerRoutes(app, {
+      manager: { getSession: (id: string) => (id === session.id ? session : undefined) } as unknown as SessionManager,
+      config: { ...defaultConfig({}), ...(token ? { tailscaleToken: token } : {}) },
+      conversations: new ConversationReader({ claude: [root], codex: [] }),
+      remoteHosts: ['my-mac.tailnet-1234.ts.net'],
+      ...(shrinkImage ? { shrinkImage } : {}),
+    });
+    return app;
+  }
+
+  it('returns a small image as it is, and 404 for one that is not there', async () => {
+    const app = buildWithImage(png(100));
+    const response = await app.inject({ method: 'GET', url: '/api/sessions/sess-1/images/img-1-0' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ mediaType: 'image/png', data: png(100).toString('base64') });
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/sess-1/images/img-1-1' })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/nope/images/img-1-0' })).statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('re-encodes an image too large for the relay, and refuses one that will not shrink enough', async () => {
+    const sides: number[] = [];
+    const shrunk = buildWithImage(png(MAX_IMAGE_BYTES + 1), async () => { sides.push(sides.length); return png(sides.length === 1 ? MAX_IMAGE_BYTES + 1 : 1000); });
+    const response = await shrunk.inject({ method: 'GET', url: '/api/sessions/sess-1/images/img-1-0' });
+    expect(response.json()).toEqual({ mediaType: 'image/jpeg', data: png(1000).toString('base64') });
+    expect(sides).toHaveLength(2);
+    await shrunk.close();
+
+    const stubborn = buildWithImage(png(MAX_IMAGE_BYTES + 1), async () => png(MAX_IMAGE_BYTES + 1));
+    expect((await stubborn.inject({ method: 'GET', url: '/api/sessions/sess-1/images/img-1-0' })).statusCode).toBe(413);
+    await stubborn.close();
+  });
+
+  it('is refused on a remote connection with the shared token', async () => {
+    const token = 'a-real-remote-access-token-0123456789';
+    const app = buildWithImage(png(100), undefined, token);
+    const response = await app.inject({
+      method: 'GET', url: '/api/sessions/sess-1/images/img-1-0',
       headers: { host: 'my-mac.tailnet-1234.ts.net:4040', [TOKEN_HEADER]: token },
     });
     expect(response.statusCode).toBe(403);

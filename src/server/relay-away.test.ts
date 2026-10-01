@@ -2,6 +2,7 @@
 // Mac's outbound link, and the phone's side of the channel, with no Tailscale
 // host at all. The Mac keeps the task database and does the work; the relay
 // only ever carries sealed frames.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,18 +19,23 @@ import type { RelayLinkInfo } from '../relay/protocol.js';
 import { startRelay, type RunningRelay } from '../relay/server.js';
 import { RelayService } from '../relay/service.js';
 import { Store } from '../store/index.js';
-import { WindowViewService } from '../window-view/service.js';
-import { EDITOR, fakeCaptureDriver, type FakeCaptureDriver } from '../test-fixtures/fake-capture.js';
+import { ConversationReader, claudeProjectDirName } from '../sessions/conversation.js';
+import type { Session } from '../types.js';
 import { memoryVault } from '../test-fixtures/fake-mailbox.js';
 import { scriptedFilingProvider, type BrokerCall } from '../test-fixtures/filing-agent.js';
 import { buildApp } from './app.js';
 import { TOKEN_HEADER } from './connection-trust.js';
 import { relayDispatcher } from './relay-dispatch.js';
 import type { RouteContext } from './routes.js';
+import { MAX_IMAGE_BYTES } from './session-images.js';
 
 const PDF = '%PDF-1.4\n1 0 obj\n<< /Type /Pages /Count 3 >>\nendobj\n%%EOF\n';
 const LOCAL = { host: '127.0.0.1:4040' };
 const TAILNET = 'my-mac.tailnet-1234.ts.net';
+const SESSION = {
+  id: 'sess-1', origin: 'managed', agent: 'claude', cwd: '/Users/me/app', agentSessionId: 'claude:ours',
+  startedAt: '2026-09-27T20:00:00.000Z', lastActivityAt: '2026-09-27T20:00:00.000Z', status: 'idle', statusSource: 'hook',
+} as Session;
 
 let base: string;
 let home: string;
@@ -41,8 +47,7 @@ let relayService: RelayService;
 let relay: RunningRelay;
 let app: FastifyInstance;
 let saved: string | undefined;
-let capture: FakeCaptureDriver;
-let windowView: WindowViewService;
+let transcripts: string;
 const vault = memoryVault();
 const clients: PhoneRelayClient[] = [];
 
@@ -63,17 +68,18 @@ async function boot(options: { tailnet?: boolean } = {}): Promise<void> {
     vault, url: relay.url, save: (url) => { saved = url; }, lookupPhone: (key) => pairing.byPublicKey(key), retryMs: 20,
   });
   pairing.onRevoke((id) => relayService.dropDevice(id));
-  capture = fakeCaptureDriver();
-  windowView = new WindowViewService({ driver: capture });
+  transcripts = path.join(base, 'transcripts');
   app = buildApp({
     config: defaultConfig(),
-    manager: {} as RouteContext['manager'],
+    manager: {
+      listSessions: () => [], getSession: (id: string) => (id === SESSION.id ? SESSION : undefined), isLive: () => false,
+    } as unknown as RouteContext['manager'],
+    conversations: new ConversationReader({ claude: [transcripts], codex: [] }),
     ...(options.tailnet ? { remoteHosts: [TAILNET] } : {}),
     ownerPairing: pairing,
     store,
     personalTasks: { service, pickFolder: async () => folder },
     relay: relayService,
-    windowView: { service: windowView, openSettings: async () => undefined },
   });
   relayService.attach(relayDispatcher(app, pairing));
   await relayService.start();
@@ -83,7 +89,6 @@ async function boot(options: { tailnet?: boolean } = {}): Promise<void> {
 async function shutdown(): Promise<void> {
   for (const client of clients.splice(0)) client.close();
   relayService.stop();
-  windowView.shutdown();
   await service.whenIdle();
   await app.close();
   store.close();
@@ -206,6 +211,16 @@ describe('an owner phone away from home (issue #90)', () => {
     expect((await client.request('POST', '/api/personal/grants/pick', { token: first.credential })).status).toBe(403);
   });
 
+  it('reaches coding work away from home, and still nothing on the Mac only', async () => {
+    const { credential, link, key } = await pairThroughRelay();
+    const client = await phone(link, key);
+    expect(await client.request('GET', '/api/phone/work', { token: credential })).toMatchObject({ status: 200, body: { sessions: [], runs: [], needs: [] } });
+    expect((await client.request('GET', '/api/phone/repos', { token: credential })).status).toBe(200);
+    expect((await client.request('POST', '/api/phone/sessions', { token: credential, body: { repositoryId: '/nowhere', task: 'x' } })).status).toBe(404);
+    expect((await client.request('POST', '/api/sessions', { token: credential, body: { agent: 'claude', cwd: '/tmp' } })).status).toBe(403);
+    expect((await client.request('POST', '/api/hooks/install', { token: credential, body: {} })).status).toBe(403);
+  });
+
   it('ends a revoked phone’s relay connection at once, and it cannot come back', async () => {
     const { credential, deviceId, link, key } = await pairThroughRelay();
     const client = await phone(link, key);
@@ -268,28 +283,25 @@ describe('an owner phone away from home (issue #90)', () => {
     expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/relay', headers: LOCAL })).json()).toMatchObject({ state: 'connected', url: relay.url });
   });
 
-  it('shows the shared Mac window through the relay, sealed end to end, and stops it on revoke (issue #91)', async () => {
+  it('sends the largest image the agent looked at through the relay, sealed end to end', async () => {
     const frames = recordFrames();
-    expect((await app.inject({ method: 'POST', url: '/api/window-view/select', headers: LOCAL, payload: { windowId: EDITOR.id } })).statusCode).toBe(200);
-    const { credential, deviceId, link, key } = await pairThroughRelay();
+    // Random bytes do not compress, so this is the worst case one relay frame must carry.
+    const pixels = crypto.randomBytes(MAX_IMAGE_BYTES);
+    const project = path.join(transcripts, claudeProjectDirName(SESSION.cwd));
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, 'ours.jsonl'), JSON.stringify({
+      type: 'user', uuid: 'r', timestamp: '2026-09-27T20:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 't', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pixels.toString('base64') } },
+      ] }] },
+    }));
+    const { credential, link, key } = await pairThroughRelay();
     const client = await phone(link, key);
-    const call = (method: string, url: string, body?: unknown) => client.request(method, url, { token: credential, ...(body === undefined ? {} : { body }) });
 
-    expect((await call('GET', '/api/window-view/phone')).body).toMatchObject({ window: { app: 'TextEdit', title: 'Notes.txt' } });
-    const { viewId } = (await call('POST', '/api/window-view/start')).body as { viewId: string };
-    const pixels = Buffer.from('secret-window-pixels');
-    const waiting = call('GET', `/api/window-view/frame?view=${viewId}&after=0&wait=1500`);
-    capture.captures[0]!.events.onFrame({ jpeg: pixels, width: 640, height: 400 });
-    expect((await waiting).body).toMatchObject({ frame: { seq: 1, jpeg: pixels.toString('base64') } });
-
-    // Only the Mac and the phone saw the window: the relay carried sealed frames.
-    const seen = frames.join('\n');
-    for (const secret of ['Notes.txt', 'TextEdit', pixels.toString('base64'), 'secret-window-pixels']) expect(seen).not.toContain(secret);
-    // Choosing the window stays at the Mac.
-    expect((await call('GET', '/api/window-view/windows')).status).toBe(403);
-
-    expect((await app.inject({ method: 'POST', url: `/api/owner-devices/${deviceId}/revoke`, headers: LOCAL })).statusCode).toBe(200);
-    expect(capture.captures[0]!.stopped).toBe(true);
-    await expect(call('GET', `/api/window-view/frame?view=${viewId}&after=1&wait=0`)).rejects.toBeInstanceOf(RelayUnavailable);
+    const conversation = await client.request('GET', '/api/sessions/sess-1/conversation', { token: credential });
+    expect(conversation.body).toMatchObject({ turns: [{ role: 'image', image: { id: 'img-0-0', mediaType: 'image/png' } }] });
+    const image = await client.request('GET', '/api/sessions/sess-1/images/img-0-0', { token: credential });
+    expect(image.status).toBe(200);
+    expect(Buffer.from((image.body as { data: string }).data, 'base64').equals(pixels)).toBe(true);
+    expect(frames.join('\n')).not.toContain(pixels.toString('base64').slice(0, 64));
   });
 });

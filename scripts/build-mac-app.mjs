@@ -52,7 +52,7 @@ for (const entry of fs.readdirSync(path.join(root, 'dist'))) {
   if (entry === 'mac') continue;
   fs.cpSync(path.join(root, 'dist', entry), path.join(service, 'dist', entry), { recursive: true });
 }
-for (const entry of ['server/index.js', 'ui/index.html', 'native/AgentDeckNotch.app', 'native/AgentDeckWindowView.app']) {
+for (const entry of ['server/index.js', 'ui/index.html', 'native/AgentDeckNotch.app']) {
   if (!fs.existsSync(path.join(service, 'dist', entry))) throw new Error(`Missing build output: dist/${entry}`);
 }
 // Bundle the packager's Gmail Desktop client (decision 0002 until AgentDeck's
@@ -113,10 +113,6 @@ walk(path.join(service, 'node_modules'), (file) => {
 const companion = path.join(service, 'dist/native/AgentDeckNotch.app');
 sign(path.join(companion, 'Contents/MacOS/AgentDeckNotch'));
 sign(companion);
-// Issue #91: runs as a child of the service, so Screen Recording is granted to AgentDeck itself.
-const windowView = path.join(service, 'dist/native/AgentDeckWindowView.app');
-sign(path.join(windowView, 'Contents/MacOS/AgentDeckWindowView'));
-sign(windowView);
 sign(path.join(macOS, 'node'), nodeEntitlements);
 sign(path.join(macOS, 'AgentDeckApp'));
 sign(app);

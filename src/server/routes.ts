@@ -47,8 +47,10 @@ import {
 } from './collaborator-session-view.js';
 import { parseMention } from '../mentions.js';
 import { mergeConversation, resolveSenderIdentity } from './session-conversation.js';
+import { fitImage, type Shrink } from './session-images.js';
 import { publicSession } from './security.js';
-import { classify, TOKEN_HEADER } from './connection-trust.js';
+import { classify, TOKEN_HEADER, type TrustResult } from './connection-trust.js';
+import type { PhoneFollowers } from './phone-followers.js';
 import { containsDisallowedControlBytes } from './remote-input.js';
 import {
   parseClaudeInteraction, projectSessionInteractions, validateInteractionResponse,
@@ -206,6 +208,41 @@ function parseLaunchSpec(body: unknown): LaunchSpec | string {
   return spec;
 }
 
+/**
+ * Checks out the requested branch, turns the permission mode into each
+ * CLI's own flags, and launches the Session. Shared by Start work on the
+ * Mac (POST /api/sessions) and from the phone (phone-work-routes.ts), so
+ * both start the same Session the same way. `spec.initialPrompt` holds what
+ * will actually be typed once this returns.
+ */
+export async function launchManagedSession(manager: SessionManager, spec: LaunchSpec): Promise<Session> {
+  if (spec.branch) await checkoutBranch(spec.cwd, spec.branch, spec.createBranchIfMissing === true);
+  if (spec.agent === 'claude' && spec.permissionMode) {
+    if (spec.permissionMode !== 'default') {
+      spec.extraArgs = [...(spec.extraArgs ?? []), '--permission-mode', spec.permissionMode];
+    }
+  }
+  if (spec.agent === 'codex') {
+    if (spec.permissionMode === 'default') {
+      spec.extraArgs = [
+        ...(spec.extraArgs ?? []),
+        '--sandbox', 'read-only',
+        '--ask-for-approval', 'on-request',
+      ];
+    } else if (spec.permissionMode === 'acceptEdits') {
+      spec.extraArgs = [
+        ...(spec.extraArgs ?? []),
+        '--sandbox', 'workspace-write',
+        '--ask-for-approval', 'on-request',
+      ];
+    } else if (spec.permissionMode === 'plan') {
+      spec.initialPrompt = spec.initialPrompt ? `/plan ${spec.initialPrompt}` : '/plan';
+    }
+    spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify([process.execPath, HOOK_PATH])}`];
+  }
+  return manager.launch(spec);
+}
+
 export interface RouteContext {
   manager: SessionManager;
   config: AgentDeckConfig;
@@ -233,6 +270,15 @@ export interface RouteContext {
   conversations?: ConversationReader;
   /** Skills and slash commands for the Conversation composer's "/" picker. Injectable so tests use a fixture config dir. */
   skills?: SkillCatalog;
+  /** Phone work: Sessions the paired owner phone has open, shown on the Mac's Conversation view. */
+  phoneFollowers?: PhoneFollowers;
+  /** Re-encodes an image too large for one relay frame. Injectable so tests need no `sips`. */
+  shrinkImage?: Shrink;
+}
+
+/** The owner, at this Mac or from their paired phone — never a collaborator or the shared token. */
+function isOwnerCaller(trust: TrustResult): boolean {
+  return trust.kind === 'local' || trust.ownerDevice !== undefined;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -741,31 +787,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     if (typeof spec === 'string') return reply.code(400).send({ error: spec });
     if (!access.allows(spec.cwd)) return reply.code(403).send(accessDenied(spec.cwd));
     try {
-      if (spec.branch) await checkoutBranch(spec.cwd, spec.branch, spec.createBranchIfMissing === true);
-      if (spec.agent === 'claude' && spec.permissionMode) {
-        if (spec.permissionMode !== 'default') {
-          spec.extraArgs = [...(spec.extraArgs ?? []), '--permission-mode', spec.permissionMode];
-        }
-      }
-      if (spec.agent === 'codex') {
-        if (spec.permissionMode === 'default') {
-          spec.extraArgs = [
-            ...(spec.extraArgs ?? []),
-            '--sandbox', 'read-only',
-            '--ask-for-approval', 'on-request',
-          ];
-        } else if (spec.permissionMode === 'acceptEdits') {
-          spec.extraArgs = [
-            ...(spec.extraArgs ?? []),
-            '--sandbox', 'workspace-write',
-            '--ask-for-approval', 'on-request',
-          ];
-        } else if (spec.permissionMode === 'plan') {
-          spec.initialPrompt = spec.initialPrompt ? `/plan ${spec.initialPrompt}` : '/plan';
-        }
-        spec.extraArgs = [...(spec.extraArgs ?? []), '-c', `notify=${JSON.stringify([process.execPath, HOOK_PATH])}`];
-      }
-      const session = await manager.launch(spec);
+      const session = await launchManagedSession(manager, spec);
       return reply.code(201).send(publicSession(session));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -838,9 +860,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // compacted scrollback.txt is the natural fit. History is managed-only
   // per the spec's non-goals (external sessions have no PTY, so no stored
   // bytes to read).
-  // Conversation view: the agent's own transcript, rendered as chat. Local
-  // only — tool calls carry this Mac's paths and commands, which neither a
-  // collaborator grant nor the shared remote token covers.
+  // Conversation view: the agent's own transcript, rendered as chat. The
+  // owner only, at this Mac or from their paired phone — tool calls carry
+  // this Mac's paths and commands, which neither a collaborator grant nor
+  // the shared remote token covers.
   const conversations = ctx.conversations ?? new ConversationReader();
   const skills = ctx.skills ?? new SkillCatalog();
   // A Claude AskUserQuestion that AgentDeck's hook is holding: the terminal
@@ -850,20 +873,37 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const canAnswer = (session: Session, question: PendingQuestion) =>
     Boolean(hookQuestion(session, question)) || (session.origin === 'managed' && manager.isLive(session.id));
   app.get('/api/sessions/:id/conversation', async (req, reply) => {
-    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
+    const trust = requestTrust(req);
+    if (!isOwnerCaller(trust)) return reply.code(403).send({ error: 'the conversation is only available to the owner' });
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
     if (!session) return reply.code(404).send({ error: 'no such session' });
+    if (trust.ownerDevice) ctx.phoneFollowers?.touch(id);
     const conversation = await conversations.read(session);
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const merged = mergeSentConversationTurns(conversation, session, await readBusTail(repoPath));
-    return merged.question ? { ...merged, question: { ...merged.question, canAnswer: canAnswer(session, merged.question) } } : merged;
+    const view = merged.question ? { ...merged, question: { ...merged.question, canAnswer: canAnswer(session, merged.question) } } : merged;
+    return trust.kind === 'local' && ctx.phoneFollowers?.isFollowing(id) ? { ...view, phoneFollowing: true } : view;
+  });
+
+  // An image the agent looked at, for its image turn: same owner-only rule
+  // as the conversation, and sized to fit through the relay.
+  app.get('/api/sessions/:id/images/:imageId', async (req, reply) => {
+    if (!isOwnerCaller(requestTrust(req))) return reply.code(403).send({ error: 'the conversation is only available to the owner' });
+    const { id, imageId } = req.params as { id: string; imageId: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    const found = await conversations.image(session, imageId);
+    if (!found) return reply.code(404).send({ error: 'That image is no longer in this session’s transcript.' });
+    const image = await fitImage(found, ctx.shrinkImage);
+    if (!image) return reply.code(413).send({ error: 'This image is too large to show here.' });
+    return { mediaType: image.mediaType, data: image.data.toString('base64') };
   });
 
   // The "/" picker's list. Codex has no skills to offer yet, so it gets none
   // and the picker stays hidden; typing any slash command still sends as-is.
   app.get('/api/sessions/:id/skills', async (req, reply) => {
-    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'skills are only available on this Mac' });
+    if (!isOwnerCaller(requestTrust(req))) return reply.code(403).send({ error: 'skills are only available to the owner' });
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
     if (!session) return reply.code(404).send({ error: 'no such session' });
@@ -878,7 +918,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const answering = new Set<string>();
   app.post('/api/sessions/:id/conversation/answer', async (req, reply) => {
     const trust = requestTrust(req);
-    if (trust.kind !== 'local') return reply.code(403).send({ error: 'the conversation is only available on this Mac' });
+    if (!isOwnerCaller(trust)) return reply.code(403).send({ error: 'the conversation is only available to the owner' });
     const { id } = req.params as { id: string };
     const session = manager.getSession(id);
     if (!session) return reply.code(404).send({ error: 'no such session' });
@@ -921,6 +961,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
         await appendAgentMessage(repoPath, {
           ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath, event: 'message', message: text, sessionId: session.id,
+          ...(trust.ownerDevice ? { via: 'phone' as const } : {}),
         });
         return { delivered: 'message' };
       }
@@ -1274,34 +1315,42 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     // branch further down, which scripts the operator's own foreground
     // terminal app; falling past it to the queued path is both safer and,
     // for a hook-backed session, functionally the same delivery.
+    //
+    // The owner's paired phone takes the same two paths for the same reason:
+    // it is away from the Mac and must not script whatever terminal app is
+    // in front there.
     const collaborator = trust.device !== undefined;
-    if (!collaborator && trust.kind === 'remote' && session.origin !== 'managed') {
+    const ownerPhone = trust.ownerDevice !== undefined;
+    if (!collaborator && !ownerPhone && trust.kind === 'remote' && session.origin !== 'managed') {
       return reply.code(403).send({ error: 'external sessions are not available on a remote connection' });
     }
-    if (collaborator) {
+    if (collaborator || ownerPhone) {
       const capability = collaboratorSendCapability(session);
       if (capability.send === 'unavailable') return reply.code(400).send({ error: capability.reason });
     }
     if (!trust.capabilities.has('raw-write') && containsDisallowedControlBytes(text)) {
       return reply.code(400).send({ error: 'raw control characters are not permitted from this connection' });
     }
+    // Audit before delivery: a storage failure must not produce an
+    // unattributed owner-phone terminal action.
+    const auditPhoneSend = () => {
+      if (!trust.ownerDevice) return;
+      if (!ctx.ownerPairing) throw new Error('Owner device audit unavailable.');
+      ctx.ownerPairing.audit(trust.ownerDevice.id, 'session-send', session.id);
+    };
 
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const recordSend = async () => {
       await appendAgentMessage(repoPath, {
         ts: new Date().toISOString(), agent: `dashboard:${session.id}`, repo: repoPath,
         event: 'message', message: text, sessionId: session.id,
+        ...(trust.ownerDevice ? { via: 'phone' as const } : {}),
       });
     };
 
     if (session.origin === 'managed') {
       if (!manager.isLive(id)) return reply.code(400).send({ error: 'session is not running' });
-      // Audit before delivery: a storage failure must not produce an
-      // unattributed owner-phone terminal action.
-      if (trust.ownerDevice) {
-        if (!ctx.ownerPairing) throw new Error('Owner device audit unavailable.');
-        ctx.ownerPairing.audit(trust.ownerDevice.id, 'session-send', session.id);
-      }
+      auditPhoneSend();
       manager.write(id, text);
       // both agent TUIs debounce paste-then-submit
       setTimeout(() => { try { manager.write(id, '\r'); } catch { /* exited meanwhile */ } }, 300);
@@ -1309,7 +1358,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return { delivered: 'typed' };
     }
 
-    if (!collaborator && session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
+    if (!collaborator && !ownerPhone && session.terminalApp && session.terminalApp !== 'unknown' && ctx.terminals) {
       try {
         await ctx.terminals.sendText(session, text);
         await recordSend();
@@ -1326,6 +1375,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
           error: 'This Claude session has not completed its AgentDeck hook handshake yet. Run one turn in that terminal, then try again.',
         });
       }
+      auditPhoneSend();
       await appendInboxMessage(repoPath, {
         ts: new Date().toISOString(), to: session.agentSessionId, text,
       });

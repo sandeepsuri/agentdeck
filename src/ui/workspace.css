@@ -876,6 +876,8 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .conversation-message.is-user .conversation-bubble { max-width: 78%; padding: 10px 16px; border-radius: 20px; background: var(--surface-selected); color: var(--text-primary); }
 .conversation-message.is-user .conversation-bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .conversation-message.is-pending .conversation-bubble { opacity: .6; }
+.conversation-via { display: block; margin-top: 4px; color: var(--text-muted); font-size: 11px; text-align: right; }
+.conversation-following { width: fit-content; margin: 0 auto; padding: 3px 12px; border: 1px solid var(--border-muted); border-radius: 999px; background: var(--surface-panel); color: var(--text-secondary); font-size: 12px; }
 .conversation-message.is-assistant .conversation-bubble { flex: 1; min-width: 0; color: var(--text-primary); line-height: 1.65; font-size: 14px; }
 .conversation-avatar { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--border-muted); border-radius: 50%; background: var(--surface-elevated); color: var(--text-secondary); font-size: 12px; font-weight: 700; }
 .conversation-tools { margin-left: 40px; color: var(--text-muted); font-size: 12.5px; }
@@ -885,6 +887,13 @@ kbd { font-family: var(--font-mono); font-size: 9px; font-weight: 500; }
 .conversation-tools[open] summary::before { content: "▾ "; }
 .conversation-tools ol { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
 .conversation-tools li code { font-family: var(--font-mono); font-size: 11.5px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.conversation-image { margin: 0 0 0 40px; display: grid; gap: 4px; justify-items: start; }
+.conversation-image button { padding: 0; border: 1px solid var(--border-muted); border-radius: var(--radius-md); background: var(--surface-panel); cursor: zoom-in; overflow: hidden; }
+.conversation-image button.is-open { cursor: zoom-out; }
+.conversation-image img { display: block; max-width: min(100%, 420px); max-height: 320px; object-fit: contain; }
+.conversation-image button.is-open img { max-width: 100%; max-height: none; }
+.conversation-image-placeholder { padding: 24px 32px; border: 1px dashed var(--border-muted); border-radius: var(--radius-md); color: var(--text-muted); font-size: 12.5px; }
+.conversation-image figcaption { color: var(--text-muted); font-family: var(--font-mono); font-size: 11.5px; }
 .conversation-working { margin-left: 40px; display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 12.5px; }
 .conversation-working span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); animation: conversation-dot 1.2s infinite ease-in-out; }
 .conversation-working span:nth-child(2) { animation-delay: .15s; }

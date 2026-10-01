@@ -87,6 +87,33 @@ describe('ConversationView', () => {
     expect(container!.querySelector('.conversation-tools summary')?.textContent).toBe('Used shell');
   });
 
+  it('shows an image the agent looked at inline, fetched by its id, and opens it full size', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => String(input).includes('/images/')
+      ? json({ mediaType: 'image/png', data: 'iVBORw0KGgo=' })
+      : json({ found: true, turns: [{ id: 'img-3-0', role: 'image', text: 'login-failed.png', image: { id: 'img-3-0', mediaType: 'image/png' }, ts: '2026-09-27T20:00:00Z' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    await mount({ session: session() });
+    await flush();
+
+    const image = container!.querySelector<HTMLImageElement>('.conversation-image img');
+    expect(image?.src).toBe('data:image/png;base64,iVBORw0KGgo=');
+    expect(image?.alt).toBe('login-failed.png');
+    expect(container!.querySelector('.conversation-image figcaption')?.textContent).toBe('login-failed.png');
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/sessions/s1/images/img-3-0');
+    const button = container!.querySelector<HTMLButtonElement>('.conversation-image button')!;
+    await act(async () => button.click());
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('says so when an image cannot be sent', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => String(input).includes('/images/')
+      ? json({ error: 'This image is too large to show here.' }, 413)
+      : json({ found: true, turns: [{ id: 'img-9-0', role: 'image', text: '', image: { id: 'img-9-0', mediaType: 'image/png' }, ts: '2026-09-27T20:00:00Z' }] })));
+    await mount({ session: session({ id: 's2' }) });
+    await flush();
+    expect(container!.querySelector('.conversation-image-placeholder')?.textContent).toBe('This image is too large to show here.');
+  });
+
   it('explains an empty conversation before the agent has written a transcript', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ found: false, turns: [] })));
     await mount({ session: session() });

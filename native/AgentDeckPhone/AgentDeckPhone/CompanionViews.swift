@@ -22,19 +22,19 @@ struct CompanionView: View {
             case .unavailable: MacUnavailableView(model: model, onForget: onForget)
             case .live:
                 TabView(selection: $model.tab) {
-                    NeedsYouView(model: model)
-                        .tabItem { Label("Needs you", systemImage: "exclamationmark.bubble") }
-                        .badge(model.needs.count)
-                        .tag(CompanionModel.Tab.needsYou)
                     AskView(model: model)
                         .tabItem { Label("Ask", systemImage: "text.bubble") }
                         .tag(CompanionModel.Tab.ask)
+                    WorkListView(work: model.work)
+                        .tabItem { Label("Work", systemImage: "chevron.left.forwardslash.chevron.right") }
+                        .tag(CompanionModel.Tab.work)
                     TasksView(model: model, onForget: onForget)
                         .tabItem { Label("Tasks", systemImage: "checklist") }
                         .tag(CompanionModel.Tab.tasks)
-                    MacWindowView(model: model.window)
-                        .tabItem { Label("Mac window", systemImage: "macwindow") }
-                        .tag(CompanionModel.Tab.window)
+                    NeedsYouView(model: model)
+                        .tabItem { Label("Needs you", systemImage: "exclamationmark.bubble") }
+                        .badge(model.needsCount)
+                        .tag(CompanionModel.Tab.needsYou)
                 }
             }
         }
@@ -56,7 +56,7 @@ private struct MacUnavailableView: View {
                 .font(.largeTitle)
                 .accessibilityHidden(true)
             Text("Mac unavailable").font(.title2.bold())
-            Text("AgentDeck on your Mac isn’t answering. Tasks and decisions will appear again when it’s back; nothing here is shown until then.")
+            Text("AgentDeck on your Mac isn’t answering. Work, tasks and decisions will appear again when it’s back; nothing here is shown until then. Work already running keeps running on the Mac if it’s awake.")
                 .multilineTextAlignment(.center)
             if let lastReached = model.lastReached {
                 Text("Last reached \(lastReached.formatted(date: .omitted, time: .shortened))").font(.footnote).foregroundStyle(.secondary)
@@ -76,16 +76,33 @@ private struct MacUnavailableView: View {
 
 private struct NeedsYouView: View {
     @ObservedObject var model: CompanionModel
-    @State private var path: [String] = []
+    @ObservedObject private var work: WorkModel
+    @State private var path = NavigationPath()
+
+    init(model: CompanionModel) {
+        self.model = model
+        self.work = model.work
+    }
 
     var body: some View {
         NavigationStack(path: $path) {
             List {
                 NoticeRow(model: model)
-                if model.needs.isEmpty {
-                    Text("Nothing needs you. Plans to approve and tasks that went wrong show up here.")
+                WorkNoticeRow(work: work)
+                if model.needs.isEmpty && work.needs.isEmpty {
+                    Text("Nothing needs you. Approvals, questions, work to review, plans to approve and tasks that went wrong show up here.")
                         .foregroundStyle(.secondary)
-                } else {
+                }
+                if !work.needs.isEmpty {
+                    Section("Coding work") {
+                        ForEach(work.needs) { need in
+                            NavigationLink(value: need.sessionId.map(WorkRoute.session) ?? WorkRoute.run(need.runId ?? "")) {
+                                WorkNeedRow(need: need)
+                            }
+                        }
+                    }
+                }
+                if !model.needs.isEmpty {
                     ForEach(model.needs) { need in
                         NavigationLink(value: need.taskId) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -102,6 +119,7 @@ private struct NeedsYouView: View {
             }
             .navigationTitle("Needs you")
             .navigationDestination(for: String.self) { TaskDetailView(model: model, taskId: $0) }
+            .navigationDestination(for: WorkRoute.self) { WorkDestination(work: work, route: $0) }
             .refreshable { await model.refresh() }
         }
     }
@@ -410,65 +428,6 @@ private struct ProposalSections: View {
     private func act(_ action: @escaping () async -> Bool) {
         busy = true
         Task { _ = await action(); busy = false }
-    }
-}
-
-// MARK: - Mac window (issue #91)
-
-/** Views the one window the owner shared on the Mac. Only viewing: nothing here controls the Mac. */
-private struct MacWindowView: View {
-    @ObservedObject var model: WindowViewModel
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
-                if model.state == .viewing, let jpeg = model.jpeg, let image = UIImage(data: jpeg) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityLabel("Live view of \(model.status?.window?.label ?? "the shared Mac window")")
-                } else if model.state != .idle {
-                    Spacer()
-                    ProgressView(model.state == .starting ? "Asking your Mac…" : "Waiting for the first picture…")
-                    Spacer()
-                } else {
-                    Spacer()
-                    Image(systemName: "macwindow").font(.largeTitle).accessibilityHidden(true)
-                    if let window = model.status?.window {
-                        Text(window.label).font(.headline).multilineTextAlignment(.center)
-                        Text("You’ll see only this window, and can’t control it. The Mac shows that it’s being viewed.")
-                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    } else {
-                        Text("No window is shared.").font(.headline)
-                        Text("On the Mac, choose one under Settings › Owner phones › Mac window.")
-                            .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    }
-                    if let ended = model.ended {
-                        Label(ended, systemImage: "exclamationmark.circle")
-                            .foregroundStyle(.red)
-                            .accessibilityLabel("AgentDeck says: \(ended)")
-                    }
-                    Spacer()
-                }
-                if model.state == .idle {
-                    Button("View window") { model.start() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.status?.window == nil)
-                } else {
-                    Label("Live · the Mac shows it’s being viewed", systemImage: "record.circle")
-                        .font(.footnote).foregroundStyle(.red)
-                    Button("Stop viewing", role: .destructive) { model.stop() }
-                        .buttonStyle(.bordered)
-                }
-            }
-            .padding()
-            .navigationTitle("Mac window")
-            .refreshable { await model.load() }
-        }
-        .task { await model.load() }
-        // Leaving the tab ends the view, and the capture on the Mac with it.
-        .onDisappear { model.stop() }
     }
 }
 

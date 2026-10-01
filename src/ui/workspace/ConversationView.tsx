@@ -7,7 +7,9 @@
 // composer. A multiple-choice question the agent opens (Claude's
 // AskUserQuestion, Codex's request_user_input) is answered here as a card;
 // permission approvals still happen in the Terminal tab. Typing "/" opens a
-// picker of the session's skills and slash commands.
+// picker of the session's skills and slash commands. An image the agent
+// looked at (a screenshot it read) shows inline, fetched once it is in the
+// conversation, and opens full size on click.
 import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { ConversationTurn, ConversationView as ConversationBody } from '../../sessions/conversation.js';
 import type { SkillEntry } from '../../sessions/skill-catalog.js';
@@ -34,6 +36,41 @@ export function groupTurns(turns: readonly ConversationTurn[]): ConversationItem
     else items.push({ kind: 'tools', id: turn.id, turns: [turn] });
   }
   return items;
+}
+
+/** Fetched images by session and id; a transcript image never changes. */
+const imageCache = new Map<string, string>();
+
+function ImageTurn({ sessionId, turn }: { sessionId: string; turn: ConversationTurn }) {
+  const imageId = turn.image!.id;
+  const key = `${sessionId}/${imageId}`;
+  const [src, setSrc] = useState(() => imageCache.get(key));
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (src) return;
+    let cancelled = false;
+    void (async () => {
+      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(imageId)}`);
+      const body = await response.json().catch(() => ({})) as { mediaType?: string; data?: string; error?: string };
+      if (cancelled) return;
+      if (!response.ok || !body.mediaType || !body.data) { setError(body.error ?? 'Could not load this image.'); return; }
+      const url = `data:${body.mediaType};base64,${body.data}`;
+      imageCache.set(key, url);
+      setSrc(url);
+    })().catch(() => { if (!cancelled) setError('Could not load this image.'); });
+    return () => { cancelled = true; };
+  }, [imageId, key, sessionId, src]);
+  const label = turn.text || 'Image';
+  return (
+    <figure className="conversation-image">
+      {src
+        ? <button aria-expanded={open} aria-label={open ? `Shrink ${label}` : `Show ${label} full size`} className={open ? 'is-open' : undefined}
+          onClick={() => setOpen((value) => !value)} type="button"><img alt={label} src={src} /></button>
+        : <div className="conversation-image-placeholder">{error ?? 'Loading image…'}</div>}
+      {turn.text && <figcaption>{turn.text}</figcaption>}
+    </figure>
+  );
 }
 
 function ToolGroup({ turns }: { turns: ConversationTurn[] }) {
@@ -279,6 +316,7 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
     <div className="conversation">
       <div className="conversation-scroll" onScroll={onScroll} ref={scrollRef}>
         <div className="conversation-column">
+          {body?.phoneFollowing && <p className="conversation-following" role="status">Your phone is following this session</p>}
           {!body && <p className="conversation-empty">Loading conversation…</p>}
           {body && !body.found && items.length === 0 && (
             <p className="conversation-empty">
@@ -287,11 +325,12 @@ export function ConversationView({ session, onOpenTerminal }: { session: Session
           )}
           {items.map((item) => item.kind === 'tools'
             ? <ToolGroup key={item.id} turns={item.turns} />
-            : (
+            : item.turn.image ? <ImageTurn key={item.turn.id} sessionId={session.id} turn={item.turn} /> : (
               <div className={`conversation-message is-${item.turn.role}`} key={item.turn.id}>
                 {item.turn.role === 'assistant' && <span aria-hidden className="conversation-avatar">{agentName[0]}</span>}
                 <div className="conversation-bubble">
                   {item.turn.role === 'assistant' ? <Markdown text={item.turn.text} /> : <p>{item.turn.text}</p>}
+                  {item.turn.via === 'phone' && <span className="conversation-via">from phone</span>}
                 </div>
               </div>
             ))}

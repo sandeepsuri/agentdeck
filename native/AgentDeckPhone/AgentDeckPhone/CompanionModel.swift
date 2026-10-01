@@ -6,7 +6,7 @@ import Foundation
 
 @MainActor final class CompanionModel: ObservableObject {
     enum Link: Equatable { case connecting, live, unavailable }
-    enum Tab: Hashable { case ask, tasks, needsYou, window }
+    enum Tab: Hashable { case ask, work, tasks, needsYou }
 
     @Published private(set) var link: Link = .connecting
     @Published private(set) var grants: [FolderGrant] = []
@@ -17,6 +17,8 @@ import Foundation
     @Published var notice: String?
 
     var needs: [Need] { Need.from(tasks) }
+    /** PDF decisions and problems plus coding work waiting on the owner. */
+    var needsCount: Int { needs.count + work.needs.count }
     var activeGrants: [FolderGrant] { grants.filter { $0.revokedAt == nil } }
 
     private let client: CompanionClient
@@ -34,8 +36,8 @@ import Foundation
         self.onRevoked = onRevoked
     }
 
-    /** Issue #91: the Mac window the owner shared, streamed only while its tab is open. */
-    private(set) lazy var window = WindowViewModel(client: client) { [weak self] error in self?.handle(error) }
+    /** Phone work: the owner's coding Sessions and Runs. */
+    private(set) lazy var work = WorkModel(client: client) { [weak self] error in self?.handle(error) }
 
     func task(_ id: String) -> PersonalTask? { tasks.first { $0.id == id } }
 
@@ -46,25 +48,39 @@ import Foundation
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refresh()
-                let seconds: UInt64 = self.link != .live ? 5 : self.tasks.contains(where: \.unsettled) ? 2 : 10
+                let close = self.tasks.contains(where: \.unsettled) || self.tab == .work || (self.tab == .needsYou && self.work.busy)
+                let seconds: UInt64 = self.link != .live ? 5 : close ? 2 : 10
                 try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             }
         }
     }
 
-    /** Also ends any window view, so a phone in the background never keeps the Mac capturing. */
-    func stop() { following?.cancel(); following = nil; window.stop() }
+    func stop() { following?.cancel(); following = nil }
 
     func refresh() async {
         do {
             async let grants: [FolderGrant] = client.get("api/personal/grants")
             async let tasks: [PersonalTask] = client.get("api/personal/tasks")
+            async let feed = workFeed()
             (self.grants, self.tasks) = try await (grants, tasks)
+            work.apply(try await feed)
             link = .live
             lastReached = Date()
         } catch {
             handle(error)
         }
+    }
+
+    /** The Work list; nil from a Mac whose AgentDeck predates phone work, which refuses the route. */
+    private func workFeed() async throws -> WorkFeed? {
+        do { return try await client.get("api/phone/work") }
+        catch CompanionFailure.refused { return nil }
+    }
+
+    /** A push says only that something is waiting; Needs you shows what. */
+    func openNeedsYou() {
+        tab = .needsYou
+        Task { await refresh() }
     }
 
     func pdfs(in grant: FolderGrant) async throws -> PdfListing {
@@ -121,7 +137,7 @@ import Foundation
         else { tasks.insert(task, at: 0) }
     }
 
-    private func handle(_ error: Error) {
+    func handle(_ error: Error) {
         switch error as? CompanionFailure {
         case .revoked:
             stop()
@@ -134,102 +150,7 @@ import Foundation
             link = .unavailable
             grants = []
             tasks = []
+            work.clear()
         }
-    }
-}
-
-/**
- * Issue #91: views the one window the owner shared on the Mac. The Mac
- * captures only while this phone keeps asking for frames, so leaving the tab,
- * backgrounding the app, or losing the Mac ends the capture there too. No
- * frame outlives the view.
- */
-@MainActor final class WindowViewModel: ObservableObject {
-    enum State: Equatable { case idle, starting, viewing }
-
-    @Published private(set) var status: WindowViewStatus?
-    @Published private(set) var state: State = .idle
-    /** The latest frame's JPEG, only while viewing. */
-    @Published private(set) var jpeg: Data?
-    @Published private(set) var frameAt: String?
-    /** Why the last view ended, in the Mac's words. */
-    @Published private(set) var ended: String?
-
-    private let client: CompanionClient
-    private let onFailure: (Error) -> Void
-    private var viewId: String?
-    private var streaming: Task<Void, Never>?
-
-    init(client: CompanionClient, onFailure: @escaping (Error) -> Void) {
-        self.client = client
-        self.onFailure = onFailure
-    }
-
-    func load() async {
-        do { status = try await client.get("api/window-view/phone") }
-        catch { report(error) }
-    }
-
-    func start() {
-        guard streaming == nil else { return }
-        ended = nil
-        state = .starting
-        streaming = Task { [weak self] in await self?.stream() }
-    }
-
-    /** Ends the view here at once and tells the Mac, which stops capturing. */
-    func stop() {
-        guard let streaming else { return }
-        streaming.cancel()
-        self.streaming = nil
-        let id = viewId
-        clear()
-        guard let id else { return }
-        let client = client
-        Task { let _: WindowViewStatus? = try? await client.post("api/window-view/stop", StopView(viewId: id)) }
-    }
-
-    private func stream() async {
-        do {
-            // Not cancelled with the view: a start the Mac carried out must be answered, so it can be stopped below.
-            let client = client
-            let started: StartedView = try await Task { try await client.post("api/window-view/start", Empty()) }.value
-            // Left before the Mac answered: end the capture it just started.
-            guard !Task.isCancelled else {
-                Task { let _: WindowViewStatus? = try? await client.post("api/window-view/stop", StopView(viewId: started.viewId)) }
-                return
-            }
-            viewId = started.viewId
-            state = .viewing
-            var after = 0
-            while !Task.isCancelled {
-                let answer: FrameAnswer = try await client.get("api/window-view/frame?view=\(started.viewId)&after=\(after)&wait=1500")
-                try Task.checkCancellation()
-                if let frame = answer.frame, let data = Data(base64Encoded: frame.jpeg) {
-                    after = frame.seq
-                    jpeg = data
-                    frameAt = frame.capturedAt
-                }
-            }
-        } catch {
-            // stop() already cleared everything for a view the phone ended itself.
-            guard !Task.isCancelled else { return }
-            streaming = nil
-            clear()
-            report(error)
-            await load()
-        }
-    }
-
-    private func clear() {
-        viewId = nil
-        jpeg = nil
-        frameAt = nil
-        state = .idle
-    }
-
-    private func report(_ error: Error) {
-        if case CompanionFailure.refused(let message) = error { ended = message }
-        else { onFailure(error) }
     }
 }

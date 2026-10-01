@@ -21,8 +21,11 @@ export interface OwnerDeviceAudit {
   action: 'session-send' | 'session-input'
     // Issue #87: personal-task requests and decisions made from the phone.
     | 'personal-task-submit' | 'personal-task-retry' | 'filing-approve' | 'filing-retry' | 'filing-undo'
-    // Issue #91: starting and stopping a view of the shared Mac window.
-    | 'window-view-start' | 'window-view-stop';
+    // Issue #91's Mac window view, since removed: kept so earlier history still reads.
+    | 'window-view-start' | 'window-view-stop'
+    // Phone work: starting and steering Quick Sessions and Structured Runs.
+    | 'session-start' | 'session-stop' | 'session-answer' | 'session-respond'
+    | 'run-submit' | 'run-control' | 'run-attention' | 'run-feedback' | 'run-apply' | 'run-publish';
   targetId: string;
   createdAt: string;
 }

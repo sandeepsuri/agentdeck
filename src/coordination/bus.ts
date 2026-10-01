@@ -84,7 +84,8 @@ function isAgentMessage(value: unknown): value is AgentMessage {
     && optionalStrings(entry, 'blockers')
     && (entry.sourcePids === undefined || (Array.isArray(entry.sourcePids)
       && entry.sourcePids.length <= 64
-      && entry.sourcePids.every((pid) => typeof pid === 'number' && Number.isInteger(pid) && pid > 0)));
+      && entry.sourcePids.every((pid) => typeof pid === 'number' && Number.isInteger(pid) && pid > 0)))
+    && (entry.via === undefined || entry.via === 'phone');
 }
 
 export function parseBusLines(input: string): AgentMessage[] {

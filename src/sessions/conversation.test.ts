@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, Session } from '../types.js';
 import {
-  claudeProjectDirName, ConversationReader, latestPlan, locateTranscript, mergeSentConversationTurns, parseClaudeConversation, parseCodexConversation,
+  claudeProjectDirName, ConversationReader, findTranscriptImage, latestPlan, locateTranscript, mergeSentConversationTurns,
+  parseClaudeConversation, parseCodexConversation,
 } from './conversation.js';
 
 const tempDirs: string[] = [];
@@ -117,6 +118,78 @@ describe('parseCodexConversation', () => {
   });
 });
 
+const PNG = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
+const claudeImageLines = jsonl(
+  { type: 'user', uuid: 'u1', timestamp: '2026-09-27T20:00:01Z', message: { role: 'user', content: [
+    { type: 'text', text: 'Here is the bug' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } },
+  ] } },
+  { type: 'assistant', uuid: 'a1', timestamp: '2026-09-27T20:00:02Z', message: { content: [
+    { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/tmp/shots/login-failed.png' } },
+  ] } },
+  { type: 'user', uuid: 'r1', timestamp: '2026-09-27T20:00:03Z', message: { role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } }] },
+  ] } },
+  { type: 'user', uuid: 'r2', timestamp: '2026-09-27T20:00:04Z', message: { role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 'toolu_2', content: [
+      { type: 'text', text: 'screenshot taken' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: PNG } },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: PNG } },
+    ] },
+  ] } },
+  { type: 'user', uuid: 's1', isSidechain: true, timestamp: '2026-09-27T20:00:05Z', message: { role: 'user', content: [
+    { type: 'tool_result', tool_use_id: 'toolu_3', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } }] },
+  ] } },
+);
+
+describe('images the agent looked at', () => {
+  it('shows Claude tool-result images as image turns named by the file read, never the bytes or a pasted image', () => {
+    const turns = parseClaudeConversation(claudeImageLines.split('\n'));
+    expect(turns.map(({ role, text, image }) => ({ role, text, image }))).toEqual([
+      { role: 'user', text: 'Here is the bug', image: undefined },
+      { role: 'tool', text: '/tmp/shots/login-failed.png', image: undefined },
+      { role: 'image', text: 'login-failed.png', image: { id: 'img-2-0', mediaType: 'image/png' } },
+      { role: 'image', text: '', image: { id: 'img-3-0', mediaType: 'image/jpeg' } },
+    ]);
+    expect(JSON.stringify(turns)).not.toContain(PNG);
+  });
+
+  it('shows Codex view_image output and skips images pasted into a prompt', () => {
+    const timestamp = '2026-09-27T20:00:01Z';
+    const lines = jsonl(
+      { timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [
+        { type: 'input_text', text: 'look' }, { type: 'input_image', image_url: `data:image/png;base64,${PNG}` },
+      ] } },
+      { timestamp, type: 'response_item', payload: { type: 'function_call', name: 'view_image', call_id: 'c1', arguments: '{"path":"/tmp/sim.png"}' } },
+      { timestamp, type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: [{ type: 'input_image', image_url: `data:image/png;base64,${PNG}` }] } },
+    ).split('\n');
+    expect(parseCodexConversation(lines).filter((turn) => turn.role === 'image'))
+      .toEqual([{ id: 'img-2-0', role: 'image', text: 'sim.png', image: { id: 'img-2-0', mediaType: 'image/png' }, ts: timestamp }]);
+    expect(findTranscriptImage('codex', lines, 'img-2-0')?.data).toEqual(Buffer.from(PNG, 'base64'));
+    expect(findTranscriptImage('codex', lines, 'img-0-0')).toBeUndefined();
+  });
+
+  it('finds an image again by its id, and nothing for an id that is not an agent image', () => {
+    const lines = claudeImageLines.split('\n');
+    expect(findTranscriptImage('claude', lines, 'img-3-0')).toEqual({ mediaType: 'image/jpeg', data: Buffer.from(PNG, 'base64') });
+    for (const id of ['img-0-0', 'img-3-1', 'img-4-0', 'img-99-0', '../x', 'img-2']) {
+      expect(findTranscriptImage('claude', lines, id)).toBeUndefined();
+    }
+  });
+
+  it('reads an image from the session transcript', async () => {
+    const root = tempDir();
+    const project = path.join(root, claudeProjectDirName('/Users/me/Code/app'));
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'ours.jsonl'), claudeImageLines);
+    const reader = new ConversationReader({ claude: [root], codex: [] });
+    const ours = session({ agentSessionId: 'claude:ours' });
+    expect((await reader.image(ours, 'img-2-0'))?.mediaType).toBe('image/png');
+    expect(await reader.image(ours, 'img-1-0')).toBeUndefined();
+    expect(await reader.image(session({ agentSessionId: 'claude:missing', cwd: '/elsewhere' }), 'img-2-0')).toBeUndefined();
+  });
+});
+
 describe('locateTranscript', () => {
   it('finds a Claude transcript by the hook-reported id, else by the session start time in the cwd folder', async () => {
     const root = tempDir();
@@ -200,5 +273,18 @@ describe('mergeSentConversationTurns', () => {
     expect(mergeSentConversationTurns(transcript, current, [
       { ...sent[0]!, sessionId: 'another-session' },
     ]).turns).toHaveLength(1);
+  });
+
+  it('marks what the owner sent from the phone, before and after the transcript has it', () => {
+    const current = session();
+    const sent: AgentMessage[] = [{
+      ts: '2026-09-27T20:00:01.000Z', agent: `dashboard:${current.id}`, repo: current.cwd,
+      event: 'message', message: 'ship it', sessionId: current.id, via: 'phone',
+    }];
+    expect(mergeSentConversationTurns({ found: false, turns: [] }, current, sent).turns).toEqual([
+      expect.objectContaining({ text: 'ship it', via: 'phone' }),
+    ]);
+    const transcript = { found: true, turns: [{ id: 'u1', role: 'user' as const, text: 'ship it', ts: '2026-09-27T20:00:01.500Z' }] };
+    expect(mergeSentConversationTurns(transcript, current, sent).turns).toEqual([{ ...transcript.turns[0], via: 'phone' }]);
   });
 });

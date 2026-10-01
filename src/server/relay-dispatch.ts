@@ -7,13 +7,12 @@
 // - An unknown key may only pair: join, confirm, and collect, with the key the
 //   handshake proved bound as the new phone's key (never one from the body).
 // - A paired phone's key must come with that same phone's bearer credential,
-//   and may reach only /api/connection, the personal-task routes, the
-//   window view (issue #91), and its push token. Enrolling or rotating a key needs a direct connection.
+//   and may reach only /api/connection, the personal-task routes, phone work
+//   (its coding Sessions and Runs), and its push token. Enrolling or rotating a key needs a direct connection.
 import type { FastifyInstance } from 'fastify';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
 import type { RelayPeer, RelayRequest, RelayResponse } from '../relay/mac-link.js';
-import { isOwnerPersonalRoute } from './app.js';
-import { isOwnerWindowViewRoute } from './window-view-routes.js';
+import { isOwnerPersonalRoute, isOwnerWorkRoute } from './app.js';
 import { RELAY_HOST, TOKEN_HEADER } from './connection-trust.js';
 
 const PAIRING_ROUTES = new Set(['/api/owner-pairing/join', '/api/owner-pairing/phone-confirm', '/api/owner-pairing/collect']);
@@ -34,7 +33,7 @@ export function relayDispatcher(app: FastifyInstance, pairing: OwnerPairingServi
       }
       if (pathname === '/api/owner-pairing/join') body = { ...(body && typeof body === 'object' ? body : {}), publicKey: peer.phoneKey };
     } else {
-      const allowed = pathname === '/api/connection' || isOwnerPersonalRoute(method, pathname) || isOwnerWindowViewRoute(method, pathname)
+      const allowed = pathname === '/api/connection' || isOwnerPersonalRoute(method, pathname) || isOwnerWorkRoute(method, pathname)
         || (method === 'POST' && pathname === '/api/owner-pairing/push-token');
       if (!allowed) return refuse(403, 'This is not available away from home.');
       if (pathname !== '/api/connection' && (!request.token || pairing.resolve(request.token)?.id !== peer.deviceId)) {

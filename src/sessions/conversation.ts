@@ -7,6 +7,12 @@
 // by cwd and start time. Parsers are pure and skip malformed lines, like
 // usage/parse.ts; harness wrappers (<environment_context>, <command-name>,
 // system reminders, …) are not the user's words and are dropped.
+//
+// An image the agent looked at (a tool result carrying one, such as Claude
+// reading a screenshot or Codex's view_image) becomes an image turn. The turn
+// names the image by where it sits in the transcript; its bytes are read
+// back only when asked for (ConversationReader.image), so the conversation
+// stays small. Images the user pasted into a prompt are not shown again.
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -16,11 +22,27 @@ import { type PendingQuestion, pendingQuestion } from './questions.js';
 
 export interface ConversationTurn {
   id: string;
-  role: 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'tool' | 'image';
+  /** Image turns: the file the agent opened, when the transcript names it; otherwise empty. */
   text: string;
+  /** Image turns: how to fetch it (GET /api/sessions/:id/images/:id). */
+  image?: TurnImage;
   /** Tool turns: the tool's name, e.g. Bash or exec. */
   toolName?: string;
   ts: string;
+  /** User turns sent from the paired owner phone. */
+  via?: 'phone';
+}
+
+export interface TurnImage {
+  id: string;
+  mediaType: string;
+}
+
+/** An image's bytes, read back from the transcript. */
+export interface TranscriptImage {
+  mediaType: string;
+  data: Buffer;
 }
 
 export interface PlanStep {
@@ -41,6 +63,8 @@ export interface ConversationView {
     /** Set by the route: false when AgentDeck can't reach the menu (an external session with no hook holding it). */
     canAnswer?: boolean;
   };
+  /** Set by the route for the Mac: the paired owner phone has this session open. */
+  phoneFollowing?: boolean;
 }
 
 /** Keep dashboard sends visible while the CLI transcript is delayed or absent. */
@@ -49,6 +73,7 @@ export function mergeSentConversationTurns(
 ): ConversationView {
   const transcriptUsers = conversation.turns.filter((turn) => turn.role === 'user');
   const matched = new Set<string>();
+  const fromPhone = new Set<string>();
   const sent = messages.flatMap((message, index): ConversationTurn[] => {
     if (message.agent !== `dashboard:${session.id}` || message.event !== 'message'
       || message.sessionId !== session.id || !message.message?.trim()
@@ -58,18 +83,21 @@ export function mergeSentConversationTurns(
       && Date.parse(turn.ts) >= Date.parse(message.ts) - 2_000);
     if (match) {
       matched.add(match.id);
+      if (message.via === 'phone') fromPhone.add(match.id);
       return [];
     }
-    return [{ id: `dashboard-${message.ts}-${index}`, role: 'user', text, ts: message.ts }];
+    return [{ id: `dashboard-${message.ts}-${index}`, role: 'user', text, ts: message.ts, ...(message.via === 'phone' ? { via: 'phone' as const } : {}) }];
   });
-  if (!sent.length) return conversation;
-  return { ...conversation, turns: [...conversation.turns, ...sent]
+  if (!sent.length && !fromPhone.size) return conversation;
+  const turns = conversation.turns.map((turn) => (fromPhone.has(turn.id) ? { ...turn, via: 'phone' as const } : turn));
+  return { ...conversation, turns: [...turns, ...sent]
     .sort((left, right) => left.ts.localeCompare(right.ts)).slice(-MAX_TURNS) };
 }
 
 type Json = Record<string, unknown>;
 const MAX_TURNS = 500;
 const MAX_TOOL_TEXT = 400;
+const MAX_CACHED_IMAGES = 24;
 /** Clock skew allowed between AgentDeck's startedAt and the CLI's first timestamp. */
 const START_SLACK_MS = 15_000;
 
@@ -116,6 +144,83 @@ function toolSummary(input: unknown): string {
   return clip(JSON.stringify(record));
 }
 
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const IMAGE_ID = /^img-(\d+)-(\d+)$/;
+
+/** One image the agent looked at, as one transcript record carries it. */
+interface FoundImage {
+  mediaType: string;
+  base64: string;
+  /** The tool call that produced it, to name the file it opened. */
+  callId?: string;
+}
+
+function dataUrlImage(url: unknown): Omit<FoundImage, 'callId'> | undefined {
+  const match = typeof url === 'string' ? /^data:([a-z]+\/[a-z0-9.+-]+);base64,(.+)$/i.exec(url) : null;
+  return match && IMAGE_TYPES.has(match[1]!.toLowerCase()) ? { mediaType: match[1]!.toLowerCase(), base64: match[2]! } : undefined;
+}
+
+/** Claude: images inside tool results. An image part straight in a user message was pasted by the user. */
+function claudeImages(record: Json): FoundImage[] {
+  const content = obj(record.message)?.content;
+  if (record.type !== 'user' || record.isMeta === true || record.isSidechain === true || !Array.isArray(content)) return [];
+  return content.map(obj).flatMap((part) => {
+    if (part?.type !== 'tool_result' || !Array.isArray(part.content)) return [];
+    const callId = str(part.tool_use_id);
+    return part.content.map(obj).flatMap((inner) => {
+      const source = obj(inner?.source);
+      const mediaType = str(source?.media_type)?.toLowerCase();
+      const base64 = str(source?.data);
+      if (inner?.type !== 'image' || source?.type !== 'base64' || !mediaType || !IMAGE_TYPES.has(mediaType) || !base64) return [];
+      return [{ mediaType, base64, ...(callId ? { callId } : {}) }];
+    });
+  });
+}
+
+/** Codex: images in a tool call's output (view_image and the like). Images in a user message were pasted. */
+function codexImages(record: Json): FoundImage[] {
+  const payload = obj(record.payload);
+  if (record.type !== 'response_item' || !payload
+    || (payload.type !== 'function_call_output' && payload.type !== 'custom_tool_call_output') || !Array.isArray(payload.output)) return [];
+  const callId = str(payload.call_id);
+  return payload.output.map(obj).flatMap((part) => {
+    const image = part?.type === 'input_image' ? dataUrlImage(part.image_url) : undefined;
+    return image ? [{ ...image, ...(callId ? { callId } : {}) }] : [];
+  });
+}
+
+function recordImages(agent: Session['agent'], record: Json): FoundImage[] {
+  return agent === 'claude' ? claudeImages(record) : codexImages(record);
+}
+
+/** The file a tool call opened, if it names one. */
+function openedFile(input: unknown): string | undefined {
+  const record = obj(input);
+  const file = str(record?.file_path) ?? str(record?.path);
+  return file ? path.basename(file) : undefined;
+}
+
+function imageTurns(agent: Session['agent'], record: Json, line: number, files: ReadonlyMap<string, string>): ConversationTurn[] {
+  const ts = str(record.timestamp) ?? '';
+  return recordImages(agent, record).map((image, index) => ({
+    id: `img-${line}-${index}`,
+    role: 'image',
+    text: (image.callId && files.get(image.callId)) ?? '',
+    image: { id: `img-${line}-${index}`, mediaType: image.mediaType },
+    ts,
+  }));
+}
+
+/** An image turn's bytes, found again where its id says it is. */
+export function findTranscriptImage(agent: Session['agent'], lines: readonly string[], imageId: string): TranscriptImage | undefined {
+  const match = IMAGE_ID.exec(imageId);
+  if (!match) return undefined;
+  const line = lines[Number(match[1])];
+  const record = line === undefined ? undefined : parse(line);
+  const image = record ? recordImages(agent, record)[Number(match[2])] : undefined;
+  return image ? { mediaType: image.mediaType, data: Buffer.from(image.base64, 'base64') } : undefined;
+}
+
 /** Merges consecutive assistant text so one reply is one bubble. */
 function push(turns: ConversationTurn[], turn: ConversationTurn): void {
   const last = turns.at(-1);
@@ -128,6 +233,7 @@ function push(turns: ConversationTurn[], turn: ConversationTurn): void {
 
 export function parseClaudeConversation(lines: readonly string[]): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
+  const files = new Map<string, string>();
   lines.forEach((line, index) => {
     const record = parse(line);
     if (!record || record.isMeta === true || record.isSidechain === true) return;
@@ -141,11 +247,14 @@ export function parseClaudeConversation(lines: readonly string[]): ConversationT
       const text = texts.map((part) => slashCommandText(part) ?? (isHarnessText(part) ? '' : part))
         .filter(Boolean).join('\n\n').trim();
       if (text) push(turns, { id, role: 'user', text, ts });
+      for (const turn of imageTurns('claude', record, index, files)) push(turns, turn);
     } else if (record.type === 'assistant' && message && Array.isArray(message.content)) {
       message.content.map(obj).forEach((part, partIndex) => {
         if (part?.type === 'text' && str(part.text)?.trim()) {
           push(turns, { id: `${id}-${partIndex}`, role: 'assistant', text: String(part.text).trim(), ts });
         } else if (part?.type === 'tool_use') {
+          const file = openedFile(part.input);
+          if (file && str(part.id)) files.set(String(part.id), file);
           push(turns, { id: `${id}-${partIndex}`, role: 'tool', toolName: str(part.name) ?? 'tool', text: toolSummary(part.input), ts });
         }
       });
@@ -166,6 +275,7 @@ function codexText(content: unknown): string {
 
 export function parseCodexConversation(lines: readonly string[]): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
+  const files = new Map<string, string>();
   lines.forEach((line, index) => {
     const record = parse(line);
     const payload = obj(record?.payload);
@@ -180,7 +290,11 @@ export function parseCodexConversation(lines: readonly string[]): ConversationTu
       if (typeof payload.arguments === 'string') {
         try { input = JSON.parse(payload.arguments); } catch { input = payload.arguments; }
       }
+      const file = openedFile(input);
+      if (file && str(payload.call_id)) files.set(String(payload.call_id), file);
       push(turns, { id, role: 'tool', toolName: str(payload.name) ?? 'shell', text: toolSummary(input), ts });
+    } else {
+      for (const turn of imageTurns('codex', record, index, files)) push(turns, turn);
     }
   });
   return turns.slice(-MAX_TURNS);
@@ -332,18 +446,46 @@ export function locateTranscript(session: Session, roots: UsageRoots = defaultUs
 export class ConversationReader {
   private readonly paths = new Map<string, string>();
   private readonly parsed = new Map<string, { size: number; mtimeMs: number; view: ConversationView }>();
+  private readonly images = new Map<string, TranscriptImage>();
 
   constructor(private readonly roots: UsageRoots = defaultUsageRoots()) {}
 
-  async read(session: Session): Promise<ConversationView> {
+  private async transcript(session: Session): Promise<string | undefined> {
     const key = `${session.id}:${session.startedAt}`;
     let file = this.paths.get(key);
     if (file && !isExactTranscript(session, file)) file = undefined;
     if (!file) {
       file = await locateTranscript(session, this.roots);
-      if (!file) return { found: false, turns: [] };
-      this.paths.set(key, file);
+      if (file) this.paths.set(key, file);
     }
+    return file;
+  }
+
+  /** One image turn's bytes. Transcripts only grow, so a found image is kept for the next ask. */
+  async image(session: Session, imageId: string): Promise<TranscriptImage | undefined> {
+    if (!IMAGE_ID.test(imageId)) return undefined;
+    const file = await this.transcript(session);
+    if (!file) return undefined;
+    const key = `${file}#${imageId}`;
+    const cached = this.images.get(key);
+    if (cached) return cached;
+    let lines: string[];
+    try {
+      lines = (await fsp.readFile(file, 'utf8')).split('\n');
+    } catch {
+      return undefined;
+    }
+    const image = findTranscriptImage(session.agent, lines, imageId);
+    if (!image) return undefined;
+    this.images.set(key, image);
+    if (this.images.size > MAX_CACHED_IMAGES) this.images.delete(this.images.keys().next().value!);
+    return image;
+  }
+
+  async read(session: Session): Promise<ConversationView> {
+    const key = `${session.id}:${session.startedAt}`;
+    const file = await this.transcript(session);
+    if (!file) return { found: false, turns: [] };
     let stat: fs.Stats;
     try {
       stat = await fsp.stat(file);

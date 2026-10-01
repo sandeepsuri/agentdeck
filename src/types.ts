@@ -284,6 +284,8 @@ export interface AgentMessage {
   attention?: AttentionKind;
   /** Explicit, agent-reported completion percentage. Never inferred. */
   progress?: number;
+  /** Set on a dashboard send that came from the paired owner phone, so both screens can say so. */
+  via?: 'phone';
 }
 
 export interface AttentionItem {

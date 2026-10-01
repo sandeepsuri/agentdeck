@@ -25,8 +25,12 @@ import type { ProviderSetupService } from '../provider-setup/service.js';
 import type { OwnerPairingService } from '../owner-pairing/service.js';
 import { registerOwnerPairingRoutes, type PhoneAccessControl, type RelayControl } from './owner-pairing-routes.js';
 import { classify, RELAY_HOST, isAllowedOrigin, isLoopbackHostHeader, TOKEN_HEADER } from './connection-trust.js';
-import { isOwnerWindowViewRoute, registerWindowViewRoutes } from './window-view-routes.js';
-import type { WindowViewService } from '../window-view/service.js';
+import { createRuntimeReadinessSource, type RuntimeReadinessSource } from '../sessions/runtime-readiness.js';
+import { folderAccess } from '../folder-access.js';
+import type { OwnerDeviceAudit } from '../store/owner-devices.js';
+import { PhoneFollowers } from './phone-followers.js';
+import { registerPhoneWorkRoutes } from './phone-work-routes.js';
+import { SessionScreens } from './session-screen.js';
 
 // Re-exported for existing callers (ws.test.ts imports both from here); the
 // canonical implementations now live in connection-trust.ts so classify()
@@ -148,11 +152,50 @@ function isCollaboratorAllowedRoute(method: string, pathname: string): boolean {
 function isOwnerDeviceAllowedRoute(method: string, pathname: string): boolean {
   if (isRemoteAllowedRoute(method, pathname)) return true;
   if (isOwnerPersonalRoute(method, pathname)) return true;
-  // Issue #91: view the one window the owner shared on the Mac.
-  if (isOwnerWindowViewRoute(method, pathname)) return true;
+  // Phone work: start and steer coding Sessions and Runs.
+  if (isOwnerWorkRoute(method, pathname)) return true;
   // Issue #90: a phone enrolls its channel key (direct connection only; the
   // relay dispatcher never forwards this) and registers its push token.
   return method === 'POST' && (pathname === '/api/owner-pairing/relay-key' || pathname === '/api/owner-pairing/push-token');
+}
+
+const SESSION = '/api/sessions/[^/]+';
+const RUN = '/api/runs/[^/]+';
+const OWNER_WORK_GET = new RegExp(`^(?:/api/phone/(?:work|repos|runs/[^/]+|sessions/[^/]+/screen)|${SESSION}/(?:conversation|interactions|skills|images/[^/]+)|/api/runs/attention|${RUN}/(?:review|feedback)|/api/repos/diff(?:/file)?)$`);
+const OWNER_WORK_POST = new RegExp(`^(?:/api/phone/(?:sessions|runs|sessions/[^/]+/keys)|${SESSION}/(?:send|stop|conversation/answer|interactions/[^/]+/respond)|${RUN}/(?:prepare|start|attempts|reverify|pause|resume|cancel|feedback|apply|publish|attention/[^/]+/(?:approve|deny|input)))$`);
+
+/**
+ * Phone work: the routes a paired owner phone may use, directly or through
+ * the relay, to start and steer the owner's coding Sessions and Runs. Never
+ * opened to a collaborator device or the shared token, which keep their own
+ * allowlists above. Launching from the phone goes through /api/phone/* only
+ * (phone-work-routes.ts), never POST /api/sessions with its free path and
+ * environment; settings, hooks, deleting and Repository policy stay on the Mac.
+ */
+export function isOwnerWorkRoute(method: string, pathname: string): boolean {
+  if (method === 'GET') return OWNER_WORK_GET.test(pathname);
+  if (method === 'POST') return OWNER_WORK_POST.test(pathname);
+  return false;
+}
+
+/**
+ * What a phone's work request is recorded as before it takes effect. The
+ * /api/phone/* routes and the composer's /send record their own, nearer the
+ * effect; every other mutation the phone may reach is recorded here.
+ */
+function ownerWorkAudit(method: string, pathname: string): { action: OwnerDeviceAudit['action']; target: string } | undefined {
+  if (method !== 'POST' || pathname.startsWith('/api/phone/')) return undefined;
+  const session = /^\/api\/sessions\/([^/]+)\/(stop|conversation\/answer|interactions\/[^/]+\/respond)$/.exec(pathname);
+  if (session) {
+    const verb = session[2]!;
+    return { action: verb === 'stop' ? 'session-stop' : verb.startsWith('conversation') ? 'session-answer' : 'session-respond', target: decodeURIComponent(session[1]!) };
+  }
+  const run = /^\/api\/runs\/([^/]+)\/(.+)$/.exec(pathname);
+  if (!run) return undefined;
+  const verb = run[2]!;
+  const action: OwnerDeviceAudit['action'] = verb.startsWith('attention/') ? 'run-attention'
+    : verb === 'feedback' ? 'run-feedback' : verb === 'apply' ? 'run-apply' : verb === 'publish' ? 'run-publish' : 'run-control';
+  return { action, target: decodeURIComponent(run[1]!) };
 }
 
 /** The personal-task routes an owner phone may use, directly or (issue #90) through the relay. */
@@ -200,6 +243,8 @@ export interface AppContext {
   discovery?: DiscoveryPoller;
   installVsCode?: RouteContext['installVsCode'];
   publish?: RouteContext['publish'];
+  /** Reads each session's agent transcript; injectable so tests use fixture roots. */
+  conversations?: RouteContext['conversations'];
   modelCatalog?: ModelCatalog;
   /** Ticket 07: feeds GET /api/companion's runAttention field (routes.ts). Never registered separately — registerWorkRoutes(app, workEngine) in index.ts owns the actual /api/runs* routes. */
   workEngine?: WorkEngine;
@@ -227,8 +272,10 @@ export interface AppContext {
   routines?: Omit<RoutineRouteDeps, 'resolveOwner'>;
   /** Issue #85: provider CLI setup — /api/provider-setup/*. Owner-only: local by omission from both allowlists, and re-checked per route. */
   providerSetup?: ProviderSetupService;
-  /** Issue #91: one Mac window, chosen at the Mac, viewed from a paired owner phone — /api/window-view/*. On no collaborator or shared-token allowlist, and re-checked per route. */
-  windowView?: { service: WindowViewService; openSettings: () => Promise<void> };
+  /** Which agent CLIs are installed and ready, for Start work from the phone. Injectable for tests. */
+  runtimeReadiness?: RuntimeReadinessSource;
+  /** Phone work: the Terminal toggle's text feed. Injectable for tests. */
+  sessionScreens?: SessionScreens;
 }
 
 export function buildApp(ctx: AppContext): FastifyInstance {
@@ -304,6 +351,12 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     if (requiresRemoteToken && trust.kind === 'remote' && !remoteAllowed) {
       return reply.code(403).send({ error: 'this endpoint is not available on a remote connection' });
     }
+    // Phone work: record what the phone asked for before any handler acts.
+    const audited = trust.ownerDevice ? ownerWorkAudit(req.method, pathname) : undefined;
+    if (audited && trust.ownerDevice) {
+      if (!ctx.ownerPairing) return reply.code(503).send({ error: 'Owner phone audit is unavailable.' });
+      ctx.ownerPairing.audit(trust.ownerDevice.id, audited.action, audited.target);
+    }
   });
 
   app.get('/api/health', async () => ({ ok: true }));
@@ -314,7 +367,9 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     ...(ctx.pickAccessFolder ? { pickFolder: ctx.pickAccessFolder } : {}),
   });
 
+  const phoneFollowers = new PhoneFollowers();
   if (ctx.manager) registerRoutes(app, {
+    phoneFollowers,
     manager: ctx.manager,
     config: ctx.config,
     store: ctx.store,
@@ -330,7 +385,30 @@ export function buildApp(ctx: AppContext): FastifyInstance {
     collaborators: ctx.collaborators,
     ownerPairing: ctx.ownerPairing,
     saveConfig: ctx.saveConfig,
+    conversations: ctx.conversations,
   });
+
+  // Phone work: start and steer coding work from the paired owner phone.
+  if (ctx.manager) {
+    const manager = ctx.manager;
+    const screens = ctx.sessionScreens ?? new SessionScreens((sessionId) => manager.getTranscript(sessionId));
+    app.addHook('onClose', async () => screens.shutdown());
+    registerPhoneWorkRoutes(app, {
+      manager,
+      store: ctx.store,
+      workEngine: ctx.workEngine,
+      allowsPath: (target) => folderAccess(ctx.config, () => ctx.store?.listRepos() ?? []).allows(target),
+      resolveCaller: (req) => {
+        const trust = requestTrust(req);
+        if (trust.kind === 'local') return { kind: 'mac' };
+        return trust.ownerDevice ? { kind: 'phone', device: trust.ownerDevice } : undefined;
+      },
+      ...(ctx.ownerPairing ? { audit: ctx.ownerPairing.audit.bind(ctx.ownerPairing) } : {}),
+      readiness: ctx.runtimeReadiness ?? createRuntimeReadinessSource(),
+      screens,
+      followers: phoneFollowers,
+    });
+  }
 
   // Ticket 11: local-admin-only management routes plus the one
   // pre-authentication exchange route (see REMOTE_PRE_AUTH_ROUTES above).
@@ -369,18 +447,6 @@ export function buildApp(ctx: AppContext): FastifyInstance {
   if (ctx.emailTasks) registerEmailTaskRoutes(app, { ...ctx.emailTasks, resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined) });
   if (ctx.routines) registerRoutineRoutes(app, { ...ctx.routines, resolveOwner: (req) => (isLocalOwner(req) ? localOwnerActor() : undefined) });
   if (ctx.providerSetup) registerProviderSetupRoutes(app, { service: ctx.providerSetup, isOwner: isLocalOwner });
-  if (ctx.windowView) {
-    const { service } = ctx.windowView;
-    registerWindowViewRoutes(app, {
-      service,
-      openSettings: ctx.windowView.openSettings,
-      isLocalOwner,
-      ownerPhone: (req) => requestTrust(req).ownerDevice,
-      ...(ctx.ownerPairing ? { audit: ctx.ownerPairing.audit.bind(ctx.ownerPairing) } : {}),
-    });
-    // Revoking a phone ends its view at once, whichever path it arrived by.
-    ctx.ownerPairing?.onRevoke((deviceId) => service.endForDevice(deviceId));
-  }
 
   // Production: serve the built SPA from dist/ui (hand-rolled to keep the
   // dependency list minimal — no @fastify/static). Dev uses vite.

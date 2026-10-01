@@ -30,6 +30,11 @@ export function resolveSenderIdentity(trust: TrustResult): { principalId?: strin
     const principal = resolveLocalPrincipal();
     return { principalId: principal.id, displayName: principal.displayName };
   }
+  // The owner acting from their paired phone: the same Principal, named with the phone.
+  if (trust.ownerDevice) {
+    const principal = resolveLocalPrincipal();
+    return { principalId: principal.id, displayName: `${principal.displayName} (${trust.ownerDevice.label})` };
+  }
   return { displayName: 'Shared access' };
 }
 
