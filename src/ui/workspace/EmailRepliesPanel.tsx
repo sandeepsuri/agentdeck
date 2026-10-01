@@ -10,6 +10,7 @@ import {
   type EmailAccountView, type EmailMessageContext, type EmailTaskView, type ReplyDraftContent, type ReplyDraftVersionView, type ReplySendView,
 } from '../../personal-tasks/email/types.js';
 import { apiFetch } from '../apiFetch.js';
+import { SaveRoutine } from './RoutinesPanel.js';
 
 const POLL_MS = 1500;
 
@@ -235,8 +236,9 @@ function DraftEditor({ task, onSave, onCheck, onApprove }: {
   );
 }
 
-function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove }: {
+function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove, onRoutineSaved }: {
   task: EmailTaskView;
+  onRoutineSaved?: () => void;
   onRetry: () => void;
   onConfirm: (messageId: string) => Promise<void>;
   onSave: (fields: { baseVersion: number; to: string[]; cc: string[]; subject: string; body: string }) => Promise<void>;
@@ -272,6 +274,10 @@ function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove 
           <p>{task.failure}</p>
           {task.status === 'failed' && !task.confirmed && <button className="button" onClick={onRetry} type="button">Try again</button>}
         </div>
+      )}
+
+      {task.sends.some((sent) => sent.state === 'sent') && (
+        <SaveRoutine defaultName={task.title} source="email" taskId={task.id} {...(onRoutineSaved ? { onSaved: onRoutineSaved } : {})} />
       )}
 
       {task.confirmed ? (
@@ -323,7 +329,14 @@ function EmailTaskDetail({ task, onRetry, onConfirm, onSave, onCheck, onApprove 
   );
 }
 
-export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
+export function EmailRepliesPanel({ active = true, focusTaskId, refreshSignal = 0, onRoutineSaved }: {
+  active?: boolean;
+  /** A task to show, such as one a routine just started. */
+  focusTaskId?: string | undefined;
+  /** Changes whenever a task may have been started elsewhere on the page. */
+  refreshSignal?: number;
+  onRoutineSaved?: () => void;
+}) {
   const [accounts, setAccounts] = useState<EmailAccountView[] | null>(null);
   const [tasks, setTasks] = useState<EmailTaskView[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -348,7 +361,12 @@ export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
     }
   }, []);
 
-  useEffect(() => { if (active) void refresh(); }, [active, refresh]);
+  useEffect(() => { if (active) void refresh(); }, [active, refresh, refreshSignal]);
+  useEffect(() => {
+    if (!focusTaskId) return;
+    setSelectedTaskId(focusTaskId);
+    void refresh();
+  }, [focusTaskId, refresh]);
 
   const unsettled = tasks?.some((task) => task.status === 'queued' || task.status === 'running'
     || task.drafts[0]?.state === 'writing' || task.drafts[0]?.state === 'uncertain'
@@ -468,6 +486,7 @@ export function EmailRepliesPanel({ active = true }: { active?: boolean }) {
               onRetry={() => void perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/retry`)}
               onSave={(fields) => perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/draft`, fields)}
               onApprove={(approval) => perform(`/api/personal/email/tasks/${encodeURIComponent(selectedTask.id)}/send`, approval)}
+              {...(onRoutineSaved ? { onRoutineSaved } : {})}
               task={selectedTask}
             />
           )}

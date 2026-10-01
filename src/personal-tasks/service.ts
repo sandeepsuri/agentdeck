@@ -21,7 +21,7 @@ import { FILING_BROKER_MCP_TOOLS, startFilingBroker, type BrokerDocument, type F
 import { moveGrantedPdf, reconcileMove, reconcileUndo, undoGrantedPdf } from './filing-execution.js';
 import { buildFilingPlan, filingPlanDigest, type FilingSource } from './filing-plan.js';
 import {
-  assertGrantRoot, canonicalGrantRoot, fingerprintGrantedFile, GrantPathError, listGrantedPdfs, listGrantFolders, openGrantedPdf, type GrantedPdfListing,
+  assertGrantRoot, canonicalGrantRoot, fingerprintGrantedFile, GrantPathError, listGrantedPdfs, listGrantFolders, openGrantedPdf, type GrantedPdfListing, type ListingLimits,
 } from './folder-grant.js';
 import { inspectPdf, PdfTooLargeError, readGrantedPdf, readPdfFacts, type InspectLimits } from './pdf-inventory.js';
 import { extractPdfText } from './pdf-text.js';
@@ -161,8 +161,8 @@ export class PersonalTaskService {
     return this.repository.revokeGrant(id, this.at());
   }
 
-  listGrantPdfs(grantId: string): GrantedPdfListing {
-    return listGrantedPdfs(this.activeGrant(grantId).rootPath);
+  listGrantPdfs(grantId: string, limits?: ListingLimits): GrantedPdfListing {
+    return listGrantedPdfs(this.activeGrant(grantId).rootPath, limits);
   }
 
   private activeGrant(grantId: string): FolderGrant {

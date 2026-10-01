@@ -42,6 +42,7 @@ import { folderAccess } from '../folder-access.js';
 import { AgentAccess, claudeConfinementProver } from '../personal-tasks/agent-access.js';
 import { confinedClaudeProvider } from '../personal-tasks/confined-provider.js';
 import { EmailTaskService, gmailAccess } from '../personal-tasks/email/service.js';
+import { RoutineService } from '../personal-tasks/routines/service.js';
 import { keychainTokenVault } from '../personal-tasks/email/keychain.js';
 import { RELAY_KEYCHAIN_SERVICE } from '../relay/identity.js';
 import { RelayService } from '../relay/service.js';
@@ -118,6 +119,9 @@ export async function startServer(): Promise<RunningServer> {
     provider: confinedProvider,
   });
   emailTasks.recover();
+  // Issue #92: saved routines start new personal and email tasks through the
+  // services above, so each run keeps their checks and approvals.
+  const routines = new RoutineService({ repository: store.routines, personal: personalTasks, email: emailTasks });
   // Issue #85: provider CLI setup from the Mac app. Only the last readiness
   // check is persisted; it shows as unconfirmed until re-checked this launch.
   const providerSetup = new ProviderSetupService({
@@ -219,6 +223,7 @@ export async function startServer(): Promise<RunningServer> {
     usage: { queries: usageQueries, indexer: usageIndexer, news: modelNews },
     personalTasks: { service: personalTasks, pickFolder: macFolderPicker() },
     emailTasks: { service: emailTasks },
+    routines: { service: routines },
     providerSetup,
     pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
     relay,

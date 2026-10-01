@@ -132,6 +132,10 @@ _Avoid_: Email job, inbox run
 The editable reply AgentDeck writes to the owner's Gmail drafts after the match is confirmed. Every save is a durable version recorded before the one provider write and settled from what Gmail reads back, so each version shows exactly the recipients, subject, body, and attachments Gmail holds, and a lost response never produces a second draft. A reply draft is never sent by preparing or editing it.
 _Avoid_: Proposal (for the draft itself), outbox, message
 
+**Routine**:
+A PDF or email request the owner saved to run again, from a Personal task or Email reply task that worked: an inventory that finished, a filing plan the owner approved and AgentDeck carried out, or a reply the owner approved and sent. It names only the operation and the Folder grant or Email account grant it uses, plus the owner's words for an email. Each run rechecks that grant, then starts a new task with its own identity and result; a run that cannot start is recorded with the repair the owner can make, such as choosing the folder again. A routine carries no approval: every move or send still needs a Filing approval or Reply send on that run's own proposal or draft. Deleting a routine keeps every task it started.
+_Avoid_: Automation, schedule, standing approval, Profile
+
 **Relay**:
 The service a Mac dials out to so its paired owner phones can reach it away from home without Tailscale or an open port. It forwards sealed frames between one Mac's mailbox and that Mac's phones. It can see connection timing, sizes, addresses, and push tokens, but no task content, and it decides nothing about who is the owner. The Mac checks every relayed request as it would a direct one.
 _Avoid_: Tunnel, proxy, cloud sync, server (for the relay itself)
