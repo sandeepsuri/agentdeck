@@ -52,13 +52,27 @@ const codexLines = (cwd: string, timestamp: string) => jsonl(
 );
 
 describe('parseClaudeConversation', () => {
-  it('keeps what the user typed, the replies and tool calls, and drops meta, harness wrappers, thinking and tool results', () => {
+  it('keeps what the user typed (slash commands included), the replies and tool calls, and drops meta, harness wrappers, thinking and tool results', () => {
     const turns = parseClaudeConversation(claudeLines.split('\n'));
     expect(turns.map(({ role, text, toolName }) => ({ role, text, ...(toolName ? { toolName } : {}) }))).toEqual([
+      { role: 'user', text: '/clear' },
       { role: 'user', text: 'Fix the login bug' },
       { role: 'assistant', text: 'Looking now.' },
       { role: 'tool', toolName: 'Bash', text: 'npm test' },
       { role: 'assistant', text: 'Tests pass.\n\nFixed.' },
+    ]);
+  });
+
+  it('shows a slash command the user ran as they typed it, and hides the skill body it expanded to', () => {
+    const turns = parseClaudeConversation(jsonl(
+      { type: 'user', uuid: 'c1', message: { content: '<command-message>implement is running…</command-message>\n<command-name>/implement</command-name>\n<command-args>#81</command-args>' } },
+      { type: 'user', uuid: 'c2', isMeta: true, message: { content: [{ type: 'text', text: 'Base directory for this skill: …' }] } },
+      { type: 'user', uuid: 'c3', message: { content: '<command-name>/compact</command-name>\n<command-args></command-args>' } },
+      { type: 'user', uuid: 'c4', message: { content: '<local-command-stdout>Compacted</local-command-stdout>' } },
+    ).split('\n'));
+    expect(turns.map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: '/implement #81' },
+      { role: 'user', text: '/compact' },
     ]);
   });
 });
