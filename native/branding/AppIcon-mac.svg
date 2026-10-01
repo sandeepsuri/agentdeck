@@ -1,0 +1,25 @@
+<!-- AgentDeck Mac icon master: 824px rounded tile on the 1024 macOS icon grid. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a7d62"/>
+      <stop offset="1" stop-color="#22402f"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <g transform="translate(100 100) scale(0.8047)">
+  <g transform="translate(512 512) scale(1.14) translate(-512 -512)">
+    <g transform="translate(24 34)">
+      <rect x="236" y="320" width="372" height="372" rx="93" fill="#8fcaa4" transform="rotate(-12 422 506)"/>
+      <g transform="rotate(8 554 458)">
+        <rect x="368" y="272" width="372" height="372" rx="93" fill="#f6f3ea"/>
+        <path d="M452 404 L522 458 L452 512" fill="none" stroke="#3d6b53" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M560 512 H648" fill="none" stroke="#3d6b53" stroke-width="40" stroke-linecap="round"/>
+      </g>
+    </g>
+  </g>
+  </g>
+</svg>

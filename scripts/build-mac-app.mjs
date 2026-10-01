@@ -89,6 +89,7 @@ fs.chmodSync(path.join(macOS, 'AgentDeckApp'), 0o755);
 const plist = fs.readFileSync(path.join(swiftPackage, 'Info.plist'), 'utf8')
   .replace('<string>0.1.0</string>', `<string>${JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version}</string>`);
 fs.writeFileSync(path.join(contents, 'Info.plist'), plist);
+fs.copyFileSync(path.join(swiftPackage, 'AppIcon.icns'), path.join(resources, 'AppIcon.icns'));
 
 const signArgs = ['--force', '--sign', identity];
 if (release) signArgs.push('--options', 'runtime', '--timestamp');
