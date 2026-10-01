@@ -17,6 +17,7 @@ import {
 import type { SessionManager } from '../sessions/manager.js';
 import { resolveAgentExecutable } from '../sessions/executable.js';
 import { ConversationReader, mergeSentConversationTurns } from '../sessions/conversation.js';
+import { SkillCatalog } from '../sessions/skill-catalog.js';
 import {
   answerKeystrokes, answerLabels, answerMessage, type PendingQuestion, type QuestionAnswer, validateQuestionAnswers,
 } from '../sessions/questions.js';
@@ -230,6 +231,8 @@ export interface RouteContext {
   ownerPairing?: OwnerPairingService;
   /** Reads each session's agent transcript for the Conversation view. Injectable so tests use fixture roots. */
   conversations?: ConversationReader;
+  /** Skills and slash commands for the Conversation composer's "/" picker. Injectable so tests use a fixture config dir. */
+  skills?: SkillCatalog;
 }
 
 export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
@@ -839,6 +842,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   // only — tool calls carry this Mac's paths and commands, which neither a
   // collaborator grant nor the shared remote token covers.
   const conversations = ctx.conversations ?? new ConversationReader();
+  const skills = ctx.skills ?? new SkillCatalog();
   // A Claude AskUserQuestion that AgentDeck's hook is holding: the terminal
   // shows no menu while the hook waits, so the answer resolves the hook.
   const hookQuestion = (session: Session, question: PendingQuestion) => ctx.store?.listSessionInteractions(session.id)
@@ -854,6 +858,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const repoPath = session.worktreePath ?? session.repoId ?? session.cwd;
     const merged = mergeSentConversationTurns(conversation, session, await readBusTail(repoPath));
     return merged.question ? { ...merged, question: { ...merged.question, canAnswer: canAnswer(session, merged.question) } } : merged;
+  });
+
+  // The "/" picker's list. Codex has no skills to offer yet, so it gets none
+  // and the picker stays hidden; typing any slash command still sends as-is.
+  app.get('/api/sessions/:id/skills', async (req, reply) => {
+    if (requestTrust(req).kind !== 'local') return reply.code(403).send({ error: 'skills are only available on this Mac' });
+    const { id } = req.params as { id: string };
+    const session = manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: 'no such session' });
+    return { skills: session.agent === 'claude' ? skills.list(session.worktreePath ?? session.cwd) : [] };
   });
 
   // Answers the question the agent has open, from the Conversation view.

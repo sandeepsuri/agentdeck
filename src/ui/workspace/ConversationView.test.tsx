@@ -179,4 +179,69 @@ describe('ConversationView', () => {
     await mount({ session: session({ status: 'exited' }) });
     expect(container!.querySelector('textarea')!.disabled).toBe(true);
   });
+
+  it('opens a skill picker on "/", filters it as you type, and fills in the picked skill before sending', async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === 'POST') { posts.push(JSON.parse(String(init.body))); return json({ delivered: 'typed' }); }
+      if (url.endsWith('/skills')) return json({ skills: [
+        { name: 'grill-me', description: 'Interview me about a plan', source: 'user', kind: 'skill' },
+        { name: 'implement', description: 'Build a ticket end to end', source: 'project', kind: 'skill' },
+        { name: 'to-tickets', description: 'Split work so each piece can implement one slice', source: 'user', kind: 'skill' },
+      ] });
+      return json({ found: true, turns: [] });
+    }));
+    await mount({ session: session({ agent: 'claude' }) });
+    const textarea = container!.querySelector('textarea')!;
+    const type = (value: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, value);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const press = (key: string) => act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    });
+    const options = () => [...container!.querySelectorAll('.slash-menu [role="option"] strong')].map((option) => option.textContent);
+
+    await type('/');
+    await flush();
+    expect(options()).toEqual(['/grill-me', '/implement', '/to-tickets']);
+
+    await type('/imp');
+    expect(options()).toEqual(['/implement', '/to-tickets']);
+    expect(textarea.getAttribute('aria-activedescendant')).toBe(container!.querySelector('[role="option"][aria-selected="true"]')!.id);
+
+    await press('Enter');
+    expect(textarea.value).toBe('/implement ');
+    expect(container!.querySelector('.slash-menu')).toBeNull();
+    expect(posts).toEqual([]);
+
+    await type('/implement #81');
+    await press('Enter');
+    await flush();
+    expect(posts).toEqual([{ text: '/implement #81' }]);
+
+    await type('/grill-me');
+    await press('Enter');
+    await flush();
+    expect(posts).toEqual([{ text: '/implement #81' }, { text: '/grill-me' }]);
+
+    await type('/zzz');
+    expect(container!.querySelector('.slash-menu-empty')?.textContent).toContain('sends it as typed');
+    await press('Escape');
+    expect(container!.querySelector('.slash-menu')).toBeNull();
+  });
+
+  it('keeps the skill picker out of Codex sessions', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => json({ found: true, turns: [] }));
+    vi.stubGlobal('fetch', fetch);
+    await mount({ session: session({ agent: 'codex' }) });
+    const textarea = container!.querySelector('textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, '/');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container!.querySelector('.slash-menu')).toBeNull();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/skills'))).toBe(false);
+  });
 });
