@@ -18,6 +18,8 @@ import type { RelayLinkInfo } from '../relay/protocol.js';
 import { startRelay, type RunningRelay } from '../relay/server.js';
 import { RelayService } from '../relay/service.js';
 import { Store } from '../store/index.js';
+import { WindowViewService } from '../window-view/service.js';
+import { EDITOR, fakeCaptureDriver, type FakeCaptureDriver } from '../test-fixtures/fake-capture.js';
 import { memoryVault } from '../test-fixtures/fake-mailbox.js';
 import { scriptedFilingProvider, type BrokerCall } from '../test-fixtures/filing-agent.js';
 import { buildApp } from './app.js';
@@ -39,6 +41,8 @@ let relayService: RelayService;
 let relay: RunningRelay;
 let app: FastifyInstance;
 let saved: string | undefined;
+let capture: FakeCaptureDriver;
+let windowView: WindowViewService;
 const vault = memoryVault();
 const clients: PhoneRelayClient[] = [];
 
@@ -59,6 +63,8 @@ async function boot(options: { tailnet?: boolean } = {}): Promise<void> {
     vault, url: relay.url, save: (url) => { saved = url; }, lookupPhone: (key) => pairing.byPublicKey(key), retryMs: 20,
   });
   pairing.onRevoke((id) => relayService.dropDevice(id));
+  capture = fakeCaptureDriver();
+  windowView = new WindowViewService({ driver: capture });
   app = buildApp({
     config: defaultConfig(),
     manager: {} as RouteContext['manager'],
@@ -67,6 +73,7 @@ async function boot(options: { tailnet?: boolean } = {}): Promise<void> {
     store,
     personalTasks: { service, pickFolder: async () => folder },
     relay: relayService,
+    windowView: { service: windowView, openSettings: async () => undefined },
   });
   relayService.attach(relayDispatcher(app, pairing));
   await relayService.start();
@@ -76,6 +83,7 @@ async function boot(options: { tailnet?: boolean } = {}): Promise<void> {
 async function shutdown(): Promise<void> {
   for (const client of clients.splice(0)) client.close();
   relayService.stop();
+  windowView.shutdown();
   await service.whenIdle();
   await app.close();
   store.close();
@@ -258,5 +266,30 @@ describe('an owner phone away from home (issue #90)', () => {
     expect(saved).toBe(relay.url);
     await until(() => relayService.status().state === 'connected');
     expect((await app.inject({ method: 'GET', url: '/api/owner-pairing/relay', headers: LOCAL })).json()).toMatchObject({ state: 'connected', url: relay.url });
+  });
+
+  it('shows the shared Mac window through the relay, sealed end to end, and stops it on revoke (issue #91)', async () => {
+    const frames = recordFrames();
+    expect((await app.inject({ method: 'POST', url: '/api/window-view/select', headers: LOCAL, payload: { windowId: EDITOR.id } })).statusCode).toBe(200);
+    const { credential, deviceId, link, key } = await pairThroughRelay();
+    const client = await phone(link, key);
+    const call = (method: string, url: string, body?: unknown) => client.request(method, url, { token: credential, ...(body === undefined ? {} : { body }) });
+
+    expect((await call('GET', '/api/window-view/phone')).body).toMatchObject({ window: { app: 'TextEdit', title: 'Notes.txt' } });
+    const { viewId } = (await call('POST', '/api/window-view/start')).body as { viewId: string };
+    const pixels = Buffer.from('secret-window-pixels');
+    const waiting = call('GET', `/api/window-view/frame?view=${viewId}&after=0&wait=1500`);
+    capture.captures[0]!.events.onFrame({ jpeg: pixels, width: 640, height: 400 });
+    expect((await waiting).body).toMatchObject({ frame: { seq: 1, jpeg: pixels.toString('base64') } });
+
+    // Only the Mac and the phone saw the window: the relay carried sealed frames.
+    const seen = frames.join('\n');
+    for (const secret of ['Notes.txt', 'TextEdit', pixels.toString('base64'), 'secret-window-pixels']) expect(seen).not.toContain(secret);
+    // Choosing the window stays at the Mac.
+    expect((await call('GET', '/api/window-view/windows')).status).toBe(403);
+
+    expect((await app.inject({ method: 'POST', url: `/api/owner-devices/${deviceId}/revoke`, headers: LOCAL })).statusCode).toBe(200);
+    expect(capture.captures[0]!.stopped).toBe(true);
+    await expect(call('GET', `/api/window-view/frame?view=${viewId}&after=1&wait=0`)).rejects.toBeInstanceOf(RelayUnavailable);
   });
 });

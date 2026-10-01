@@ -160,4 +160,66 @@ final class CompanionTests: XCTestCase {
         XCTAssertNotEqual(StubMac.requests.last.flatMap { String(data: $0.httpBody ?? Data(), encoding: .utf8) }?.contains(keys[0]), true)
         XCTAssertFalse(revoked)
     }
+
+    // MARK: Issue #91: the shared Mac window
+
+    private static let sharedWindow = #"{"window":{"app":"TextEdit","title":"Notes.txt"},"viewing":null,"ended":null}"#
+
+    @MainActor private func eventually(_ check: () -> Bool) async throws {
+        for _ in 0..<200 where !check() { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(check())
+    }
+
+    @MainActor func testViewsTheSharedWindowAndEndsTheCaptureWhenLeaving() async throws {
+        let jpeg = Data("jpeg-bytes".utf8).base64EncodedString()
+        StubMac.handler = { request in
+            switch request.url!.path {
+            case "/api/window-view/phone": return (200, Self.sharedWindow)
+            case "/api/window-view/start": return (200, #"{"viewId":"view-1","startedAt":"2026-09-30T10:00:00.000Z"}"#)
+            case "/api/window-view/frame":
+                return request.url!.query == "view=view-1&after=0&wait=1500"
+                    ? (200, #"{"frame":{"seq":1,"width":4,"height":3,"capturedAt":"2026-09-30T10:00:01.000Z","jpeg":"\#(jpeg)"}}"#)
+                    : (200, #"{"frame":null}"#)
+            case "/api/window-view/stop": return (200, Self.sharedWindow)
+            default: return (404, #"{"error":"unexpected"}"#)
+            }
+        }
+        let model = CompanionModel(client: client) {}
+        let window = model.window
+        await window.load()
+        XCTAssertEqual(window.status?.window?.label, "TextEdit — Notes.txt")
+
+        window.start()
+        try await eventually { window.jpeg == Data("jpeg-bytes".utf8) }
+        XCTAssertEqual(window.state, .viewing)
+
+        // Leaving the view (the tab, or the app going to the background) ends it on the Mac too.
+        model.stop()
+        XCTAssertNil(window.jpeg)
+        XCTAssertEqual(window.state, .idle)
+        try await eventually {
+            StubMac.requests.contains { $0.url?.path == "/api/window-view/stop" && $0.httpBody == Data(#"{"viewId":"view-1"}"#.utf8) }
+        }
+    }
+
+    @MainActor func testSaysWhyTheMacEndedTheViewAndKeepsNoFrame() async throws {
+        StubMac.handler = { request in
+            switch request.url!.path {
+            case "/api/window-view/phone": return (200, Self.sharedWindow)
+            case "/api/window-view/start": return (200, #"{"viewId":"view-1","startedAt":"2026-09-30T10:00:00.000Z"}"#)
+            case "/api/window-view/frame": return (409, #"{"error":"Screen Recording permission for AgentDeck was turned off on the Mac.","code":"not-viewing"}"#)
+            default: return (404, #"{"error":"unexpected"}"#)
+            }
+        }
+        var revoked = false
+        let model = CompanionModel(client: client) { revoked = true }
+        let window = model.window
+        window.start()
+        try await eventually { window.ended != nil }
+        XCTAssertEqual(window.ended, "Screen Recording permission for AgentDeck was turned off on the Mac.")
+        XCTAssertEqual(window.state, .idle)
+        XCTAssertNil(window.jpeg)
+        XCTAssertEqual(model.link, .connecting)
+        XCTAssertFalse(revoked)
+    }
 }

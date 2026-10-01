@@ -19,6 +19,8 @@ import { attachWs, closeWs } from './ws.js';
 import { deriveAttentionItems, deriveCompanionAgents, deriveRunAttentionItems } from '../attention.js';
 import { publicSession } from './security.js';
 import { launchNativeCompanion, type RunningCompanion } from '../native/companion.js';
+import { nativeCaptureDriver } from '../native/window-capture.js';
+import { WindowViewService } from '../window-view/service.js';
 import { WakeLock } from './wake-lock.js';
 import { configureRemoteAccess, listenOnTailnet } from './remote-access.js';
 import { coordinateManagedWakeLock } from './managed-wake-lock.js';
@@ -201,6 +203,11 @@ export async function startServer(): Promise<RunningServer> {
     getPricing: () => ({ ...DEFAULT_PRICING, ...config.usagePricing }),
     status: () => ({ indexedAt: usageIndexer.indexedAt, indexing: usageIndexer.indexing }),
   });
+  // Issue #91: one Mac window, chosen at the Mac, viewed from a paired owner
+  // phone. The capture helper exits with the service (its stdin closes), so
+  // a restart never leaves a capture or its indicator behind.
+  const captureDriver = nativeCaptureDriver();
+  const windowView = new WindowViewService({ driver: captureDriver });
   const app = buildApp({
     config, manager, store, terminals, coordination, vscode, discovery, modelCatalog, workEngine,
     remoteHosts: remoteAccess.hosts, collaborators, ownerPairing,
@@ -220,6 +227,7 @@ export async function startServer(): Promise<RunningServer> {
     providerSetup,
     pickAccessFolder: macFolderPicker('Choose a folder AgentDeck may use for your projects'),
     relay,
+    windowView: { service: windowView, openSettings: () => captureDriver.openSettings() },
   });
   relay.attach(relayDispatcher(app, ownerPairing));
   const access = folderAccess(config, () => store.listRepos());
@@ -262,6 +270,7 @@ export async function startServer(): Promise<RunningServer> {
     discovery.stop(); coordination.stop();
     usageIndexer.stop(); modelNews.stop();
     companion?.close();
+    windowView.shutdown();
     relay.stop();
     providerSetup.shutdown();
     releaseWakeLock();

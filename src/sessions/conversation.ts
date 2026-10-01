@@ -92,6 +92,14 @@ function isHarnessText(text: string): boolean {
   return /^<[a-z_-]+>/i.test(trimmed) || trimmed.startsWith('Caveat: The messages below were generated');
 }
 
+/** A slash command the user ran is recorded as `<command-name>/x</command-name><command-args>…`; turn it back into what they typed. */
+function slashCommandText(text: string): string | undefined {
+  const name = /<command-name>\s*\/?([^<\s]+)\s*<\/command-name>/.exec(text)?.[1];
+  if (!name) return undefined;
+  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim();
+  return args ? `/${name} ${args}` : `/${name}`;
+}
+
 function clip(text: string, max = MAX_TOOL_TEXT): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
@@ -130,7 +138,8 @@ export function parseClaudeConversation(lines: readonly string[]): ConversationT
       const content = message.content;
       const texts = typeof content === 'string' ? [content]
         : Array.isArray(content) ? content.map(obj).filter((part) => part?.type === 'text').map((part) => str(part!.text) ?? '') : [];
-      const text = texts.filter((part) => part && !isHarnessText(part)).join('\n\n').trim();
+      const text = texts.map((part) => slashCommandText(part) ?? (isHarnessText(part) ? '' : part))
+        .filter(Boolean).join('\n\n').trim();
       if (text) push(turns, { id, role: 'user', text, ts });
     } else if (record.type === 'assistant' && message && Array.isArray(message.content)) {
       message.content.map(obj).forEach((part, partIndex) => {
